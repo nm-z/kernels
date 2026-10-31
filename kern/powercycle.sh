@@ -5,7 +5,13 @@
 # WoL on archy: Wake-on: g + BIOS token enabled (skill wake-device); the broadcast goes out engi's wired NIC.
 # Stop first: holders, flashcore, flashd (serve.sh stop), and tell whoever else uses the box (codex workers, the llama-server
 # services on dies 6/7): everything on archy ends.
-MAC=98:90:96:bb:be:75; HOST=archy; IP=192.168.1.218; BCAST=192.168.1.255
+# powercycle.sh [archy|sentry]: the host's MAC and address; the broadcast goes out engi's wired NIC either way
+HOST=${1:-archy}; BCAST=192.168.1.255
+case $HOST in
+	archy)  MAC=98:90:96:bb:be:75; IP=192.168.1.218 ;;
+	sentry) MAC=98:90:96:aa:0b:fc; IP=192.168.1.20 ;;      # Precision T7810 (BIOS A34, the F1 bypass driver on its ESP), enp0s25, Wake-on: g
+	*) echo "powercycle: unknown host $HOST (archy or sentry)"; exit 1 ;;
+esac
 
 tick() { timeout 1 tail -f /dev/null; }   # one second (ping returns at once while the host answers, so a bare ping loop does not wait)
 
