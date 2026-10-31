@@ -20,7 +20,7 @@ wol() {
 		| socat -u - UDP4-DATAGRAM:$BCAST:9,broadcast
 }
 
-[ "$(ssh $HOST hostname)" = archy ] || { echo "powercycle: $HOST is not archy, refusing"; exit 1; }
+[ "$(ssh $HOST hostname)" = $HOST ] || { echo "powercycle: $HOST does not answer to its name, refusing"; exit 1; }
 echo "powercycle: powering $HOST off"
 # Nothing may make the shutdown wait. Processes stuck in the NVIDIA driver (D state) cannot be killed, so systemd would sit on their
 # stop jobs for 90 s each, and the driver's own shutdown hook can block on the lock that is hung. Two guards run as transient units with
