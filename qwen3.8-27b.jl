@@ -173,6 +173,7 @@ end
 end
 function k_gemv_q5k!(part, W, xt, xsm, nb::Int32, rows::Int32, ::Val{P}) where {P}
     t = Int32(workitemIdx().x) - Int32(1); lane = t & Int32(63); G = (Int32(workgroupIdx().x) - Int32(1)) * Int32(4) + (t >> Int32(6))
+    G * Int32(64) < rows || return
     sl = Int32(workgroupIdx().y) - Int32(1); b0 = sl * Int32(KS ÷ 256); nbs = min(Int32(KS ÷ 256), nb - b0)
     acc = ntuple(_ -> 0.0f0, Val(P))
     o = (G * nb + b0) * Int32(11 * 1024) + lane * Int32(16)
@@ -211,6 +212,7 @@ function k_gemv_q5k!(part, W, xt, xsm, nb::Int32, rows::Int32, ::Val{P}) where {
 end
 function k_gemv_q6k!(part, W, D, xt, xsm, nb::Int32, rows::Int32, ::Val{P}) where {P}
     t = Int32(workitemIdx().x) - Int32(1); lane = t & Int32(63); G = (Int32(workgroupIdx().x) - Int32(1)) * Int32(4) + (t >> Int32(6))
+    G * Int32(64) < rows || return
     sl = Int32(workgroupIdx().y) - Int32(1); b0 = sl * Int32(KS ÷ 256); nbs = min(Int32(KS ÷ 256), nb - b0)
     acc = ntuple(_ -> 0.0f0, Val(P)); tks = ntuple(_ -> 0.0f0, Val(LA(P)))
     o = (G * nb + b0) * Int32(13 * 1024) + lane * Int32(16); od = (G * nb + b0) * Int32(64) + lane + Int32(1)
@@ -264,7 +266,7 @@ struct DMat
 end
 function repack(typ, K, rows, src::AbstractVector{UInt8})
     nb = K ÷ 256; bb = GBLK[typ][2]; nch = NCH[typ]; rb = nb * bb
-    rows % 256 == 0 || error("repack: $rows rows, not a multiple of 256")
+    rows % 64 == 0 || error("repack: $rows rows, not a multiple of 64")
     W = Vector{UInt8}(undef, rows * nb * nch * 16); D = Vector{UInt16}(undef, typ == GQ6_K ? rows * nb : 0)
     Threads.@threads for G in 0:rows÷64-1
         for l in 0:63, b in 0:nb-1
@@ -279,19 +281,34 @@ function repack(typ, K, rows, src::AbstractVector{UInt8})
 end
 function DMat(g::GGUF, name::String, r0 = 0, n = -1)
     t = g.t[name]; n < 0 && (n = nrows(t))
-    W, D = repack(t.typ, t.dims[1], n, rowview(g, t, r0, n))
-    DMat(t.typ, t.dims[1], n, ROCArray(W), ROCArray(D))
+    DMat(g, name, [(r0, n)], [(0, t.dims[1] ÷ 256)])
+end
+# rows: (first, count) ranges, taken in order; blocks: (first, count) ranges of 256-column blocks (a K slice). The
+# rows are padded with zero rows to a multiple of 64.
+function DMat(g::GGUF, name::String, rows::Vector, blocks::Vector)
+    t = g.t[name]; bb = GBLK[t.typ][2]; rb = rowbytes(t)
+    nr = sum(last, rows); nbk = sum(last, blocks); np = cld(nr, 64) * 64
+    src = zeros(UInt8, np * nbk * bb); i = 0
+    for (r0, n) in rows, r in r0:r0+n-1
+        row = rowview(g, t, r, 1)
+        for (b0, nb) in blocks
+            copyto!(src, i + 1, row, b0 * bb + 1, nb * bb); i += nb * bb
+        end
+    end
+    W, D = repack(t.typ, 256nbk, np, src)
+    DMat(t.typ, 256nbk, np, ROCArray(W), ROCArray(D))
 end
 nslices(m::DMat) = cld(m.K, KS)
 # scratch of a GEMV at P positions: partial sums, x in [k][p] order, its group sums
 struct GBuf
     part::ROCVector{Float32}; xt::ROCVector{Float32}; xsm::ROCVector{Float32}
 end
-GBuf(m::DMat, P) = GBuf(AMDGPU.zeros(Float32, nslices(m) * P * m.rows), AMDGPU.zeros(Float32, m.K * P), AMDGPU.zeros(Float32, m.K ÷ 16 * P))
+GBuf(m::DMat, P) = GBuf(nslices(m) * P * m.rows, m.K, P)
+GBuf(npart::Int, K::Int, P) = GBuf(AMDGPU.zeros(Float32, npart), AMDGPU.zeros(Float32, K * P), AMDGPU.zeros(Float32, K ÷ 16 * P))
 # y[p ldy + r] = Σ_k W[r][k] x[p ldx + k]
 function gemv!(y, gb::GBuf, m::DMat, x, P::Int; ldx = m.K, ldy = m.rows)
-    m.K % 256 == 0 || error("gemv!: K = $(m.K)")
-    nb = Int32(m.K ÷ 256); g = (m.rows ÷ 256, nslices(m))
+    (m.K % 256 == 0 && length(gb.part) >= nslices(m) * P * m.rows && length(gb.xt) >= m.K * P) || error("gemv!: K = $(m.K), scratch")
+    nb = Int32(m.K ÷ 256); g = (cld(m.rows ÷ 64, 4), nslices(m))
     @roc groupsize = 256 gridsize = cld(m.K * P, 256) k_xprep!(gb.xt, gb.xsm, x, Int32(m.K), Int32(ldx), Val(P), Val(GSZ[m.typ]))
     if m.typ == GQ5_K
         @roc groupsize = 256 maxthreads = 256 gridsize = g k_gemv_q5k!(gb.part, m.W, gb.xt, gb.xsm, nb, Int32(m.rows), Val(P))
@@ -302,6 +319,354 @@ function gemv!(y, gb::GBuf, m::DMat, x, P::Int; ldx = m.K, ldy = m.rows)
     end
     @roc groupsize = 256 gridsize = cld(m.rows * P, 256) k_gemv_sum!(y, gb.part, Int32(nslices(m)), Int32(m.rows), Int32(ldy), Int32(P))
     y
+end
+
+# ---------------------------------------------------------------------------------------------
+# The model on four dies. Die d holds DeltaNet key heads 4d .. 4d + 3 and the 12 value heads that read them
+# (h = 16j + 4d + i, j = 0..2, i = 0..3; value head h reads key head h mod 16), attention query heads 6d .. 6d + 5 and
+# KV head d, FFN rows (and down-projection columns) 4352d .., and a quarter of the vocabulary rows of the embedding
+# and the head. The residual stream x is on every die; each mixer and FFN ends in a partial sum on each die, added
+# across the dies (allreduce_add!).
+# ---------------------------------------------------------------------------------------------
+const NE, NFF, NV, NL = 5120, 17408, 248320, 64
+const DK, NKH, NVH, HD, NH, NKV, NROT = 128, 16, 48, 256, 24, 4, 64
+const EPS, THETA = 1.0f-6, 1.0e7
+const ND, PMAX, VPD = 4, 8, 62080                          # dies, positions a forward, vocabulary rows a die
+const QKVD, VHD = 2560, 12                                 # DeltaNet qkv channels and value heads a die
+const CH = 256                                             # attention keys a workgroup
+isrec(l) = (l + 1) % 4 != 0
+ridx(l) = 3 * (l ÷ 4) + l % 4                              # index among the DeltaNet layers
+aidx(l) = l ÷ 4                                            # index among the attention layers
+@inline silu(x) = x / (1.0f0 + exp(-x))
+const RED = 4                                              # wavefronts a 256-thread workgroup
+@inline function wgsum(v, red)                             # sum over a 256-thread workgroup (red: 4 shared floats)
+    s = AMDGPU.Device.wfred(+, v); t = Int32(workitemIdx().x) - Int32(1)
+    sync_workgroup()
+    t & Int32(63) == Int32(0) && @inbounds(red[(t>>6)+1] = s)
+    sync_workgroup()
+    @inbounds red[1] + red[2] + red[3] + red[4]
+end
+@inline function wgmax(v, red)
+    s = AMDGPU.Device.wfred(max, v); t = Int32(workitemIdx().x) - Int32(1)
+    sync_workgroup()
+    t & Int32(63) == Int32(0) && @inbounds(red[(t>>6)+1] = s)
+    sync_workgroup()
+    @inbounds max(max(red[1], red[2]), max(red[3], red[4]))
+end
+function k_rms!(h, x, w, n::Int32)                         # h = x / rms(x) * w, one workgroup a position
+    red = @ROCStaticLocalArray(Float32, RED, false)
+    t = Int32(workitemIdx().x) - Int32(1); o = (Int32(workgroupIdx().x) - Int32(1)) * n
+    s = 0.0f0; i = t
+    @inbounds while i < n; v = x[o+i+1]; s += v * v; i += Int32(256); end
+    r = 1.0f0 / sqrt(wgsum(s, red) / Float32(n) + EPS); i = t
+    @inbounds while i < n; h[o+i+1] = x[o+i+1] * r * w[i+1]; i += Int32(256); end
+    return
+end
+function k_add!(x, y, n::Int32)
+    i = (Int32(workgroupIdx().x) - Int32(1)) * Int32(256) + Int32(workitemIdx().x) - Int32(1)
+    i < n && @inbounds(x[i+1] += y[i+1])
+    return
+end
+function k_silu_mul!(g, u, n::Int32)
+    i = (Int32(workgroupIdx().x) - Int32(1)) * Int32(256) + Int32(workitemIdx().x) - Int32(1)
+    i < n && @inbounds(g[i+1] = silu(g[i+1]) * u[i+1])
+    return
+end
+# the embedding rows of tok[p] that this die holds (rows r0 .., repacked Q5_K), zeros for the others: y[p NE + k]
+function k_embed!(y, W, tok, r0::Int32, rows::Int32)
+    p = Int32(workgroupIdx().y) - Int32(1); b = Int32(workgroupIdx().x) - Int32(1); e = Int32(workitemIdx().x) - Int32(1)
+    r = @inbounds(tok[p+1]) - r0; v = 0.0f0
+    if r >= Int32(0) && r < rows
+        G = r >> Int32(6); lane = r & Int32(63); base = (G * Int32(20) + b) * Int32(11 * 1024) + Int32(16) * lane
+        byte(j) = @inbounds W[base+(j>>Int32(4))*Int32(1024)+(j&Int32(15))+Int32(1)]
+        d = f16(UInt16(byte(Int32(0))) | UInt16(byte(Int32(1))) << 8); dmin = f16(UInt16(byte(Int32(2))) | UInt16(byte(Int32(3))) << 8)
+        s = e >> Int32(5); l = e & Int32(31)
+        sc, mn = if s < Int32(4)
+            byte(Int32(4) + s) & 0x3f, byte(Int32(8) + s) & 0x3f
+        else
+            (byte(Int32(8) + s) & 0x0f) | (byte(s) >> 6) << 4, (byte(Int32(8) + s) >> 4) | (byte(Int32(4) + s) >> 6) << 4
+        end
+        qs = byte(Int32(48) + Int32(32) * (s >> Int32(1)) + l); qh = byte(Int32(16) + l)
+        q = ((s & Int32(1)) == Int32(0) ? qs & 0x0f : qs >> 4) | ((qh >> s) & 0x01) << 4
+        v = d * Float32(sc) * Float32(q) - dmin * Float32(mn)
+    end
+    @inbounds y[p*Int32(NE)+Int32(256)*b+e+Int32(1)] = v
+    return
+end
+# DeltaNet conv (kernel 4) and silu over P positions, one thread a channel; ring holds the previous 3 inputs
+function k_dnconv!(u, qkv, ring, cw, P::Int32, ldq::Int32)
+    c = (Int32(workgroupIdx().x) - Int32(1)) * Int32(256) + Int32(workitemIdx().x) - Int32(1)
+    c < Int32(QKVD) || return
+    @inbounds begin
+        r1 = ring[3c+1]; r2 = ring[3c+2]; r3 = ring[3c+3]
+        w1 = cw[4c+1]; w2 = cw[4c+2]; w3 = cw[4c+3]; w4 = cw[4c+4]
+        for p in Int32(0):P-Int32(1)
+            x = qkv[p*ldq+c+Int32(1)]
+            u[p*Int32(QKVD)+c+Int32(1)] = silu(w1 * r1 + w2 * r2 + w3 * r3 + w4 * x)
+            r1, r2, r3 = r2, r3, x
+        end
+        ring[3c+1] = r1; ring[3c+2] = r2; ring[3c+3] = r3
+    end
+    return
+end
+# the gated delta rule over P positions, one workgroup a local value head: thread t holds row i = t ÷ 2 of the head's
+# 128 x 128 state, columns 64 (t mod 2) .. + 63; out = rmsnorm(S q / sqrt(128)) * ssm_norm * silu(z)
+function k_dnrec!(on, S, u, zb, al, be, dtb, ssa, sn, P::Int32)
+    qs = @ROCStaticLocalArray(Float32, DK, false); ks = @ROCStaticLocalArray(Float32, DK, false)
+    red = @ROCStaticLocalArray(Float32, RED, false)
+    lv = Int32(workgroupIdx().x) - Int32(1); kh = lv & Int32(3); t = Int32(workitemIdx().x) - Int32(1)
+    i = t >> Int32(1); jh = t & Int32(1); so = (lv * Int32(DK) + i) * Int32(DK) + Int32(64) * jh
+    s = ntuple(j -> @inbounds(S[so+j]), Val(64))
+    isc = 1.0f0 / sqrt(Float32(DK))
+    for p in Int32(0):P-Int32(1)
+        ub = p * Int32(QKVD)
+        qv = t < Int32(DK) ? @inbounds(u[ub+Int32(DK)*kh+t+Int32(1)]) : 0.0f0
+        kv = t < Int32(DK) ? @inbounds(u[ub+Int32(512)+Int32(DK)*kh+t+Int32(1)]) : 0.0f0
+        nq = sqrt(wgsum(qv * qv, red)); nk = sqrt(wgsum(kv * kv, red))
+        if t < Int32(DK)
+            @inbounds qs[t+1] = qv / max(nq, EPS); @inbounds ks[t+1] = kv / max(nk, EPS)
+        end
+        sync_workgroup()
+        x = @inbounds(al[p*Int32(64)+lv+Int32(1)]) + @inbounds(dtb[lv+1]); sp = x > 20.0f0 ? x : log1p(exp(x))
+        a = exp(@inbounds(ssa[lv+1]) * sp); bt = 1.0f0 / (1.0f0 + exp(-@inbounds(be[p*Int32(64)+lv+Int32(1)])))
+        s = let s = s; ntuple(j -> s[j] * a, Val(64)) end
+        e = 0.0f0
+        for j in 1:64; e = fma(s[j], @inbounds(ks[Int32(64)*jh+Int32(j)]), e); end
+        e += AMDGPU.Device.shfl_xor(e, 1)
+        e = bt * (@inbounds(u[ub+Int32(1024)+Int32(DK)*lv+i+Int32(1)]) - e)
+        s = let s = s, e = e; ntuple(j -> fma(e, @inbounds(ks[Int32(64)*jh+Int32(j)]), s[j]), Val(64)) end
+        o = 0.0f0
+        for j in 1:64; o = fma(s[j], @inbounds(qs[Int32(64)*jh+Int32(j)]), o); end
+        o = (o + AMDGPU.Device.shfl_xor(o, 1)) * isc
+        r = 1.0f0 / sqrt(wgsum(jh == Int32(0) ? o * o : 0.0f0, red) / Float32(DK) + EPS)
+        if jh == Int32(0)
+            z = @inbounds zb[p*Int32(DK*VHD)+Int32(DK)*lv+i+Int32(1)]
+            @inbounds on[p*Int32(DK*VHD)+Int32(DK)*lv+i+Int32(1)] = o * r * sn[i+1] * silu(z)
+        end
+        sync_workgroup()
+    end
+    for j in 1:64; @inbounds S[so+j] = s[j]; end
+    return
+end
+# attention input: rmsnorm and neox rope (first 64 dims) of the 6 query heads and the KV head at P positions; the
+# rotated key and the value go into the f16 cache at their positions (koff: this layer's cache)
+function k_attn_prep!(qh, gh, kc, vc, qg, kb, vb, qn, kn, pos0::Int32, koff::Int32)
+    L = @ROCStaticLocalArray(Float32, HD, false); red = @ROCStaticLocalArray(Float32, RED, false)
+    hx = Int32(workgroupIdx().x) - Int32(1); p = Int32(workgroupIdx().y) - Int32(1); t = Int32(workitemIdx().x) - Int32(1)
+    val = hx < Int32(6) ? @inbounds(qg[p*Int32(3072)+Int32(512)*hx+t+Int32(1)]) : @inbounds(kb[p*Int32(HD)+t+Int32(1)])
+    w = hx < Int32(6) ? @inbounds(qn[t+1]) : @inbounds(kn[t+1])
+    v = val * (1.0f0 / sqrt(wgsum(val * val, red) / Float32(HD) + EPS)) * w
+    @inbounds L[t+1] = v
+    sync_workgroup()
+    if t < Int32(NROT)
+        ii = t & Int32(31); th = Float64(pos0 + p) * THETA^(-2.0 * Float64(ii) / NROT); c = Float32(cos(th)); sn = Float32(sin(th))
+        a = @inbounds L[ii+1]; b = @inbounds L[ii+Int32(33)]
+        v = t < Int32(32) ? a * c - b * sn : b * c + a * sn
+    end
+    if hx < Int32(6)
+        @inbounds qh[p*Int32(1536)+Int32(HD)*hx+t+Int32(1)] = v
+        @inbounds gh[p*Int32(1536)+Int32(HD)*hx+t+Int32(1)] = qg[p*Int32(3072)+Int32(512)*hx+Int32(HD)+t+Int32(1)]
+    else
+        @inbounds kc[koff+(pos0+p)*Int32(HD)+t+Int32(1)] = Float16(v)
+        @inbounds vc[koff+(pos0+p)*Int32(HD)+t+Int32(1)] = Float16(vb[p*Int32(HD)+t+Int32(1)])
+    end
+    return
+end
+# one (query head, position) over CH keys: part = (max, sum, Σ e^(s - max) v)
+function k_attn!(part, qh, kc, vc, koff::Int32, pos0::Int32, nch::Int32)
+    q = @ROCStaticLocalArray(Float32, HD, false); ps = @ROCStaticLocalArray(Float32, CH, false)
+    red = @ROCStaticLocalArray(Float32, RED, false)
+    x = Int32(workgroupIdx().x) - Int32(1); hx = x % Int32(6); p = x ÷ Int32(6); c = Int32(workgroupIdx().y) - Int32(1)
+    t = Int32(workitemIdx().x) - Int32(1)
+    @inbounds q[t+1] = qh[p*Int32(1536)+Int32(HD)*hx+t+Int32(1)]
+    sync_workgroup()
+    k0 = c * Int32(CH); nk = pos0 + p + Int32(1)               # keys 0 .. pos0 + p
+    kk = k0 + t; sc = -Inf32
+    if kk < nk
+        s = 0.0f0; kb = koff + kk * Int32(HD)
+        for d in Int32(1):Int32(HD); s = fma(q[d], Float32(@inbounds kc[kb+d]), s); end
+        sc = s * (1.0f0 / sqrt(Float32(HD)))
+    end
+    m = wgmax(sc, red)
+    e = kk < nk ? exp(sc - m) : 0.0f0
+    l = wgsum(e, red)
+    @inbounds ps[t+1] = e
+    sync_workgroup()
+    acc = 0.0f0
+    for j in Int32(0):Int32(CH - 1)
+        k0 + j < nk || break
+        acc = fma(@inbounds(ps[j+1]), Float32(@inbounds vc[koff+(k0+j)*Int32(HD)+t+Int32(1)]), acc)
+    end
+    o = (x * nch + c) * Int32(HD + 2)
+    if t == Int32(0)
+        @inbounds part[o+1] = m; @inbounds part[o+2] = l
+    end
+    @inbounds part[o+Int32(2)+t+Int32(1)] = acc
+    return
+end
+function k_attn_comb!(ao, part, gh, nch::Int32)
+    x = Int32(workgroupIdx().x) - Int32(1); hx = x % Int32(6); p = x ÷ Int32(6); t = Int32(workitemIdx().x) - Int32(1)
+    M = -Inf32
+    for c in Int32(0):nch-Int32(1); M = max(M, @inbounds part[(x*nch+c)*Int32(HD+2)+1]); end
+    L = 0.0f0; acc = 0.0f0
+    for c in Int32(0):nch-Int32(1)
+        o = (x * nch + c) * Int32(HD + 2); m = @inbounds part[o+1]
+        if m > -Inf32
+            f = exp(m - M); L += @inbounds(part[o+2]) * f; acc += @inbounds(part[o+Int32(3)+t]) * f
+        end
+    end
+    g = @inbounds gh[p*Int32(1536)+Int32(HD)*hx+t+Int32(1)]
+    @inbounds ao[p*Int32(1536)+Int32(HD)*hx+t+Int32(1)] = acc / L / (1.0f0 + exp(-g))
+    return
+end
+
+# ---- weights and buffers of a die ----
+struct DLayer
+    rec::Bool
+    an::ROCVector{Float32}; pn::ROCVector{Float32}
+    gate::DMat; up::DMat; down::DMat
+    m1::DMat; m2::DMat; m3::DMat; m4::Union{DMat,Nothing}  # qkv z alpha beta | q k v -
+    out::DMat
+    w1::ROCVector{Float32}; w2::ROCVector{Float32}         # conv, dt bias | q norm, k norm
+    w3::ROCVector{Float32}; w4::ROCVector{Float32}         # ssm_a, ssm_norm | -
+end
+f32(g, name) = (t = g.t[name]; copy(reinterpret(Float32, view(g.map, t.off+1:t.off+4prod(t.dims)))))
+const NOV = Float32[]
+function load_layer(g::GGUF, l, d)
+    p = "blk.$l."; all20 = [(0, 20)]
+    gate = DMat(g, p * "ffn_gate.weight", [(4352d, 4352)], all20); up = DMat(g, p * "ffn_up.weight", [(4352d, 4352)], all20)
+    down = DMat(g, p * "ffn_down.weight", [(0, NE)], [(17d, 17)])
+    an = ROCArray(f32(g, p * "attn_norm.weight")); pn = ROCArray(f32(g, p * "post_attention_norm.weight"))
+    if isrec(l)
+        vh = [16j + 4d for j in 0:2]                       # the first value head of each 4-head run
+        heads = [16j + 4d + i for j in 0:2 for i in 0:3]
+        qkv = DMat(g, p * "attn_qkv.weight", [(512d, 512); (2048 + 512d, 512); [(4096 + 128h, 512) for h in vh]], all20)
+        z = DMat(g, p * "attn_gate.weight", [(128h, 512) for h in vh], all20)
+        al = DMat(g, p * "ssm_alpha.weight", [(h, 4) for h in vh], all20); be = DMat(g, p * "ssm_beta.weight", [(h, 4) for h in vh], all20)
+        out = DMat(g, p * "ssm_out.weight", [(0, NE)], [(8j + 2d, 2) for j in 0:2])
+        chans = [512d:512d+511; 2048+512d:2048+512d+511; [4096+128h:4096+128h+511 for h in vh]...]
+        cw = f32(g, p * "ssm_conv1d.weight"); cwd = [cw[4c+k] for c in chans for k in 1:4]
+        dtb = f32(g, p * "ssm_dt.bias")[heads .+ 1]; ssa = f32(g, p * "ssm_a")[heads .+ 1]
+        return DLayer(true, an, pn, gate, up, down, qkv, z, al, be, out, ROCArray(cwd), ROCArray(dtb), ROCArray(ssa), ROCArray(f32(g, p * "ssm_norm.weight")))
+    end
+    q = DMat(g, p * "attn_q.weight", [(3072d, 3072)], all20)
+    k = DMat(g, p * "attn_k.weight", [(256d, 256)], all20); v = DMat(g, p * "attn_v.weight", [(256d, 256)], all20)
+    out = DMat(g, p * "attn_output.weight", [(0, NE)], [(6d, 6)])
+    DLayer(false, an, pn, gate, up, down, q, k, v, nothing, out, ROCArray(f32(g, p * "attn_q_norm.weight")), ROCArray(f32(g, p * "attn_k_norm.weight")), ROCArray(NOV), ROCArray(NOV))
+end
+struct Die
+    dev::HIPDevice; d::Int
+    L::Vector{DLayer}; emb::DMat; head::DMat; onrm::ROCVector{Float32}
+    gb::GBuf; tok::ROCVector{Int32}
+    x::ROCVector{Float32}; h::ROCVector{Float32}; y::ROCVector{Float32}; tb::ROCVector{Float32}
+    b1::ROCVector{Float32}; b2::ROCVector{Float32}; b3::ROCVector{Float32}; b4::ROCVector{Float32}
+    u::ROCVector{Float32}; o::ROCVector{Float32}; qh::ROCVector{Float32}; gh::ROCVector{Float32}
+    ap::ROCVector{Float32}; logits::ROCVector{Float32}
+end
+# a request's state on a die: DeltaNet states and conv rings, the attention cache (f16) up to maxctx
+struct DState
+    S::ROCVector{Float32}; ring::ROCVector{Float32}; kc::ROCVector{Float16}; vc::ROCVector{Float16}; maxctx::Int
+end
+DState(maxctx) = DState(AMDGPU.zeros(Float32, 48 * VHD * DK * DK), AMDGPU.zeros(Float32, 48 * QKVD * 3),
+    AMDGPU.zeros(Float16, 16 * maxctx * HD), AMDGPU.zeros(Float16, 16 * maxctx * HD), maxctx)
+function load_die(g::GGUF, dev, d; maxctx = 4096)
+    AMDGPU.device!(dev)
+    L = [load_layer(g, l, d) for l in 0:NL-1]
+    emb = DMat(g, "token_embd.weight", VPD * d, VPD); head = DMat(g, "output.weight", VPD * d, VPD)
+    z(n) = AMDGPU.zeros(Float32, n)
+    Die(dev, d, L, emb, head, ROCArray(f32(g, "output_norm.weight")), GBuf(VPD * 10 * PMAX, NE, PMAX), AMDGPU.zeros(Int32, PMAX),
+        z(NE * PMAX), z(NE * PMAX), z(NE * PMAX), z(NE * PMAX), z(4352 * PMAX), z(4352 * PMAX), z(256 * PMAX), z(64 * PMAX),
+        z(QKVD * PMAX), z(1536 * PMAX), z(1536 * PMAX), z(1536 * PMAX), z(6 * PMAX * cld(maxctx, CH) * (HD + 2)), z(VPD * PMAX))
+end
+
+# ---- the forward: P tokens at positions pos0 .. pos0 + P - 1 ----
+struct Engine
+    dies::Vector{Die}
+end
+# x on every die += the sum over dies of y (the first n floats); through the host for now
+function allreduce_add!(E::Engine, n; set = false)
+    s = zeros(Float32, n); hb = Vector{Float32}(undef, n)
+    for D in E.dies
+        AMDGPU.device!(D.dev); copyto!(hb, 1, D.y, 1, n); s .+= hb
+    end
+    for D in E.dies
+        AMDGPU.device!(D.dev); copyto!(D.tb, 1, s, 1, n)
+        set && copyto!(D.x, 1, s, 1, n)
+        set || @roc groupsize = 256 gridsize = cld(n, 256) k_add!(D.x, D.tb, Int32(n))
+    end
+end
+function forward!(E::Engine, st::Vector{DState}, toks::Vector{Int}, pos0::Int; logits = true)
+    P = length(toks); n = NE * P
+    for D in E.dies
+        AMDGPU.device!(D.dev); copyto!(D.tok, 1, Int32.(toks), 1, P)
+        @roc groupsize = 256 gridsize = (20, P) k_embed!(D.y, D.emb.W, D.tok, Int32(VPD * D.d), Int32(VPD))
+    end
+    allreduce_add!(E, n; set = true)
+    for l in 0:NL-1
+        for (D, S) in zip(E.dies, st)
+            AMDGPU.device!(D.dev); W = D.L[l+1]
+            @roc groupsize = 256 gridsize = P k_rms!(D.h, D.x, W.an, Int32(NE))
+            if W.rec
+                ri = ridx(l)
+                gemv!(D.b1, D.gb, W.m1, D.h, P); gemv!(D.b2, D.gb, W.m2, D.h, P); gemv!(D.b3, D.gb, W.m3, D.h, P); gemv!(D.b4, D.gb, W.m4, D.h, P)
+                @roc groupsize = 256 gridsize = cld(QKVD, 256) k_dnconv!(D.u, D.b1, view(S.ring, 3QKVD*ri+1:3QKVD*(ri+1)), W.w1, Int32(P), Int32(QKVD))
+                @roc groupsize = 256 gridsize = VHD k_dnrec!(D.o, view(S.S, VHD*DK*DK*ri+1:VHD*DK*DK*(ri+1)), D.u, D.b2, D.b3, D.b4, W.w2, W.w3, W.w4, Int32(P))
+            else
+                ai = aidx(l); koff = Int32(ai * S.maxctx * HD); nch = cld(pos0 + P, CH)
+                gemv!(D.b1, D.gb, W.m1, D.h, P); gemv!(D.b2, D.gb, W.m2, D.h, P); gemv!(D.b3, D.gb, W.m3, D.h, P)
+                @roc groupsize = 256 gridsize = (7, P) k_attn_prep!(D.qh, D.gh, S.kc, S.vc, D.b1, D.b2, D.b3, W.w1, W.w2, Int32(pos0), koff)
+                @roc groupsize = 256 gridsize = (6P, nch) k_attn!(D.ap, D.qh, S.kc, S.vc, koff, Int32(pos0), Int32(nch))
+                @roc groupsize = 256 gridsize = 6P k_attn_comb!(D.o, D.ap, D.gh, Int32(nch))
+            end
+            gemv!(D.y, D.gb, W.out, D.o, P)
+        end
+        allreduce_add!(E, n)
+        for D in E.dies
+            AMDGPU.device!(D.dev); W = D.L[l+1]
+            @roc groupsize = 256 gridsize = P k_rms!(D.h, D.x, W.pn, Int32(NE))
+            gemv!(D.b1, D.gb, W.gate, D.h, P); gemv!(D.b2, D.gb, W.up, D.h, P)
+            @roc groupsize = 256 gridsize = cld(4352P, 256) k_silu_mul!(D.b1, D.b2, Int32(4352P))
+            gemv!(D.y, D.gb, W.down, D.b1, P)
+        end
+        allreduce_add!(E, n)
+    end
+    logits || return nothing
+    Lg = Matrix{Float32}(undef, NV, P); hb = Vector{Float32}(undef, VPD * P)
+    for D in E.dies
+        AMDGPU.device!(D.dev)
+        @roc groupsize = 256 gridsize = P k_rms!(D.h, D.x, D.onrm, Int32(NE))
+        gemv!(D.logits, D.gb, D.head, D.h, P)
+        copyto!(hb, 1, D.logits, 1, VPD * P)
+        for p in 1:P; Lg[VPD*D.d+1:VPD*(D.d+1), p] = view(hb, (p-1)*VPD+1:p*VPD); end
+    end
+    Lg
+end
+function load_engine(path; maxctx = 4096)
+    g = gguf(path); devs = AMDGPU.devices()
+    length(devs) >= ND || error("need $ND dies, have $(length(devs))")
+    t0 = time()
+    dies = [load_die(g, devs[d+1], d; maxctx) for d in 0:ND-1]
+    @printf("weights resident on %d dies (%.0f s)\n", ND, time() - t0)
+    Engine(dies), g
+end
+newstate(E::Engine, maxctx) = [(AMDGPU.device!(D.dev); DState(maxctx)) for D in E.dies]
+
+# ---- KL of the forward against BF16 reference logits ([position][vocab] f16) over the first n tokens ----
+function kl_test(E::Engine, ids, refpath, n)
+    st = newstate(E, cld(n, CH) * CH)
+    ref = Mmap.mmap(refpath, Matrix{Float16}, (NV, n))
+    kls = Float64[]; top = 0; t0 = time()
+    for p0 in 0:PMAX:n-1
+        P = min(PMAX, n - p0)
+        Lg = forward!(E, st, ids[p0+1:p0+P], p0)
+        for p in 1:P
+            r = Float64.(view(ref, :, p0 + p)); o = Float64.(view(Lg, :, p))
+            lr = r .- (maximum(r) + log(sum(exp.(r .- maximum(r))))); lo = o .- (maximum(o) + log(sum(exp.(o .- maximum(o)))))
+            push!(kls, sum(exp.(lr) .* (lr .- lo))); top += argmax(r) == argmax(o)
+        end
+    end
+    @printf("KL vs BF16 over %d positions: mean %.4f, median %.4f, max %.3f; top-1 agreement %.3f (%.1f s)\n",
+        n, sum(kls) / n, sort(kls)[cld(n, 2)], maximum(kls), top / n, time() - t0)
 end
 
 # ---------------------------------------------------------------------------------------------
@@ -334,6 +699,12 @@ function main(args)
     k = findfirst(==("--model"), args); k === nothing && error("--model FILE")
     g = gguf(args[k+1])
     "--bench-gemv" in args && return bench_gemv(g)
+    if (i = findfirst(==("--kl"), args)) !== nothing
+        n = parse(Int, args[i+1]); ref = args[i+2]
+        ids = Int.(reinterpret(Int32, read(replace(ref, ".logits.f16" => ".ids"))))
+        E, _ = load_engine(args[k+1]; maxctx = n)
+        return kl_test(E, ids, ref, n)
+    end
     error("nothing to do: --bench-gemv")
 end
 if abspath(PROGRAM_FILE) == @__FILE__()
