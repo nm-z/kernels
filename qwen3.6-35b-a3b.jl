@@ -9,8 +9,8 @@
 # Source checkpoint: https://huggingface.co/ISTA-DASLab/Qwen3.6-35B-A3B-2Bit-GSQ
 # GGUF: https://huggingface.co/chtisgit/Qwen3.6-35B-A3B-2Bit-GSQ-hybrid-GGUF
 # The converter preserves GSQ assignments; BF16->FP16 block scales incur the errors in its model card.
-# Q2_0 experts stay mapped on the host; only the eight selected experts per layer cross PCIe.
-# Attention/shared weights stay on the GPU. This leaves VRAM for engi's running desktop.
+# Weights are allocated once; one cooperative persistent dispatch executes a request.
+# The BF16 input embedding stays registered in host memory, with direct GPU reads.
 using AMDGPU, Mmap, Printf, Downloads, SHA, Random
 
 const MODEL_REV = "34a912bde355affe80eb1af654475a6fe9feff5f"
@@ -97,6 +97,7 @@ end
     x
 end
 @inline sigm(x) = 1.0f0 / (1.0f0 + exp(-x))
+@inline clockgpu() = ccall("extern __ockl_steadyctr_u64", llvmcall, UInt64, ())
 @inline silu(x) = x * sigm(x)
 @inline softplus(x) = max(x, 0.0f0) + log1p(exp(-abs(x)))
 @inline function u16(W, o)
@@ -104,9 +105,10 @@ end
 end
 @inline half(W, o) = Float32(reinterpret(Float16, u16(W, o)))
 @inline function weight(W, row, k, K, ::Val{T}) where T
-    if T == 42
-        o = row * (K ÷ Int32(64) * Int32(18)) + (k ÷ Int32(64)) * Int32(18)
-        j = k & Int32(63)
+    if T == 42 || T == 142
+        block=T==42 ? Int32(64) : Int32(128); bs=T==42 ? Int32(18) : Int32(34)
+        o = row * (K ÷ block * bs) + (k ÷ block) * bs
+        j = k & (block-Int32(1))
         q = @inbounds W[o+Int32(3)+(j>>Int32(2))]
         return half(W, o) * Float32(Int32((q >> (Int32(2)*(j&Int32(3)))) & 0x03)-Int32(1))
     elseif T == 8
@@ -123,20 +125,6 @@ end
         return reinterpret(Float32, u)
     end
 end
-function k_gemv!(y, W, x, K::Int32, R::Int32, rpe::Int32, ::Val{T}) where T
-    ti = tid0(); lane = ti & Int32(31)
-    r = (Int32(workgroupIdx().x)-Int32(1))*Int32(8)+(ti>>Int32(5))
-    if r < R
-        xo = rpe == 0 ? Int32(0) : (r ÷ rpe) * K
-        a = 0.0f0
-        for k in lane:Int32(32):K-Int32(1)
-            @inbounds a = fma(weight(W, r, k, K, Val(T)), x[xo+k+1], a)
-        end
-        a = sum32(a)
-        lane == 0 && (@inbounds y[r+1] = a)
-    end
-    return
-end
 struct DMat
     W::ROCArray{UInt8,1}
     typ::Int
@@ -145,11 +133,26 @@ struct DMat
 end
 function DMat(g, name)
     t = g.tensors[name]
-    DMat(ROCArray(collect(bytes(g, t))), t.typ, t.dims[1], prod(t.dims[2:end]))
-end
-function gemv!(y, m::DMat, x; rpe=0)
-    @roc groupsize=256 gridsize=cld(m.rows,8) k_gemv!(y,m.W,x,Int32(m.K),Int32(m.rows),Int32(rpe),Val(m.typ))
-    y
+    if t.typ==42
+        # The source repeats each group-of-128 scale in two 64-value blocks.
+        # Remove the identical copy, preserving every weight bit and scale bit.
+        t.dims[1]%128==0 || error("Q2_0 row is not a multiple of 128")
+        nb=t.nbytes÷36; packed=Vector{UInt8}(undef,nb*34)
+        GC.@preserve g packed begin
+            src=pointer(g.map)+t.off; dst=pointer(packed)
+            for j in 0:nb-1
+                a=unsafe_load(Ptr{UInt16}(src+36j)); b=unsafe_load(Ptr{UInt16}(src+36j+18))
+                a==b || error("$name: unequal scale pair; cannot losslessly compact")
+                unsafe_store!(Ptr{UInt16}(dst+34j),a)
+                unsafe_copyto!(dst+34j+2,src+36j+2,16)
+                unsafe_copyto!(dst+34j+18,src+36j+20,16)
+            end
+        end
+        W=ROCArray(packed); AMDGPU.synchronize()
+        return DMat(W,142,t.dims[1],prod(t.dims[2:end]))
+    end
+    W=ROCArray{UInt8}(undef,t.nbytes); copyto!(W,1,g.map,t.off+1,t.nbytes)
+    DMat(W,t.typ,t.dims[1],prod(t.dims[2:end]))
 end
 function k_norm!(y, x, w, n::Int32, eps::Float32)
     ti = tid0(); s = @ROCStaticLocalArray(Float32, 256)
@@ -167,21 +170,23 @@ function k_norm!(y, x, w, n::Int32, eps::Float32)
     end
     return
 end
-norm!(y,x,w,eps) = (@roc groupsize=256 gridsize=1 k_norm!(y,x,w,Int32(length(x)),eps); y)
 function k_add!(x,y,n::Int32)
-    i=gid0(); i<n && (@inbounds x[i+1]+=y[i+1]); return
+    for i in gid0():Int32(workgroupDim().x)*Int32(gridGroupDim().x):n-Int32(1)
+        @inbounds x[i+1]+=y[i+1]
+    end
+    return
 end
-add!(x,y) = (@roc groupsize=256 gridsize=cld(length(x),256) k_add!(x,y,Int32(length(x))); x)
 function k_swiglu!(h,g,u,n::Int32)
-    i=gid0(); i<n && (@inbounds h[i+1]=silu(g[i+1])*u[i+1]); return
+    for i in gid0():Int32(workgroupDim().x)*Int32(gridGroupDim().x):n-Int32(1)
+        @inbounds h[i+1]=silu(g[i+1])*u[i+1]
+    end
+    return
 end
-swiglu!(h,g,u) = (@roc groupsize=256 gridsize=cld(length(h),256) k_swiglu!(h,g,u,Int32(length(h))); h)
 
 # DeltaNet: causal depthwise convolution; unit-length q/k; gated delta recurrence;
 # per-value-head RMS norm followed by SiLU(z). GGUF value heads are in tiled order.
 function k_conv!(u,x,st,w,t::Int32,n::Int32)
-    c=gid0()
-    if c<n
+    for c in gid0():Int32(workgroupDim().x)*Int32(gridGroupDim().x):n-Int32(1)
         @inbounds begin
             a=w[4c+1]*st[((t+1)&3)*n+c+1]
             a=fma(w[4c+2],st[((t+2)&3)*n+c+1],a)
@@ -192,59 +197,63 @@ function k_conv!(u,x,st,w,t::Int32,n::Int32)
     end
     return
 end
-function k_qknorm!(q,k,u,nk::Int32,eps::Float32)
-    h=Int32(workgroupIdx().x)-Int32(1); d=tid0()
-    sq=@ROCStaticLocalArray(Float32,128); sk=@ROCStaticLocalArray(Float32,128)
+function k_qknorm!(q,k,u,nk::Int32,eps::Float32,h::Int32)
+    d=tid0()
+    sq=@ROCStaticLocalArray(Float32,256); sk=@ROCStaticLocalArray(Float32,256)
     @inbounds begin
-        qv=u[128h+d+1]; kv=u[128nk+128h+d+1]
+        qv=d<128 ? u[128h+d+1] : 0.0f0; kv=d<128 ? u[128nk+128h+d+1] : 0.0f0
         sq[d+1]=qv*qv; sk[d+1]=kv*kv; sync_workgroup()
-        for s in (64,32,16,8,4,2,1)
+        for s in (128,64,32,16,8,4,2,1)
             if d<s; sq[d+1]+=sq[d+s+1]; sk[d+1]+=sk[d+s+1]; end
             sync_workgroup()
         end
-        q[128h+d+1]=qv/max(sqrt(sq[1]),eps)*0.08838834764831845f0
-        k[128h+d+1]=kv/max(sqrt(sk[1]),eps)
+        if d<128
+            q[128h+d+1]=qv/max(sqrt(sq[1]),eps)*0.08838834764831845f0
+            k[128h+d+1]=kv/max(sqrt(sk[1]),eps)
+        end
     end
     return
 end
-function k_delta!(o,state,q,k,u,a,b,dt,aa,nk::Int32)
-    # One workgroup per (value head, value channel). Threads cover contiguous keys.
-    bh=Int32(workgroupIdx().x)-Int32(1); h=bh÷Int32(128); c=bh&Int32(127); d=tid0()
-    sh=@ROCStaticLocalArray(Float32,128)
+function k_delta!(o,state,q,k,u,a,b,dt,aa,nk::Int32,bh::Int32)
+    # Eight value rows per workgroup, one wave per row and four keys per lane.
+    h=bh÷Int32(16); ti=tid0(); lane=ti&Int32(31)
+    c=(bh&Int32(15))*Int32(8)+(ti>>Int32(5)); d=Int32(4)*lane
     @inbounds begin
-        kh=h%nk; kv=k[128kh+d+1]; qv=q[128kh+d+1]
+        kh=h%nk
         decay=exp(aa[h+1]*softplus(a[h+1]+dt[h+1])); beta=sigm(b[h+1])
-        ix=16384h+128c+d+1
-        sv=state[ix]*decay; sh[d+1]=sv*kv; sync_workgroup()
-        for s in (64,32,16,8,4,2,1)
-            d<s && (sh[d+1]+=sh[d+s+1]); sync_workgroup()
+        base=Int32(16384)*h+Int32(128)*c+d
+        sv=ntuple(j->state[base+j]*decay,Val(4))
+        kv=ntuple(j->k[Int32(128)*kh+d+j],Val(4))
+        qv=ntuple(j->q[Int32(128)*kh+d+j],Val(4))
+        r=0.0f0
+        for j in 1:4; r=fma(sv[j],kv[j],r); end
+        r=AMDGPU.Device.shfl(sum32(r),Int32(0),UInt32(32))
+        delta=beta*(u[Int32(256)*nk+Int32(128)*h+c+1]-r)
+        nv=ntuple(j->fma(kv[j],delta,sv[j]),Val(4)); v=0.0f0
+        for j in 1:4
+            state[base+j]=nv[j]; v=fma(nv[j],qv[j],v)
         end
-        delta=beta*(u[256nk+128h+c+1]-sh[1]); sync_workgroup()
-        sv=fma(kv,delta,sv); state[ix]=sv; sh[d+1]=sv*qv; sync_workgroup()
-        for s in (64,32,16,8,4,2,1)
-            d<s && (sh[d+1]+=sh[d+s+1]); sync_workgroup()
-        end
-        d==0 && (o[128h+c+1]=sh[1])
+        v=sum32(v); lane==0 && (o[Int32(128)*h+c+1]=v)
     end
     return
 end
-function k_gatednorm!(o,raw,z,w,eps::Float32)
-    h=Int32(workgroupIdx().x)-Int32(1); d=tid0()
-    sh=@ROCStaticLocalArray(Float32,128)
+function k_gatednorm!(o,raw,z,w,eps::Float32,h::Int32)
+    d=tid0()
+    sh=@ROCStaticLocalArray(Float32,256)
     @inbounds begin
-        x=raw[128h+d+1]; sh[d+1]=x*x; sync_workgroup()
-        for s in (64,32,16,8,4,2,1)
+        x=d<128 ? raw[128h+d+1] : 0.0f0; sh[d+1]=x*x; sync_workgroup()
+        for s in (128,64,32,16,8,4,2,1)
             d<s && (sh[d+1]+=sh[d+s+1]); sync_workgroup()
         end
-        o[128h+d+1]=x/sqrt(sh[1]/128.0f0+eps)*w[d+1]*silu(z[128h+d+1])
+        d<128 && (o[128h+d+1]=x/sqrt(sh[1]/128.0f0+eps)*w[d+1]*silu(z[128h+d+1]))
     end
     return
 end
 
 # Gated grouped-query attention. FP32 KV cache; partial NeoX RoPE (64 of 256 dims).
 # Text positions are equal on all IMRoPE axes, so the multimodal sections coincide here.
-function k_attnprep!(q,kc,vc,qg,k,v,qn,kn,t::Int32,nq::Int32,nkv::Int32,theta::Float32,eps::Float32)
-    h=Int32(workgroupIdx().x)-Int32(1); d=tid0()
+function k_attnprep!(q,kc,vc,qg,k,v,qn,kn,t::Int32,nq::Int32,nkv::Int32,theta::Float32,eps::Float32,h::Int32,ropepos::Int32=t)
+    d=tid0()
     sh=@ROCStaticLocalArray(Float32,256); ss=@ROCStaticLocalArray(Float32,256)
     isq=h<nq; hh=isq ? h : h-nq
     @inbounds begin
@@ -257,7 +266,7 @@ function k_attnprep!(q,kc,vc,qg,k,v,qn,kn,t::Int32,nq::Int32,nkv::Int32,theta::F
         sh[d+1]=x/sqrt(ss[1]/256.0f0+eps)*w; sync_workgroup()
         y=sh[d+1]
         if d<64
-            p=d%Int32(32); angle=Float32(t)*theta^(-Float32(p)/32.0f0)
+            p=d%Int32(32); angle=Float32(ropepos)*theta^(-Float32(p)/32.0f0)
             sn,cs=sincos(angle)
             y=d<32 ? fma(-sh[d+33],sn,sh[d+1]*cs) : fma(sh[d-31],sn,sh[d+1]*cs)
         end
@@ -269,9 +278,9 @@ function k_attnprep!(q,kc,vc,qg,k,v,qn,kn,t::Int32,nq::Int32,nkv::Int32,theta::F
     end
     return
 end
-function k_attnscore!(scores,q,kc,t::Int32,nq::Int32,nkv::Int32,ctx::Int32)
-    h=Int32(workgroupIdx().x)-Int32(1); ti=tid0(); lane=ti&Int32(31)
-    p=(Int32(workgroupIdx().y)-Int32(1))*Int32(8)+(ti>>Int32(5))
+function k_attnscore!(scores,q,kc,t::Int32,nq::Int32,nkv::Int32,ctx::Int32,h::Int32,chunk::Int32)
+    ti=tid0(); lane=ti&Int32(31)
+    p=chunk*Int32(8)+(ti>>Int32(5))
     if p<=t
         kh=h÷(nq÷nkv); a=0.0f0
         for d in lane:Int32(32):Int32(255)
@@ -282,8 +291,8 @@ function k_attnscore!(scores,q,kc,t::Int32,nq::Int32,nkv::Int32,ctx::Int32)
     end
     return
 end
-function k_softmax!(p,t::Int32,ctx::Int32)
-    h=Int32(workgroupIdx().x)-Int32(1); d=tid0(); sh=@ROCStaticLocalArray(Float32,256)
+function k_softmax!(p,t::Int32,ctx::Int32,h::Int32)
+    d=tid0(); sh=@ROCStaticLocalArray(Float32,256)
     m=-Inf32
     for i in d:Int32(256):t; @inbounds m=max(m,p[h*ctx+i+1]); end
     sh[d+1]=m; sync_workgroup()
@@ -302,8 +311,8 @@ function k_softmax!(p,t::Int32,ctx::Int32)
     for i in d:Int32(256):t; @inbounds p[h*ctx+i+1]/=den; end
     return
 end
-function k_attnout!(o,p,vc,qg,t::Int32,nq::Int32,nkv::Int32,ctx::Int32)
-    h=Int32(workgroupIdx().x)-Int32(1); d=tid0(); kh=h÷(nq÷nkv); a=0.0f0
+function k_attnout!(o,p,vc,qg,t::Int32,nq::Int32,nkv::Int32,ctx::Int32,h::Int32)
+    d=tid0(); kh=h÷(nq÷nkv); a=0.0f0
     for i in Int32(0):t
         @inbounds a=fma(p[h*ctx+i+1],vc[(i*nkv+kh)*256+d+1],a)
     end
@@ -311,11 +320,9 @@ function k_attnout!(o,p,vc,qg,t::Int32,nq::Int32,nkv::Int32,ctx::Int32)
     return
 end
 
-# Routing runs over only 256 logits on the host. Quantized expert slices are copied
-# without dequantization into reusable GPU buffers; intermediate activations remain on GPU.
+# Selected experts are read directly from resident, packed GPU weights.
 function k_moemix!(x,down,weights,shared,sg,n::Int32,ns::Int32)
-    i=gid0()
-    if i<n
+    for i in gid0():Int32(workgroupDim().x)*Int32(gridGroupDim().x):n-Int32(1)
         @inbounds begin
             a=shared[i+1]*sigm(sg[1])
             for e in Int32(0):ns-Int32(1); a=fma(down[e*n+i+1],weights[e+1],a); end
@@ -627,213 +634,313 @@ function Config(g)
     Int(g.kv["qwen35moe.rope.dimension_count"])==64 || error("expected 64 rotary dimensions")
     c
 end
-struct Block
+
+# The only inference path is one HIP cooperative dispatch for the whole request.
+# Descriptors point to weights allocated once at load time. The input embedding is
+# a permanently registered host mapping, read directly by the GPU (4 KiB/token).
+struct PMat
+    ptr::UInt64
+    K::Int32
+    rows::Int32
+    typ::Int32
+end
+const MNAMES=("attn_qkv.weight","attn_gate.weight","ssm_alpha.weight","ssm_beta.weight","ssm_out.weight",
+              "attn_q.weight","attn_k.weight","attn_v.weight","attn_output.weight","ffn_gate_inp.weight",
+              "ffn_gate_inp_shexp.weight","ffn_gate_shexp.weight","ffn_up_shexp.weight","ffn_down_shexp.weight",
+              "ffn_gate_exps.weight","ffn_up_exps.weight","ffn_down_exps.weight")
+const VNAMES=("attn_norm.weight","post_attention_norm.weight","ssm_a","ssm_dt.bias",
+              "ssm_conv1d.weight","ssm_norm.weight","attn_q_norm.weight","attn_k_norm.weight")
+struct PBlock
+    mat::NTuple{17,PMat}
+    vec::NTuple{8,UInt64}
+    state::UInt64
+    conv::UInt64
+    kc::UInt64
+    vc::UInt64
     linear::Bool
-    mat::Dict{String,DMat}
-    vec::Dict{String,ROCArray{Float32,1}}
-    state::ROCArray{Float32,1}
-    conv::ROCArray{Float32,1}
-    kc::ROCArray{Float32,1}
-    vc::ROCArray{Float32,1}
 end
-z(n)=AMDGPU.zeros(Float32,n)
-function Block(g,c,l,ctx)
-    p="blk.$l."; linear=haskey(g.tensors,p*"ssm_a")
-    mats=["ffn_gate_inp.weight","ffn_gate_inp_shexp.weight","ffn_gate_shexp.weight",
-          "ffn_up_shexp.weight","ffn_down_shexp.weight"]
-    vecs=["attn_norm.weight","post_attention_norm.weight"]
-    if linear
-        append!(mats,["attn_qkv.weight","attn_gate.weight","ssm_alpha.weight","ssm_beta.weight","ssm_out.weight"])
-        append!(vecs,["ssm_a","ssm_dt.bias","ssm_conv1d.weight","ssm_norm.weight"])
-    else
-        append!(mats,["attn_q.weight","attn_k.weight","attn_v.weight","attn_output.weight"])
-        append!(vecs,["attn_q_norm.weight","attn_k_norm.weight"])
+PMat(m::DMat)=PMat(UInt(pointer(m.W)),Int32(m.K),Int32(m.rows),Int32(m.typ))
+@inline av(::Type{T},p::UInt64,n::Integer) where T =
+    AMDGPU.ROCDeviceArray{T,1,1}((Int(n),),Core.LLVMPtr{T,1}(p))
+@inline fv(p::UInt64,n::Integer=16384)=av(Float32,p,n)
+@inline function p_mul_t!(y,m,x,ids,mode::Int32,::Val{T}) where T
+    ti=tid0(); lane=ti&Int32(31); bid=Int32(workgroupIdx().x)-Int32(1)
+    ng=Int32(gridGroupDim().x); K=m.K
+    # mode 0=dense; 1=selected expert gate/up; 2=selected expert down.
+    rpe=mode==Int32(1) ? Int32(512) : Int32(2048)
+    R=mode==Int32(0) ? m.rows : Int32(8)*rpe
+    W=av(UInt8,m.ptr,Int64(typemax(Int32)))
+    for r in bid*Int32(8)+(ti>>Int32(5)):ng*Int32(8):R-Int32(1)
+        slot=r÷rpe; row=mode==Int32(0) ? r : (@inbounds ids[slot+1])*rpe+r%rpe
+        xo=mode==Int32(2) ? slot*K : Int32(0); a=0.0f0
+        for k in lane:Int32(32):K-Int32(1)
+            @inbounds a=fma(weight(W,row,k,K,Val(T)),x[xo+k+1],a)
+        end
+        a=sum32(a); lane==0 && (@inbounds y[r+1]=a)
     end
-    Block(linear,Dict(n=>DMat(g,p*n) for n in mats),Dict(n=>ROCArray(tensor_f32(g,p*n)) for n in vecs),
-          z(linear ? 128*128*c.nvh : 0),z(linear ? 4*(256*c.nkh+128*c.nvh) : 0),
-          z(linear ? 0 : 256*c.nkv*ctx),z(linear ? 0 : 256*c.nkv*ctx))
+    return
 end
+@inline function p_mul!(y,m,x,ids,mode::Int32=Int32(0))
+    if m.typ==142; p_mul_t!(y,m,x,ids,mode,Val(142))
+    elseif m.typ==42; p_mul_t!(y,m,x,ids,mode,Val(42))
+    elseif m.typ==8; p_mul_t!(y,m,x,ids,mode,Val(8))
+    elseif m.typ==30; p_mul_t!(y,m,x,ids,mode,Val(30))
+    elseif m.typ==1; p_mul_t!(y,m,x,ids,mode,Val(1))
+    else; p_mul_t!(y,m,x,ids,mode,Val(0))
+    end
+    AMDGPU.Device.sync_grid()
+    return
+end
+@inline function p_route!(ids,w,r)
+    if gid0()==0
+        @inbounds begin
+            for s in Int32(0):Int32(7)
+                best=-Inf32; ix=Int32(0)
+                for e in Int32(0):Int32(255)
+                    selected=false
+                    for j in Int32(0):s-Int32(1); selected|=ids[j+1]==e; end
+                    if !selected && r[e+1]>best; best=r[e+1]; ix=e; end
+                end
+                ids[s+1]=ix; w[s+1]=best
+            end
+            den=0.0f0; mx=w[1]
+            for s in 1:8; w[s]=exp(w[s]-mx); den+=w[s]; end
+            for s in 1:8; w[s]/=den; end
+        end
+    end
+    AMDGPU.Device.sync_grid()
+    return
+end
+@inline function p_argmax!(logits,part,ix,control,output,n::Int32,gen::Int32,eos::Int32,imend::Int32)
+    bid=Int32(workgroupIdx().x)-Int32(1); ti=tid0(); stride=Int32(gridItemDim().x)
+    sh=@ROCStaticLocalArray(Float32,256); si=@ROCStaticLocalArray(Int32,256)
+    best=-Inf32; id=typemax(Int32)
+    @inbounds begin
+        for j in gid0():stride:n-Int32(1)
+            v=logits[j+1]
+            if v>best || (v==best && j<id); best=v; id=j; end
+        end
+        sh[ti+1]=best; si[ti+1]=id; sync_workgroup()
+        for s in (128,64,32,16,8,4,2,1)
+            if ti<s
+                v=sh[ti+s+1]; j=si[ti+s+1]
+                if v>sh[ti+1] || (v==sh[ti+1] && j<si[ti+1]); sh[ti+1]=v; si[ti+1]=j; end
+            end
+            sync_workgroup()
+        end
+        if ti==0; part[bid+1]=sh[1]; ix[bid+1]=si[1]; end
+    end
+    AMDGPU.Device.sync_grid()
+    if gid0()==0
+        @inbounds begin
+            best=part[1]; id=ix[1]
+            for j in 2:Int32(gridGroupDim().x)
+                if part[j]>best || (part[j]==best && ix[j]<id); best=part[j]; id=ix[j]; end
+            end
+            output[gen+1]=id; control[2]=gen+Int32(1); control[3]=id
+            control[1]=(id==eos || id==imend || !isfinite(best)) ? Int32(1) : Int32(0)
+        end
+    end
+    AMDGPU.Device.sync_grid()
+    return
+end
+function k_request!(blocks,head,normout,embedding,b,ids,output,control,ticks,part,ix,expertids,
+                    np::Int32,nt::Int32,ctx::Int32,eos::Int32,imend::Int32)
+    bid=Int32(workgroupIdx().x)-Int32(1); ng=Int32(gridGroupDim().x)
+    if gid0()==0; @inbounds ticks[1]=clockgpu(); control[1]=Int32(0); control[2]=Int32(0); end
+    AMDGPU.Device.sync_grid()
+    for pos in Int32(0):np+nt-Int32(2)
+        id=pos<np ? (@inbounds ids[pos+1]) : (@inbounds control[3])
+        @inbounds for j in gid0():Int32(gridItemDim().x):Int32(2047)
+            b.x[j+1]=bf32(embedding[Int64(id)*Int64(2048)+j+1])
+        end
+        AMDGPU.Device.sync_grid()
+        @inbounds for l in Int32(1):Int32(40)
+            B=blocks[l]; M=B.mat; V=B.vec
+            bid==0 && k_norm!(b.xn,b.x,fv(V[1]),Int32(2048),1.0f-6)
+            AMDGPU.Device.sync_grid()
+            if B.linear
+                p_mul!(b.qkv,M[1],b.xn,expertids); p_mul!(b.z,M[2],b.xn,expertids)
+                p_mul!(b.alpha,M[3],b.xn,expertids); p_mul!(b.beta,M[4],b.xn,expertids)
+                k_conv!(b.u,b.qkv,fv(B.conv,32768),fv(V[5],32768),pos,Int32(8192)); AMDGPU.Device.sync_grid()
+                for h in bid:ng:Int32(15); k_qknorm!(b.qdn,b.kdn,b.u,Int32(16),1.0f-6,h); end
+                AMDGPU.Device.sync_grid()
+                for task in bid:ng:Int32(511)
+                    k_delta!(b.rawdn,fv(B.state,524288),b.qdn,b.kdn,b.u,b.alpha,b.beta,fv(V[4]),fv(V[3]),Int32(16),task)
+                end
+                AMDGPU.Device.sync_grid()
+                for h in bid:ng:Int32(31); k_gatednorm!(b.on,b.rawdn,b.z,fv(V[6]),1.0f-6,h); end
+                AMDGPU.Device.sync_grid(); p_mul!(b.y,M[5],b.on,expertids)
+            else
+                p_mul!(b.qg,M[6],b.xn,expertids); p_mul!(b.k,M[7],b.xn,expertids); p_mul!(b.v,M[8],b.xn,expertids)
+                for h in bid:ng:Int32(17)
+                    k_attnprep!(b.q,fv(B.kc,512ctx),fv(B.vc,512ctx),b.qg,b.k,b.v,fv(V[7]),fv(V[8]),pos,Int32(16),Int32(2),1.0f7,1.0f-6,h)
+                end
+                AMDGPU.Device.sync_grid()
+                nch=cld(pos+Int32(1),Int32(8))
+                for task in bid:ng:Int32(16)*nch-Int32(1)
+                    k_attnscore!(b.scores,b.q,fv(B.kc,512ctx),pos,Int32(16),Int32(2),ctx,task%Int32(16),task÷Int32(16))
+                end
+                AMDGPU.Device.sync_grid()
+                for h in bid:ng:Int32(15); k_softmax!(b.scores,pos,ctx,h); end
+                AMDGPU.Device.sync_grid()
+                for h in bid:ng:Int32(15); k_attnout!(b.on,b.scores,fv(B.vc,512ctx),b.qg,pos,Int32(16),Int32(2),ctx,h); end
+                AMDGPU.Device.sync_grid(); p_mul!(b.y,M[9],b.on,expertids)
+            end
+            k_add!(b.x,b.y,Int32(2048)); AMDGPU.Device.sync_grid()
+            bid==0 && k_norm!(b.xn,b.x,fv(V[2]),Int32(2048),1.0f-6)
+            AMDGPU.Device.sync_grid()
+            p_mul!(b.route,M[10],b.xn,expertids); p_mul!(b.sg,M[11],b.xn,expertids)
+            p_mul!(b.shg,M[12],b.xn,expertids); p_mul!(b.shu,M[13],b.xn,expertids)
+            k_swiglu!(b.shh,b.shg,b.shu,Int32(512)); AMDGPU.Device.sync_grid()
+            p_mul!(b.shout,M[14],b.shh,expertids); p_route!(expertids,b.weights,b.route)
+            p_mul!(b.eg,M[15],b.xn,expertids,Int32(1)); p_mul!(b.eu,M[16],b.xn,expertids,Int32(1))
+            k_swiglu!(b.eh,b.eg,b.eu,Int32(4096)); AMDGPU.Device.sync_grid()
+            p_mul!(b.ed,M[17],b.eh,expertids,Int32(2))
+            k_moemix!(b.x,b.ed,b.weights,b.shout,b.sg,Int32(2048),Int32(8)); AMDGPU.Device.sync_grid()
+        end
+        if pos>=np-Int32(1)
+            bid==0 && k_norm!(b.xn,b.x,normout,Int32(2048),1.0f-6)
+            AMDGPU.Device.sync_grid(); p_mul!(b.logits,head,b.xn,expertids)
+            p_argmax!(b.logits,part,ix,control,output,Int32(length(b.logits)),pos-np+Int32(1),eos,imend)
+            if pos==np-Int32(1) && gid0()==0; ticks[2]=clockgpu(); end
+            AMDGPU.Device.sync_grid()
+            @inbounds control[1]!=0 && break
+        end
+    end
+    if gid0()==0; @inbounds ticks[3]=clockgpu(); end
+    return
+end
+
 mutable struct Engine
     g::GModel
-    cfg::Config
     tk::Tok
-    blocks::Vector{Block}
-    output::DMat
+    cfg::Config
+    weights::Vector{DMat}
+    floats::Vector{ROCArray{Float32,1}}
+    blocks::ROCArray{PBlock,1}
+    head::PMat
     output_norm::ROCArray{Float32,1}
-    b::Dict{Symbol,ROCArray{Float32,1}}
-    expert_gpu::NTuple{3,DMat}
-    expert_host::NTuple{3,Vector{UInt8}}
-    host_route::Vector{Float32}
+    embedding::ROCArray{UInt16,1}
+    b::NamedTuple
+    ids::ROCArray{Int32,1}
+    output::ROCArray{Int32,1}
+    control::ROCArray{Int32,1}
+    ticks::ROCArray{UInt64,1}
+    part::ROCArray{Float32,1}
+    ix::ROCArray{Int32,1}
+    expertids::ROCArray{Int32,1}
     ctx::Int
-    pos::Int
+    groups::Int
 end
-function Engine(g,ctx)
-    AMDGPU.functional() || error("AMDGPU is not functional; check ROCm and /dev/kfd access")
-    c=Config(g); ctx>=1 || error("--ctx must be positive")
-    tk=Tok(g); blocks=Block[]
-    for l in 0:c.layers-1
-        push!(blocks,Block(g,c,l,ctx))
-        l%10==9 && (println(stderr,"Loaded $(l+1)/$(c.layers) layers");flush(stderr))
-    end
-    sizes=[:x=>c.hidden,:xn=>c.hidden,:y=>c.hidden,:qkv=>256*c.nkh+128*c.nvh,:u=>256*c.nkh+128*c.nvh,
-           :z=>128*c.nvh,:alpha=>c.nvh,:beta=>c.nvh,:qdn=>128*c.nkh,:kdn=>128*c.nkh,:rawdn=>128*c.nvh,
-           :on=>128*c.nvh,:qg=>512*c.nq,:q=>256*c.nq,:k=>256*c.nkv,:v=>256*c.nkv,:scores=>c.nq*ctx,
-           :route=>c.experts,:sg=>1,:shg=>c.ff,:shu=>c.ff,:shh=>c.ff,:shout=>c.hidden,
-           :eg=>c.ff*c.used,:eu=>c.ff*c.used,:eh=>c.ff*c.used,:ed=>c.hidden*c.used,:weights=>c.used,
-           :logits=>length(tk.text)]
-    b=Dict(k=>z(n) for (k,n) in sizes)
-    egpu=DMat[]; ehost=Vector{UInt8}[]
-    for n in ("gate","up","down")
-        t=g.tensors["blk.0.ffn_$(n)_exps.weight"]
-        t.typ==42 || error("expected Q2_0 routed experts")
-        nb=t.nbytes÷c.experts*c.used
-        push!(egpu,DMat(AMDGPU.zeros(UInt8,nb),42,t.dims[1],t.dims[2]*c.used))
-        push!(ehost,Vector{UInt8}(undef,nb))
-    end
-    Engine(g,c,tk,blocks,DMat(g,"output.weight"),ROCArray(tensor_f32(g,"output_norm.weight")),b,
-           Tuple(egpu),Tuple(ehost),zeros(Float32,c.experts),ctx,0)
-end
-function stream_experts!(E,l,ids)
-    c=E.cfg
-    for (i,n) in enumerate(("gate","up","down"))
-        t=E.g.tensors["blk.$l.ffn_$(n)_exps.weight"]
-        t.typ==42 && t.dims[3]==c.experts || error("unexpected expert tensor in layer $l")
-        nb=t.nbytes÷c.experts; dst=E.expert_host[i]
-        for (slot,id) in enumerate(ids)
-            copyto!(dst,(slot-1)*nb+1,E.g.map,t.off+id*nb+1,nb)
+z(n)=AMDGPU.zeros(Float32,n)
+function Engine(g,ctx;compileonly=false)
+    AMDGPU.functional() || error("AMDGPU is not functional")
+    c=Config(g); tk=Tok(g); weights=DMat[]; floats=ROCArray{Float32,1}[]; bs=PBlock[]
+    keepvec(v)=(push!(floats,v); UInt(pointer(v)))
+    for l in 0:39
+        p="blk.$l."; linear=haskey(g.tensors,p*"ssm_a")
+        ms=ntuple(17) do i
+            n=p*MNAMES[i]
+            haskey(g.tensors,n) || return PMat(0,0,0,0)
+            t=g.tensors[n]
+            m=compileonly ? DMat(AMDGPU.zeros(UInt8,1),t.typ==42 ? 142 : t.typ,t.dims[1],prod(t.dims[2:end])) : DMat(g,n)
+            push!(weights,m); PMat(m)
         end
-        copyto!(E.expert_gpu[i].W,dst)
+        vs=ntuple(i->haskey(g.tensors,p*VNAMES[i]) ? keepvec(compileonly ? z(1) : ROCArray(tensor_f32(g,p*VNAMES[i]))) : UInt64(0),8)
+        push!(bs,PBlock(ms,vs,keepvec(z(compileonly ? 1 : linear ? 524288 : 0)),keepvec(z(compileonly ? 1 : linear ? 32768 : 0)),
+                       keepvec(z(compileonly ? 1 : linear ? 0 : 512ctx)),keepvec(z(compileonly ? 1 : linear ? 0 : 512ctx)),linear))
     end
-end
-function step!(E,id; logits=true)
-    E.pos<E.ctx || error("context exhausted at $(E.pos) tokens (increase --ctx)")
-    c=E.cfg; b=E.b; t=Int32(E.pos)
-    copyto!(b[:x],embedding(E.g,id))
-    for (i,B) in enumerate(E.blocks)
-        M=B.mat; V=B.vec
-        norm!(b[:xn],b[:x],V["attn_norm.weight"],c.eps)
-        if B.linear
-            gemv!(b[:qkv],M["attn_qkv.weight"],b[:xn]); gemv!(b[:z],M["attn_gate.weight"],b[:xn])
-            gemv!(b[:alpha],M["ssm_alpha.weight"],b[:xn]); gemv!(b[:beta],M["ssm_beta.weight"],b[:xn])
-            n=length(b[:qkv])
-            @roc groupsize=256 gridsize=cld(n,256) k_conv!(b[:u],b[:qkv],B.conv,V["ssm_conv1d.weight"],t,Int32(n))
-            @roc groupsize=128 gridsize=c.nkh k_qknorm!(b[:qdn],b[:kdn],b[:u],Int32(c.nkh),c.eps)
-            @roc groupsize=128 gridsize=128*c.nvh k_delta!(b[:rawdn],B.state,b[:qdn],b[:kdn],b[:u],b[:alpha],b[:beta],V["ssm_dt.bias"],V["ssm_a"],Int32(c.nkh))
-            @roc groupsize=128 gridsize=c.nvh k_gatednorm!(b[:on],b[:rawdn],b[:z],V["ssm_norm.weight"],c.eps)
-            gemv!(b[:y],M["ssm_out.weight"],b[:on])
-        else
-            gemv!(b[:qg],M["attn_q.weight"],b[:xn]); gemv!(b[:k],M["attn_k.weight"],b[:xn]); gemv!(b[:v],M["attn_v.weight"],b[:xn])
-            @roc groupsize=256 gridsize=c.nq+c.nkv k_attnprep!(b[:q],B.kc,B.vc,b[:qg],b[:k],b[:v],V["attn_q_norm.weight"],V["attn_k_norm.weight"],t,Int32(c.nq),Int32(c.nkv),c.theta,c.eps)
-            @roc groupsize=256 gridsize=(c.nq,cld(E.pos+1,8)) k_attnscore!(b[:scores],b[:q],B.kc,t,Int32(c.nq),Int32(c.nkv),Int32(E.ctx))
-            @roc groupsize=256 gridsize=c.nq k_softmax!(b[:scores],t,Int32(E.ctx))
-            @roc groupsize=256 gridsize=c.nq k_attnout!(b[:on],b[:scores],B.vc,b[:qg],t,Int32(c.nq),Int32(c.nkv),Int32(E.ctx))
-            gemv!(b[:y],M["attn_output.weight"],b[:on])
-        end
-        add!(b[:x],b[:y]); norm!(b[:xn],b[:x],V["post_attention_norm.weight"],c.eps)
-        gemv!(b[:route],M["ffn_gate_inp.weight"],b[:xn])
-        gemv!(b[:sg],M["ffn_gate_inp_shexp.weight"],b[:xn])
-        gemv!(b[:shg],M["ffn_gate_shexp.weight"],b[:xn]); gemv!(b[:shu],M["ffn_up_shexp.weight"],b[:xn])
-        swiglu!(b[:shh],b[:shg],b[:shu]); gemv!(b[:shout],M["ffn_down_shexp.weight"],b[:shh])
-        copyto!(E.host_route,b[:route])
-        all(isfinite,E.host_route) || error("nonfinite router logits at layer $(i-1), position $(E.pos)")
-        ids=sortperm(E.host_route;by=x->-x,alg=Base.Sort.MergeSort)[1:c.used].-1
-        w=exp.(E.host_route[ids.+1].-maximum(E.host_route[ids.+1])); w./=sum(w)
-        stream_experts!(E,i-1,ids); copyto!(b[:weights],w)
-        gemv!(b[:eg],E.expert_gpu[1],b[:xn]); gemv!(b[:eu],E.expert_gpu[2],b[:xn])
-        swiglu!(b[:eh],b[:eg],b[:eu]); gemv!(b[:ed],E.expert_gpu[3],b[:eh];rpe=c.hidden)
-        @roc groupsize=256 gridsize=cld(c.hidden,256) k_moemix!(b[:x],b[:ed],b[:weights],b[:shout],b[:sg],Int32(c.hidden),Int32(c.used))
-    end
-    E.pos+=1
-    logits || return nothing
-    norm!(b[:xn],b[:x],E.output_norm,c.eps); gemv!(b[:logits],E.output,b[:xn])
-    out=Array(b[:logits]); all(isfinite,out) || error("nonfinite output logits"); out
+    ht=g.tensors["output.weight"]
+    head=compileonly ? DMat(AMDGPU.zeros(UInt8,1),ht.typ,ht.dims[1],ht.dims[2]) : DMat(g,"output.weight"); push!(weights,head)
+    et=g.tensors["token_embd.weight"]
+    emb=compileonly ? AMDGPU.zeros(UInt16,1) : GC.@preserve g unsafe_wrap(ROCArray,Ptr{UInt16}(pointer(g.map)+et.off),(prod(et.dims),))
+    sizes=(:x=>2048,:xn=>2048,:y=>2048,:qkv=>8192,:u=>8192,:z=>4096,:alpha=>32,:beta=>32,:qdn=>2048,:kdn=>2048,
+           :rawdn=>4096,:on=>4096,:qg=>8192,:q=>4096,:k=>512,:v=>512,:scores=>16ctx,:route=>256,:sg=>1,
+           :shg=>512,:shu=>512,:shh=>512,:shout=>2048,:eg=>4096,:eu=>4096,:eh=>4096,:ed=>16384,:weights=>8,:logits=>length(tk.text))
+    b=NamedTuple{Tuple(first.(sizes))}(Tuple(z(last(s)) for s in sizes))
+    groups=Int(AMDGPU.HIP.properties(AMDGPU.device()).multiProcessorCount)
+    Engine(g,tk,c,weights,floats,ROCArray(bs),PMat(head),ROCArray(tensor_f32(g,"output_norm.weight")),emb,b,
+           AMDGPU.zeros(Int32,ctx),AMDGPU.zeros(Int32,ctx),AMDGPU.zeros(Int32,4),AMDGPU.zeros(UInt64,3),
+           z(groups),AMDGPU.zeros(Int32,groups),AMDGPU.zeros(Int32,8),ctx,groups)
 end
 function reset!(E)
-    for B in E.blocks
-        fill!(B.state,0.0f0); fill!(B.conv,0.0f0); fill!(B.kc,0.0f0); fill!(B.vc,0.0f0)
+    # Every state buffer belongs to the final four floats entries of its block.
+    for B in Array(E.blocks)
+        for p in (B.state,B.conv,B.kc,B.vc)
+            for v in E.floats
+                UInt(pointer(v))==p && fill!(v,0.0f0)
+            end
+        end
     end
-    E.pos=0; E
+    AMDGPU.synchronize(); E
 end
-function sample(rng,logits,temperature)
-    temperature==0 && return argmax(logits)-1
-    p=exp.((Float64.(logits).-maximum(logits))./temperature); target=rand(rng)*sum(p)
-    s=0.0
-    for i in eachindex(p); s+=p[i]; s>=target && return i-1; end
-    length(p)-1
+function request_kernel(E,np,nt;compile=false)
+    args=(E.blocks,E.head,E.output_norm,E.embedding,E.b,E.ids,E.output,E.control,E.ticks,E.part,E.ix,E.expertids,
+          Int32(np),Int32(nt),Int32(E.ctx),E.tk.eos,get(E.tk.ids,"<|im_end|>",E.tk.eos))
+    k=@roc launch=false maxthreads=256 k_request!(args...)
+    compile || k(args...;groupsize=256,gridsize=E.groups,cooperative=true)
+    k
+end
+function request!(E,ids,nt)
+    length(ids)+nt<=E.ctx || error("context too small")
+    copyto!(E.ids,1,ids,1,length(ids)); request_kernel(E,length(ids),nt); AMDGPU.synchronize()
+    ctl=Array(E.control); out=Array(E.output)[1:ctl[2]]; ticks=Array(E.ticks)
+    out, ticks, ctl
 end
 function download_model(path)
-    mkpath(dirname(abspath(path))); tmp=path*".part"
-    println(stderr,"Downloading $MODEL_URL")
-    Downloads.download(MODEL_URL,tmp)
-    filesize(tmp)==MODEL_BYTES || error("incomplete download: $tmp")
-    digest=open(sha256,tmp); bytes2hex(digest)==MODEL_SHA || error("SHA-256 mismatch: $tmp")
-    mv(tmp,path;force=true); println(stderr,"Saved and verified $path")
+    mkpath(dirname(abspath(path))); tmp=path*".part"; Downloads.download(MODEL_URL,tmp)
+    filesize(tmp)==MODEL_BYTES || error("incomplete download")
+    bytes2hex(open(sha256,tmp))==MODEL_SHA || error("SHA-256 mismatch")
+    mv(tmp,path;force=true)
 end
 function main(args)
-    if "--help" in args || "-h" in args
-        println("""
-        Native AMDGPU.jl Qwen3.6-35B-A3B GSQ text inference (RX 7700 XT).
-          --model FILE       GSQ hybrid GGUF (default: $DEFAULT_MODEL)
-          --download         download pinned model and verify SHA-256, then exit
-          --prompt TEXT      user message (default: What is 2+2? Answer briefly.)
-          --prompt-file FILE read the prompt from a UTF-8 text file
-          --tokens N         maximum generated tokens (default: 64)
-          --ctx N            total prompt + output capacity (default: 2048)
-          --raw              plain completion instead of the Qwen chat template
-          --think            enable the open thinking prefix (default: closed)
-          --temperature X    sampling temperature (default: 0, greedy)
-          --seed N           random seed (default: 1)
-        Experts stream from RAM; attention/shared weights and activations stay on GPU.
-        Prefill uses the same recurrent token step as decode. Text only; no vision/MTP.
-        """)
+    if "--help" in args
+        println("julia --project=~/.julia/environments/qwen36 qwen3.6-35b-a3b.jl [--model FILE] [--prompt TEXT] [--tokens N] [--ctx N] [--raw] [--think] [--download] [--compile]")
         return
     end
     opts=Dict{String,String}(); flags=Set{String}(); i=1
-    valued=Set(["--model","--prompt","--prompt-file","--tokens","--ctx","--temperature","--seed"])
-    boolean=Set(["--download","--raw","--think"])
+    valued=Set(["--model","--prompt","--prompt-file","--tokens","--ctx"])
     while i<=length(args)
         a=args[i]
         if a in valued
             i<length(args) || error("$a needs a value"); opts[a]=args[i+1]; i+=2
-        elseif a in boolean
+        elseif a in ("--raw","--think","--download","--compile")
             push!(flags,a); i+=1
-        else
-            error("unknown option $a (see --help)")
+        else; error("unknown option $a")
         end
     end
-    path=expanduser(get(opts,"--model",DEFAULT_MODEL))
-    "--download" in flags && return download_model(path)
-    isfile(path) || error("missing model $path; use --download or --model FILE")
-    isfile(path*".aria2") && error("model download is still running: $path")
-    n=parse(Int,get(opts,"--tokens","64")); ctx=parse(Int,get(opts,"--ctx","2048"))
-    temp=parse(Float64,get(opts,"--temperature","0")); rng=MersenneTwister(parse(Int,get(opts,"--seed","1")))
-    n>=1 || error("--tokens must be positive"); isfinite(temp) && temp>=0 || error("invalid temperature")
-    prompt=haskey(opts,"--prompt-file") ? read(expanduser(opts["--prompt-file"]),String) : get(opts,"--prompt","What is 2+2? Answer briefly.")
-    g=gguf(path); tk=Tok(g)
+    path=expanduser(get(opts,"--model",DEFAULT_MODEL)); "--download" in flags && return download_model(path)
+    isfile(path) || error("missing model; run with --download")
+    isfile(path*".aria2") && error("model download is still running")
+    nt=parse(Int,get(opts,"--tokens","32")); ctx=parse(Int,get(opts,"--ctx","2048"))
+    nt>0 && ctx>0 || error("token/context counts must be positive")
+    prompt=haskey(opts,"--prompt-file") ? read(opts["--prompt-file"],String) : get(opts,"--prompt","What is 2+2? Answer briefly.")
+    E=Engine(gguf(path),ctx;compileonly="--compile" in flags)
+    tm=@elapsed request_kernel(E,1,1;compile=true)
+    tm<=120 || error("compile time exceeds two minutes: $tm s")
+    "--compile" in flags && return
+    request!(E,Int32[0],1); reset!(E)
+    rate=Ref{Cint}()
+    AMDGPU.HIP.hipDeviceGetAttribute(rate,AMDGPU.HIP.hipDeviceAttributeWallClockRate,AMDGPU.HIP.device_id(AMDGPU.device()))
+    frequency=Float64(rate[])*1000; frequency>0 || error("no GPU steady clock frequency")
+    # A marker covers tokenization, copies, dispatch, synchronization and decoding.
+    # rocprofv3 records the same monotonic CPU time domain for all these activities.
+    ccall((:roctxRangePushA,"/opt/rocm/lib/librocprofiler-sdk-roctx.so"),Cint,(Cstring,),"qwen36/request")
     text="--raw" in flags ? prompt : chat_prompt(prompt)*("--think" in flags ? "" : "\n</think>\n\n")
-    ids=encode(tk,text); isempty(ids) && error("prompt has no tokens")
-    length(ids)+n<=ctx || error("$(length(ids)) prompt + $n output tokens exceed --ctx $ctx")
-    println(stderr,"Model: $path\nGPU: $(AMDGPU.device())\nPrompt: $(length(ids)) tokens; context: $ctx")
-    tload=time(); E=Engine(g,ctx); @printf(stderr,"Loaded in %.2f s\n",time()-tload)
-    # Compile with the actual full model, then reset all recurrent/attention history.
-    println(stderr,"Warming all kernels with one complete token..."); step!(E,ids[1]); AMDGPU.synchronize(); reset!(E)
-    t0=time(); logits=Float32[]
-    for (j,id) in enumerate(ids)
-        result=step!(E,id;logits=j==length(ids)); result===nothing || (logits=result)
+    ids=encode(E.tk,text); isempty(ids) && error("empty prompt")
+    out,ticks,ctl=request!(E,ids,nt)
+    decoded=UInt8[]
+    for id in out
+        id in (E.tk.eos,get(E.tk.ids,"<|im_end|>",E.tk.eos)) && break
+        append!(decoded,piece(E.tk,id))
     end
-    AMDGPU.synchronize(); prefill=time()-t0; t0=time(); generated=0; steps=0
-    stops=Set([Int(tk.eos)])
-    for s in ("<|im_end|>","<|endoftext|>"); haskey(tk.ids,s) && push!(stops,Int(tk.ids[s])); end
-    for j in 1:n
-        id=sample(rng,logits,temp); id in stops && break
-        write(stdout,piece(tk,id)); flush(stdout); generated+=1
-        if j<n; logits=step!(E,id); steps+=1; end
-    end
-    AMDGPU.synchronize(); decode=time()-t0; println()
-    @printf(stderr,"prefill: %d tokens, %.3f s, %.2f tok/s\ndecode: %d tokens (%d forward steps), %.3f s, %.2f tok/s\n",
-            length(ids),prefill,length(ids)/prefill,generated,steps,decode,steps/max(decode,eps(Float64)))
+    get(ENV,"QWEN36_OUTPUT","")=="" || write(ENV["QWEN36_OUTPUT"],decoded)
+    ccall((:roctxRangePop,"/opt/rocm/lib/librocprofiler-sdk-roctx.so"),Cint,())
+    pre=Float64(ticks[2]-ticks[1])/frequency
+    dec=max(Float64(ticks[3]-ticks[2])/frequency,eps(Float64)); steps=max(ctl[2]-1,0)
+    @printf("prefill tps: %.2f\ndecode tps: %.2f\nidle time %%: unmeasured\n",length(ids)/pre,steps/dec)
 end
 if abspath(PROGRAM_FILE)==@__FILE__()
     main(ARGS)
 end
-

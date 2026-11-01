@@ -180,13 +180,13 @@ function k_gemv_q5k!(part, W, xt, xsm, nb::Int32, rows::Int32, ::Val{P}) where {
             sa = ntuple(_ -> 0.0f0, Val(P))
             Base.Cartesian.@nexprs 8 w -> begin
                 qa = (qs[w] & 0x0f0f0f0f) | ((qh[w] >> (2j - 2)) & 0x01010101) << 4
-                xa = xc(xt, sgate(Int32(256 * P) * b, tks[1]) + Int32((64 * (j - 1) + 4 * (w - 1)) * P), Val(4P))
+                xa = xc(xt, (Int32(256) * b + Int32(64 * (j - 1) + 4 * (w - 1))) * Int32(P), Val(4P))
                 Base.Cartesian.@nexprs 4 i -> (sa = fmav(sa, Float32((qa >> (8i - 8)) & 0xff), xa, (i - 1) * P))
             end
             sb = ntuple(_ -> 0.0f0, Val(P))
             Base.Cartesian.@nexprs 8 w -> begin
                 qb = ((qs[w] >> 4) & 0x0f0f0f0f) | ((qh[w] >> (2j - 1)) & 0x01010101) << 4
-                xv = xc(xt, sgate(Int32(256 * P) * b, tks[1]) + Int32((64 * (j - 1) + 32 + 4 * (w - 1)) * P), Val(4P))
+                xv = xc(xt, (Int32(256) * b + Int32(64 * (j - 1) + 32 + 4 * (w - 1))) * Int32(P), Val(4P))
                 Base.Cartesian.@nexprs 4 i -> (sb = fmav(sb, Float32((qb >> (8i - 8)) & 0xff), xv, (i - 1) * P))
             end
             sca, mna = scmn(u0, u1, u2, Val(2j - 2)); scb, mnb = scmn(u0, u1, u2, Val(2j - 1))
@@ -221,7 +221,7 @@ function k_gemv_q6k!(part, W, D, xt, xsm, nb::Int32, rows::Int32, ::Val{P}) wher
                     w = 4 * (is - 1) + ww
                     ql = m & 1 == 1 ? qla[w] : qlb[w]
                     q = ((ql >> (m > 2 ? 4 : 0)) & 0x0f0f0f0f) | ((qh[w] >> (2m - 2)) & 0x03030303) << 4
-                    xm = xc(xt, sgate(Int32(256 * P) * b, tks[1]) + Int32((128 * (h - 1) + 32 * (m - 1) + 4 * (w - 1)) * P), Val(4P))
+                    xm = xc(xt, (Int32(256) * b + Int32(128 * (h - 1) + 32 * (m - 1) + 4 * (w - 1))) * Int32(P), Val(4P))
                     Base.Cartesian.@nexprs 4 i -> (sm = fmav(sm, Float32((q >> (8i - 8)) & 0xff), xm, (i - 1) * P))
                 end
                 gi = 8 * (h - 1) + (is - 1) + 2 * (m - 1)                   # the group (and scale) index in the block
