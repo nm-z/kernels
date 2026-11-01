@@ -139,6 +139,12 @@ end
     !0 = !{}
     """, "ldc"), Float32, Tuple{Core.LLVMPtr{Float32,1},Int32}, pointer(x), Int32(i))
 @inline xc(x, i, ::Val{N}) where {N} = ntuple(j -> ldc(x, i + Int32(j - 1)), Val(N))
+# q, made to depend on dep (an empty asm the compiler can't see through): a word's quants are converted only after
+# the word LA(P) back has been multiplied in, so the scheduler can't hold a whole block of converted floats
+@inline vgate(q::UInt32, dep::Float32) = Base.llvmcall("""
+    %r = call i32 asm "; vgate \$0 \$2", "=v,0,v"(i32 %0, float %1)
+    ret i32 %r""", UInt32, Tuple{UInt32,Float32}, q, dep)
+@inline LA(P) = clamp(8 ÷ P, 1, 8)
 @inline f16(u) = Float32(reinterpret(Float16, UInt16(u)))
 @inline fmav(a::NTuple{P,Float32}, w, x, o) where {P} = ntuple(p -> fma(w, x[o+p], a[p]), Val(P))
 # x[p ldx + k] into xt[k P + p], and the sum of each GS-element group into xsm[g P + p]
@@ -206,7 +212,7 @@ end
 function k_gemv_q6k!(part, W, D, xt, xsm, nb::Int32, rows::Int32, ::Val{P}) where {P}
     t = Int32(workitemIdx().x) - Int32(1); lane = t & Int32(63); G = (Int32(workgroupIdx().x) - Int32(1)) * Int32(4) + (t >> Int32(6))
     sl = Int32(workgroupIdx().y) - Int32(1); b0 = sl * Int32(KS ÷ 256); nbs = min(Int32(KS ÷ 256), nb - b0)
-    acc = ntuple(_ -> 0.0f0, Val(P))
+    acc = ntuple(_ -> 0.0f0, Val(P)); tks = ntuple(_ -> 0.0f0, Val(LA(P)))
     o = (G * nb + b0) * Int32(13 * 1024) + lane * Int32(16); od = (G * nb + b0) * Int32(64) + lane + Int32(1)
     for b in b0:b0+nbs-Int32(1)
         d = f16(@inbounds D[od]); od += Int32(64)
@@ -220,9 +226,10 @@ function k_gemv_q6k!(part, W, D, xt, xsm, nb::Int32, rows::Int32, ::Val{P}) wher
                 Base.Cartesian.@nexprs 4 ww -> begin
                     w = 4 * (is - 1) + ww
                     ql = m & 1 == 1 ? qla[w] : qlb[w]
-                    q = ((ql >> (m > 2 ? 4 : 0)) & 0x0f0f0f0f) | ((qh[w] >> (2m - 2)) & 0x03030303) << 4
+                    q = vgate(((ql >> (m > 2 ? 4 : 0)) & 0x0f0f0f0f) | ((qh[w] >> (2m - 2)) & 0x03030303) << 4, tks[1])
                     xm = xc(xt, (Int32(256) * b + Int32(128 * (h - 1) + 32 * (m - 1) + 4 * (w - 1))) * Int32(P), Val(4P))
                     Base.Cartesian.@nexprs 4 i -> (sm = fmav(sm, Float32((q >> (8i - 8)) & 0xff), xm, (i - 1) * P))
+                    tks = (Base.tail(tks)..., sm[1])
                 end
                 gi = 8 * (h - 1) + (is - 1) + 2 * (m - 1)                   # the group (and scale) index in the block
                 ds = d * Float32(reinterpret(Int8, UInt8((sc[gi>>2+1] >> (8 * (gi & 3))) & 0xff)))
