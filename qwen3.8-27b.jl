@@ -329,7 +329,7 @@ const NR = 2                                               # requests at once
 @inline slp(A::KA, r, j) = ld(A.sl, 4Int64(r) + j)
 const NMAT = 8                                             # matrix (and vector) slots a layer in the table
 const TABF = 65 * NMAT * 5                                 # where the f32-vector offsets start in the table
-const TOUT = Int64(1_000_000_000)                          # 10 s of the 100 MHz clock: a wait longer than this aborts
+const TOUT = Int64(270_000_000)                            # 10 s of the 27 MHz clock: a wait longer than this aborts
 @inline mat(A::KA, l, j) = (e = (Int64(l) * NMAT + j) * 5; (unsafe_load(A.tab, e + 1), Int32(unsafe_load(A.tab, e + 2)), Int32(unsafe_load(A.tab, e + 3)), Int32(unsafe_load(A.tab, e + 4)), unsafe_load(A.tab, e + 5)))
 @inline invf(A::KA, i) = reinterpret(Float64, unsafe_load(A.tab, TABF + 65NMAT + i + 1))   # rope inverse frequency i
 @inline fvec(A::KA, l, j) = reinterpret(LP{Float32}, unsafe_load(A.tab, TABF + Int64(l) * NMAT + j + 1))
@@ -1210,7 +1210,21 @@ end
 lp(T, p::Ptr) = reinterpret(LP{T}, p)
 lp(T, a::ROCArray) = reinterpret(LP{T}, pointer(a))
 struct PEngine
-    dies::Vector{Die}; K::Vector{KDie}; hx::HostX; nwg::Int; npos::Int; maxgen::Int; rid::Base.RefValue{Int}
+    dies::Vector{Die}; K::Vector{KDie}; hx::HostX; nwg::Int; npos::Int; maxgen::Int; rid::Base.RefValue{Int}; hz::Float64   # hz: memtime ticks a second
+end
+# memtime's rate (s_memrealtime: 27 MHz on these dies), from two spins of different lengths against the host clock
+function k_spin!(o, n::UInt64)
+    t0 = memtime()
+    while memtime() - t0 < n; end
+    unsafe_store!(pointer(o), memtime() - t0, 1)
+    return
+end
+function clockhz(D::Die)
+    AMDGPU.device!(D.dev); o = AMDGPU.zeros(UInt64, 1)
+    @roc k_spin!(o, UInt64(1000)); AMDGPU.synchronize()
+    t(n) = (t0 = time_ns(); @roc(k_spin!(o, UInt64(n))); AMDGPU.synchronize(); (time_ns() - t0) / 1e9, Array(o)[1])
+    t1, n1 = t(2_000_000); t2, n2 = t(20_000_000)
+    (n2 - n1) / (t2 - t1)
 end
 # npos: the positions a prefill forward takes, the most that fit (host exchange memory is the tighter bound here)
 function PEngine(dies; maxgen = 8192, npos = 4096)
@@ -1221,7 +1235,7 @@ function PEngine(dies; maxgen = 8192, npos = 4096)
     nb = Ref{Cint}(0); AMDGPU.HIP.hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(nb, k.fun, 256, 0)
     nwg = Int(nb[]) * 56
     0 < nwg <= NWG || error("persistent kernel: $(nb[]) workgroups a CU")
-    PEngine(dies, K, hx, nwg, npos, maxgen, Ref(0))
+    PEngine(dies, K, hx, nwg, npos, maxgen, Ref(0), clockhz(dies[1]))
 end
 function kargs(K, hx::HostX, d, maxctx, acct, inp, nreq, mode, nwg, lg, npos, rid)
     k = K[d]
@@ -1261,11 +1275,11 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
     res = NTuple{3,Float64}[]; tpre = 0.0; tdec = 0.0
     for d in 1:ND
         AMDGPU.device!(dies[d].dev); AMDGPU.synchronize()
-        ah = Array(accts[d]); wall = (ah[2] - ah[1]) / 1e8; iv = Tuple{Float64,Float64}[]
-        d == 1 && (tpre = (ah[3] - ah[1]) / 1e8; tdec = (ah[2] - ah[3]) / 1e8; LASTACCT[] = ah)
+        hz = PE.hz; ah = Array(accts[d]); wall = (ah[2] - ah[1]) / hz; iv = Tuple{Float64,Float64}[]
+        d == 1 && (tpre = (ah[3] - ah[1]) / hz; tdec = (ah[2] - ah[3]) / hz; LASTACCT[] = ah)
         for s in 0:nphase-1
             b = ah[4+2s]; e = ah[5+2s]; b == typemax(UInt64) && continue
-            push!(iv, ((b - ah[1]) / 1e8, (e - ah[1]) / 1e8))
+            push!(iv, ((b - ah[1]) / hz, (e - ah[1]) / hz))
         end
         ins = union_len(iv)                                # the phases overlap (an exchange writes while it reads)
         push!(res, (ins, wall - ins, wall))
@@ -1344,7 +1358,7 @@ end
 function pinit()
     t0 = time(); PK[] === nothing || (foreach(K -> foreach(a -> a isa ROCArray && AMDGPU.unsafe_free!(a), (getfield(K, f) for f in fieldnames(typeof(K)))), PK[].K); AMDGPU.HIP.hipHostFree(PK[].hx.p))
     PK[] = PEngine(SRV[].dies)
-    @printf("persistent kernel: %d workgroups a die, %d positions a prefill forward, compiled in %.0f s\n", PK[].nwg, PK[].npos, time() - t0); flush(stdout)
+    @printf("persistent kernel: %d workgroups a die, %d positions a prefill forward, clock %.2f MHz, compiled in %.0f s\n", PK[].nwg, PK[].npos, PK[].hz / 1e6, time() - t0); flush(stdout)
 end
 function serve(path, sock)
     dies, g = load_engine(path)
