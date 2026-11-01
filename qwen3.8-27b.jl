@@ -650,7 +650,7 @@ struct KA
 end
 const NMAT = 8                                             # matrix (and vector) slots a layer in the table
 const TABF = 65 * NMAT * 5                                 # where the f32-vector offsets start in the table
-const XSZ = 2 * ND * PMAX * NE                             # host exchange floats (2 slots), then the argmax exchange
+const XSZ = 2 * ND * PMAX * NE                             # host exchange words (2 slots), then the argmax exchange
 const TOUT = Int64(1_000_000_000)                          # 10 s of the 100 MHz clock: a wait longer than this aborts
 @inline mat(A::KA, l, j) = (e = (Int64(l) * NMAT + j) * 5; (unsafe_load(A.tab, e + 1), Int32(unsafe_load(A.tab, e + 2)), Int32(unsafe_load(A.tab, e + 3)), Int32(unsafe_load(A.tab, e + 4)), unsafe_load(A.tab, e + 5)))
 @inline fvec(A::KA, l, j) = reinterpret(LP{Float32}, unsafe_load(A.tab, TABF + Int64(l) * NMAT + j + 1))
@@ -726,47 +726,93 @@ end
 @inline function done!(A::KA, seq, t0, did)                # a workgroup's part of phase seq into the accounting
     did && tid() == Int32(0) && (p = A.acct + 8 * (3 + 2Int64(seq)); umin64(p, t0); umax64(p + 8, memtime()))
 end
-@inline hxs(A::KA, slot, d) = A.hx + 4 * ((Int64(slot) * ND + d) * PMAX * NE)
-# this die's share of an exchange: the K-slice sums of matrix (l, j) (rows NE)
-function xw_ph!(A::KA, l::Int32, j::Int32, slot::Int32, seq::Int32, P::Int32)
-    t0 = memtime(); did = false
-    _, rows, nb, _, _ = mat(A, l, j); ns = nsl(nb); hb = hxs(A, slot, A.d)
-    i = gtid()
+# the exchange words: (value bits, exchange number + 1), so a reader polls the data itself (the host memory is zeroed
+# before each request)
+@inline hxs(A::KA, slot, d) = reinterpret(LP{UInt64}, A.hx + 8 * ((Int64(slot) * ND + d) * PMAX * NE))
+@inline st64_sys(p::LP{UInt64}, v::UInt64) = Base.llvmcall("store atomic volatile i64 %1, ptr addrspace(1) %0 monotonic, align 8\nret void", Cvoid, Tuple{LP{UInt64},UInt64}, p, v)
+@inline ld64_sys(p::LP{UInt64}) = Base.llvmcall("%r = load atomic volatile i64, ptr addrspace(1) %0 monotonic, align 8\nret i64 %r", UInt64, Tuple{LP{UInt64}}, p)
+@inline ldsadd(p, v::Float32) = Base.llvmcall("%r = atomicrmw fadd ptr addrspace(3) %0, float %1 monotonic, align 4\nret float %r", Float32, Tuple{Core.LLVMPtr{Float32,3},Float32}, p, v)
+# the embedding value of row r (this die's vocabulary rows, repacked Q5_K), element k
+@inline function embval(W::LP{UInt8}, r::Int32, k::Int32)
+    b = k >> Int32(8); e = k & Int32(255)
+    G = r >> Int32(6); lane = r & Int32(63); base = (G * Int32(20) + b) * Int32(11 * 1024) + Int32(16) * lane
+    byte(j) = ld(W, base + (j >> Int32(4)) * Int32(1024) + (j & Int32(15)))
+    d = f16(UInt16(byte(Int32(0))) | UInt16(byte(Int32(1))) << 8); dmin = f16(UInt16(byte(Int32(2))) | UInt16(byte(Int32(3))) << 8)
+    s = e >> Int32(5); l = e & Int32(31)
+    sc, mn = if s < Int32(4)
+        byte(Int32(4) + s) & 0x3f, byte(Int32(8) + s) & 0x3f
+    else
+        (byte(Int32(8) + s) & 0x0f) | (byte(s) >> 6) << 4, (byte(Int32(8) + s) >> 4) | (byte(Int32(4) + s) >> 6) << 4
+    end
+    qs = byte(Int32(48) + Int32(32) * (s >> Int32(1)) + l); qh = byte(Int32(16) + l)
+    q = ((s & Int32(1)) == Int32(0) ? qs & 0x0f : qs >> 4) | ((qh >> s) & 0x01) << 4
+    d * Float32(sc) * Float32(q) - dmin * Float32(mn)
+end
+# The exchange, one thread an element of x: this die's share (the K-slice sums of matrix (l, j), or with j < 0 its
+# embedding rows of tok[p]) goes to host memory; then the other dies' shares of the same element are read (polled
+# until their exchange numbers match), x (+)= the sum, and the next norm's input is prepared: x w into xt with its
+# 16- and 32-sums, and each workgroup's sum of squares a position into red (the consumers apply 1 / rms). Phase seq is
+# the computing and writing; seq + 1 is the reading from when the first share arrived (the wait before it is idle).
+function xwr_ph!(A::KA, l::Int32, j::Int32, w::LP{Float32}, set::Bool, xs::Int32, seq::Int32, P::Int32)
+    sq = @ROCStaticLocalArray(Float32, PMAX, false)
+    t = tid(); t < P && st!(sq, 0.0f0, t)
+    t0 = memtime()
+    sync_workgroup()
+    did = false; slot = xs & Int32(1); tag = UInt64(xs + Int32(1)) << 32
+    rows = Int32(0); ns = Int32(0); W = reinterpret(LP{UInt8}, Int64(0))
+    if j >= Int32(0)
+        _, rows, nb, _, _ = mat(A, l, j); ns = nsl(nb)
+    else
+        woff, _, _, _, _ = mat(A, Int32(64), Int32(0)); W = reinterpret(LP{UInt8}, woff)
+    end
+    # write
+    i = gtid(); vals = 0.0f0
     while i < Int32(NE) * P
         p = i ÷ Int32(NE); k = i - p * Int32(NE)
-        st!(hb, psum(A, Int64(0), ns, rows, P, p, k), Int64(p) * NE + k); did = true; i += nthr(A)
-    end
-    fence_rel_sys()                                        # the share reaches host memory before the counter
-    done!(A, seq, t0, did)
-end
-# this die's share of the embedding: its vocabulary rows of tok[p] (repacked Q5_K), zeros for the others
-function xe_ph!(A::KA, slot::Int32, seq::Int32, P::Int32)
-    t0 = memtime(); did = false
-    woff, _, _, _, _ = mat(A, Int32(64), Int32(0)); W = reinterpret(LP{UInt8}, woff); hb = hxs(A, slot, A.d)
-    i = gtid()
-    while i < Int32(NE) * P
-        p = i ÷ Int32(NE); k = i - p * Int32(NE); b = k >> Int32(8); e = k & Int32(255)
-        r = ld(A.tok, p) - Int32(VPD) * A.d; v = 0.0f0
-        if r >= Int32(0) && r < Int32(VPD)
-            G = r >> Int32(6); lane = r & Int32(63); base = (G * Int32(20) + b) * Int32(11 * 1024) + Int32(16) * lane
-            byte(j) = ld(W, base + (j >> Int32(4)) * Int32(1024) + (j & Int32(15)))
-            d = f16(UInt16(byte(Int32(0))) | UInt16(byte(Int32(1))) << 8); dmin = f16(UInt16(byte(Int32(2))) | UInt16(byte(Int32(3))) << 8)
-            s = e >> Int32(5); l = e & Int32(31)
-            sc, mn = if s < Int32(4)
-                byte(Int32(4) + s) & 0x3f, byte(Int32(8) + s) & 0x3f
-            else
-                (byte(Int32(8) + s) & 0x0f) | (byte(s) >> 6) << 4, (byte(Int32(8) + s) >> 4) | (byte(Int32(4) + s) >> 6) << 4
-            end
-            qs = byte(Int32(48) + Int32(32) * (s >> Int32(1)) + l); qh = byte(Int32(16) + l)
-            q = ((s & Int32(1)) == Int32(0) ? qs & 0x0f : qs >> 4) | ((qh >> s) & 0x01) << 4
-            v = d * Float32(sc) * Float32(q) - dmin * Float32(mn)
+        v = if j >= Int32(0)
+            psum(A, Int64(0), ns, rows, P, p, k)
+        else
+            r = ld(A.tok, p) - Int32(VPD) * A.d
+            r >= Int32(0) && r < Int32(VPD) ? embval(W, r, k) : 0.0f0
         end
-        st!(hb, v, Int64(p) * NE + k); did = true; i += nthr(A)
+        st64_sys(hxs(A, slot, A.d) + 8 * (Int64(p) * NE + k), UInt64(reinterpret(UInt32, v)) | tag)
+        did = true; i += nthr(A)
     end
     fence_rel_sys()
+    t1 = memtime()
     done!(A, seq, t0, did)
+    # read (one element a thread a pass: the same elements as written)
+    ta = UInt64(0); i = gtid()
+    while i < Int32(NE) * P
+        p = i ÷ Int32(NE); k = i - p * Int32(NE); o = Int64(p) * NE + k
+        v = set ? 0.0f0 : ld(A.x, o)
+        for d in Int32(0):Int32(ND - 1)
+            q = hxs(A, slot, d) + 8o; u = ld64_sys(q)
+            if u & 0xffffffff00000000 != tag
+                tw = memtime()
+                while u & 0xffffffff00000000 != tag
+                    (memtime() - tw > TOUT || aborted(A)) && (atadd(A.bar + 8, UInt32(1)); break)
+                    u = ld64_sys(q)
+                end
+            end
+            v += reinterpret(Float32, UInt32(u & 0xffffffff))
+        end
+        ta == UInt64(0) && (ta = memtime())
+        st!(A.x, v, o); xw = v * ld(w, k); st!(A.xt, xw, Int64(k) * P + p)
+        ldsadd(pointer(sq) + 4p, v * v)
+        a = xw
+        for sh in (Cint(1), Cint(2), Cint(4), Cint(8)); a += AMDGPU.Device.shfl_xor(a, sh); end
+        b = a + AMDGPU.Device.shfl_xor(a, Cint(16))
+        k & Int32(15) == Int32(0) && st!(A.x16, a, Int64(k >> Int32(4)) * P + p)
+        k & Int32(31) == Int32(0) && st!(A.x32, b, Int64(k >> Int32(5)) * P + p)
+        i += nthr(A)
+    end
+    sync_workgroup()
+    t < P && st!(A.red, ld(sq, t), Int64(wgid()) * PMAX + t)
+    did && tid() == Int32(0) && (pa = A.acct + 8 * (3 + 2Int64(seq + Int32(1))); umin64(pa, ta); umax64(pa + 8, memtime()))
 end
-# raise this die's exchange counter and wait for the other dies' (workgroup 0; the rest wait at the next barrier)
+# raise this die's exchange counter and wait for the other dies' (workgroup 0; the rest wait at the next barrier):
+# the argmax exchange
 function xsig!(A::KA, xs::Int32)
     if wgid() == Int32(0) && tid() == Int32(0) && !aborted(A)
         fence_rel_sys(); strel_sys(A.hf + 4A.d, UInt32(xs + Int32(1)))
@@ -780,51 +826,30 @@ function xsig!(A::KA, xs::Int32)
         fence_acq_sys()
     end
 end
-# x (+)= the four dies' shares; each workgroup's sum of squares a position into red
-function xr_ph!(A::KA, slot::Int32, set::Bool, seq::Int32, P::Int32)
-    red = @ROCStaticLocalArray(Float32, RED, false)
-    fence_acq_sys(); t0 = memtime(); did = false
-    for p in Int32(0):P-Int32(1)
-        sq = 0.0f0; k = gtid()
-        while k < Int32(NE)
-            o = Int64(p) * NE + k; v = set ? 0.0f0 : ld(A.x, o)
-            for d in Int32(0):Int32(ND - 1); v += ld(hxs(A, slot, d), o); end
-            st!(A.x, v, o); sq += v * v; did = true; k += nthr(A)
-        end
-        s = wgsum(sq, red)
-        tid() == Int32(0) && st!(A.red, s, Int64(wgid()) * PMAX + p)
+# 1 / rms of position p of x (from the workgroups' sums of squares), for each p < P, into the shared rs
+@inline function rscale!(A::KA, rs, P)
+    t = tid()
+    if t < P
+        ss = 0.0f0
+        for q in Int32(0):A.nwg-Int32(1); ss += ld(A.red, Int64(q) * PMAX + t); end
+        st!(rs, 1.0f0 / sqrt(ss / Float32(NE) + EPS), t)
     end
-    done!(A, seq, t0, did)
-end
-# h = rmsnorm(x) w into xt[k P + p], with the sums of each 16 and 32 consecutive k (x16, x32)
-function norm_ph!(A::KA, w::LP{Float32}, seq::Int32, P::Int32)
-    t0 = memtime(); did = false; i = gtid()
-    while i < Int32(NE ÷ 32) * P
-        g = i ÷ P; p = i - g * P; ss = 0.0f0
-        for q in Int32(0):A.nwg-Int32(1); ss += ld(A.red, Int64(q) * PMAX + p); end
-        r = 1.0f0 / sqrt(ss / Float32(NE) + EPS); a = 0.0f0; b = 0.0f0
-        for e in Int32(0):Int32(31)
-            k = Int32(32) * g + e; v = ld(A.x, Int64(p) * NE + k) * r * ld(w, k)
-            st!(A.xt, v, Int64(k) * P + p); e < Int32(16) ? (a += v) : (b += v)
-        end
-        st!(A.x16, a, Int64(2g) * P + p); st!(A.x16, b, Int64(2g + 1) * P + p); st!(A.x32, a + b, Int64(g) * P + p)
-        did = true; i += nthr(A)
-    end
-    done!(A, seq, t0, did)
+    sync_workgroup()
 end
 const JQKV = (Int32(0), Int32(1), Int32(2), Int32(3))      # qkv z alpha beta  |  q k v
 const JQKVA = (Int32(0), Int32(1), Int32(2))
 const JFF = (Int32(5), Int32(6))                            # gate up
 # DeltaNet conv + silu, one thread a channel
 function conv_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
-    t0 = memtime(); c = gtid(); did = c < Int32(QKVD)
+    t0 = memtime(); rs = @ROCStaticLocalArray(Float32, PMAX, false); rscale!(A, rs, P)
+    c = gtid(); did = c < Int32(QKVD)
     if did
         _, rows, nb, _, _ = mat(A, l, Int32(0)); ns = nsl(nb)
         ring = A.ring + 4 * (Int64(ridx(l)) * 3 * QKVD); cw = fvec(A, l, 2)
         r1 = ld(ring, 3c); r2 = ld(ring, 3c + 1); r3 = ld(ring, 3c + 2)
         w1 = ld(cw, 4c); w2 = ld(cw, 4c + 1); w3 = ld(cw, 4c + 2); w4 = ld(cw, 4c + 3)
         for p in Int32(0):P-Int32(1)
-            x = psum(A, Int64(0), ns, rows, P, p, c)
+            x = psum(A, Int64(0), ns, rows, P, p, c) * ld(rs, p)
             st!(A.u, silu(w1 * r1 + w2 * r2 + w3 * r3 + w4 * x), Int64(p) * QKVD + c)
             r1, r2, r3 = r2, r3, x
         end
@@ -837,8 +862,10 @@ end
 function rec_ph!(A::KA, l::Int32, seq::Int32, ::Val{P}) where {P}
     qs = @ROCStaticLocalArray(Float32, DK, false); ks = @ROCStaticLocalArray(Float32, DK, false)
     ob = @ROCStaticLocalArray(Float32, DK, false); red = @ROCStaticLocalArray(Float32, RED, false)
+    rs = @ROCStaticLocalArray(Float32, PMAX, false)
     lv = wgid(); lv < Int32(VHD) || return
-    t0 = memtime(); kh = lv & Int32(3); t = tid(); i = t >> Int32(1); jh = t & Int32(1)
+    t0 = memtime(); rscale!(A, rs, Int32(P))
+    kh = lv & Int32(3); t = tid(); i = t >> Int32(1); jh = t & Int32(1)
     ri = ridx(l); Sp = A.S + 4 * (Int64(ri) * VHD * DK * DK); so = (Int64(lv) * DK + i) * DK + 64jh
     _, _, nbz, _, _ = mat(A, l, Int32(1)); nsz = nsl(nbz); oz = pof(A, l, JQKV, 2, P)
     _, _, nba, _, _ = mat(A, l, Int32(2)); nsa = nsl(nba); oa = pof(A, l, JQKV, 3, P); ob4 = pof(A, l, JQKV, 4, P)
@@ -854,8 +881,8 @@ function rec_ph!(A::KA, l::Int32, seq::Int32, ::Val{P}) where {P}
             st!(qs, qv / max(nq, EPS), t); st!(ks, kv / max(nk, EPS), t)
         end
         sync_workgroup()
-        x = psum(A, oa, nsa, Int32(64), P, p, lv) + ld(dtb, lv); sp = x > 20.0f0 ? x : log1p(exp(x))
-        a = exp(ld(ssa, lv) * sp); bt = 1.0f0 / (1.0f0 + exp(-psum(A, ob4, nsa, Int32(64), P, p, lv)))
+        x = psum(A, oa, nsa, Int32(64), P, p, lv) * ld(rs, p) + ld(dtb, lv); sp = x > 20.0f0 ? x : log1p(exp(x))
+        a = exp(ld(ssa, lv) * sp); bt = 1.0f0 / (1.0f0 + exp(-psum(A, ob4, nsa, Int32(64), P, p, lv) * ld(rs, p)))
         s = let s = s; ntuple(j -> s[j] * a, Val(64)) end
         e = 0.0f0
         for j in 1:64; e = fma(s[j], ld(ks, Int32(64) * jh + Int32(j - 1)), e); end
@@ -867,7 +894,7 @@ function rec_ph!(A::KA, l::Int32, seq::Int32, ::Val{P}) where {P}
         o = (o + AMDGPU.Device.shfl_xor(o, Cint(1))) * isc
         r = 1.0f0 / sqrt(wgsum(jh == Int32(0) ? o * o : 0.0f0, red) / Float32(DK) + EPS)
         if jh == Int32(0)
-            z = psum(A, oz, nsz, Int32(DK * VHD), P, p, DK * lv + i)
+            z = psum(A, oz, nsz, Int32(DK * VHD), P, p, DK * lv + i) * ld(rs, p)
             v = o * r * ld(sn, i) * silu(z); k = DK * lv + i
             st!(A.xt, v, Int64(k) * P + p); st!(ob, v, i)
         end
@@ -885,7 +912,8 @@ end
 # attention input: rmsnorm and neox rope of the 6 query heads and the KV head; the key and value into the cache
 function aprep_ph!(A::KA, l::Int32, pos0::Int32, seq::Int32, P::Int32)
     L = @ROCStaticLocalArray(Float32, HD, false); red = @ROCStaticLocalArray(Float32, RED, false)
-    t0 = memtime(); did = false; t = tid()
+    t0 = memtime(); rs = @ROCStaticLocalArray(Float32, PMAX, false); rscale!(A, rs, P)
+    did = false; t = tid()
     _, rq, nbq, _, _ = mat(A, l, Int32(0)); nsq = nsl(nbq)
     _, rk, nbk, _, _ = mat(A, l, Int32(1)); nsk = nsl(nbk); ok = pof(A, l, JQKVA, 2, P)
     _, rv, nbv, _, _ = mat(A, l, Int32(2)); nsv = nsl(nbv); ov = pof(A, l, JQKVA, 3, P)
@@ -893,7 +921,7 @@ function aprep_ph!(A::KA, l::Int32, pos0::Int32, seq::Int32, P::Int32)
     it = wgid()
     while it < Int32(7) * P
         hx = it % Int32(7); p = it ÷ Int32(7)
-        val = hx < Int32(6) ? psum(A, Int64(0), nsq, rq, P, p, Int32(512) * hx + t) : psum(A, ok, nsk, rk, P, p, t)
+        val = (hx < Int32(6) ? psum(A, Int64(0), nsq, rq, P, p, Int32(512) * hx + t) : psum(A, ok, nsk, rk, P, p, t)) * ld(rs, p)
         w = hx < Int32(6) ? ld(qn, t) : ld(kn, t)
         v = val * (1.0f0 / sqrt(wgsum(val * val, red) / Float32(HD) + EPS)) * w
         st!(L, v, t)
@@ -905,10 +933,10 @@ function aprep_ph!(A::KA, l::Int32, pos0::Int32, seq::Int32, P::Int32)
         end
         if hx < Int32(6)
             st!(A.qh, v, Int64(p) * 1536 + HD * hx + t)
-            st!(A.gh, psum(A, Int64(0), nsq, rq, P, p, Int32(512) * hx + Int32(HD) + t), Int64(p) * 1536 + HD * hx + t)
+            st!(A.gh, psum(A, Int64(0), nsq, rq, P, p, Int32(512) * hx + Int32(HD) + t) * ld(rs, p), Int64(p) * 1536 + HD * hx + t)
         else
             st!(A.kc, Float16(v), koff + Int64(pos0 + p) * HD + t)
-            st!(A.vc, Float16(psum(A, ov, nsv, rv, P, p, t)), koff + Int64(pos0 + p) * HD + t)
+            st!(A.vc, Float16(psum(A, ov, nsv, rv, P, p, t) * ld(rs, p)), koff + Int64(pos0 + p) * HD + t)
         end
         sync_workgroup()
         did = true; it += A.nwg
@@ -977,13 +1005,14 @@ function acomb_ph!(A::KA, pos0::Int32, seq::Int32, P::Int32)
 end
 # FFN: silu(gate) up into xt (the down-projection's x) with its 16- and 32-sums (Q6_K or Q5_K)
 function act_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
-    t0 = memtime(); did = false; i = gtid()
+    t0 = memtime(); rs = @ROCStaticLocalArray(Float32, PMAX, false); rscale!(A, rs, P)
+    did = false; i = gtid()
     _, rg, nbg, _, _ = mat(A, l, Int32(5)); ns = nsl(nbg); ou = pof(A, l, JFF, 2, P)
     while i < Int32(4352 ÷ 32) * P
         g = i ÷ P; p = i - g * P; a = 0.0f0; b = 0.0f0
         for e in Int32(0):Int32(31)
             k = Int32(32) * g + e
-            v = silu(psum(A, Int64(0), ns, rg, P, p, k)) * psum(A, ou, ns, rg, P, p, k)
+            v = silu(psum(A, Int64(0), ns, rg, P, p, k) * ld(rs, p)) * (psum(A, ou, ns, rg, P, p, k) * ld(rs, p))
             st!(A.xt, v, Int64(k) * P + p); e < Int32(16) ? (a += v) : (b += v)
         end
         st!(A.x16, a, Int64(2g) * P + p); st!(A.x16, b, Int64(2g + 1) * P + p); st!(A.x32, a + b, Int64(g) * P + p)
@@ -994,12 +1023,13 @@ end
 # the head: K-slice sums (logits into lg in score mode) and each workgroup's best (logit, row) a position
 function hmax_ph!(A::KA, pos0::Int32, seq::Int32, P::Int32, pfirst::Int32)
     bv = @ROCStaticLocalArray(Float32, RED, false); bi = @ROCStaticLocalArray(Int32, RED, false)
-    t0 = memtime(); did = false; t = tid()
+    t0 = memtime(); rs = @ROCStaticLocalArray(Float32, PMAX, false); rscale!(A, rs, P)
+    did = false; t = tid()
     _, rows, nb, _, _ = mat(A, Int32(64), Int32(1)); ns = nsl(nb)
     for p in pfirst:P-Int32(1)
         v = -Inf32; ix = Int32(0); r = gtid()
         while r < Int32(VPD)
-            lg = psum(A, Int64(0), ns, rows, P, p, r)
+            lg = psum(A, Int64(0), ns, rows, P, p, r) * ld(rs, p)
             A.mode == Int32(1) && st!(A.lg, lg, Int64(pos0 + p) * VPD + r)
             lg > v && (v = lg; ix = r); did = true; r += nthr(A)
         end
@@ -1020,7 +1050,7 @@ function hmax_ph!(A::KA, pos0::Int32, seq::Int32, P::Int32, pfirst::Int32)
     end
     done!(A, seq, t0, did)
 end
-@inline hxa(A::KA, slot, d) = A.hx + 4 * (XSZ + (Int64(slot) * ND + d) * PMAX * 2)
+@inline hxa(A::KA, slot, d) = A.hx + 8XSZ + 4 * ((Int64(slot) * ND + d) * PMAX * 2)
 # workgroup 0: the die's best over the workgroups, into the argmax exchange (row as a global vocabulary id)
 function hred_ph!(A::KA, slot::Int32, seq::Int32, p::Int32)
     (wgid() == Int32(0) && tid() == Int32(0)) || return
@@ -1051,12 +1081,9 @@ end
 function fwd!(A::KA, pos0::Int32, seq::Int32, xs::Int32, head::Bool, frominp::Bool, step::Int32, ::Val{P}) where {P}
     Pi = Int32(P)
     frominp && (tokin_ph!(A, pos0, Pi); gbar!(A))
-    xe_ph!(A, xs & Int32(1), seq, Pi); seq += Int32(1); gbar!(A)
-    xsig!(A, xs); gbar!(A)
-    xr_ph!(A, xs & Int32(1), true, seq, Pi); seq += Int32(1); xs += Int32(1); gbar!(A)
+    xwr_ph!(A, Int32(0), Int32(-1), fvec(A, 0, 0), true, xs, seq, Pi); seq += Int32(2); xs += Int32(1); gbar!(A)
     nlr = Int32(ldacq(A.bar + 12)); nl = nlr == Int32(0) ? Int32(NL) : nlr   # bar[3]: layers to run (0: all), for debugging
     for l in Int32(0):nl-Int32(1)
-        norm_ph!(A, fvec(A, l, 0), seq, Pi); seq += Int32(1); gbar!(A)
         if isrec(l)
             gemv_ph!(A, l, JQKV, seq, Val(P)); seq += Int32(1); gbar!(A)
             conv_ph!(A, l, seq, Pi); seq += Int32(1); gbar!(A)
@@ -1068,19 +1095,14 @@ function fwd!(A::KA, pos0::Int32, seq::Int32, xs::Int32, head::Bool, frominp::Bo
             acomb_ph!(A, pos0, seq, Pi); seq += Int32(1); gbar!(A)
         end
         gemv_ph!(A, l, (Int32(4),), seq, Val(P)); seq += Int32(1); gbar!(A)
-        xw_ph!(A, l, Int32(4), xs & Int32(1), seq, Pi); seq += Int32(1); gbar!(A)
-        xsig!(A, xs); gbar!(A)
-        xr_ph!(A, xs & Int32(1), false, seq, Pi); seq += Int32(1); xs += Int32(1); gbar!(A)
-        norm_ph!(A, fvec(A, l, 1), seq, Pi); seq += Int32(1); gbar!(A)
+        xwr_ph!(A, l, Int32(4), fvec(A, l, 1), false, xs, seq, Pi); seq += Int32(2); xs += Int32(1); gbar!(A)
         gemv_ph!(A, l, JFF, seq, Val(P)); seq += Int32(1); gbar!(A)
         act_ph!(A, l, seq, Pi); seq += Int32(1); gbar!(A)
         gemv_ph!(A, l, (Int32(7),), seq, Val(P)); seq += Int32(1); gbar!(A)
-        xw_ph!(A, l, Int32(7), xs & Int32(1), seq, Pi); seq += Int32(1); gbar!(A)
-        xsig!(A, xs); gbar!(A)
-        xr_ph!(A, xs & Int32(1), false, seq, Pi); seq += Int32(1); xs += Int32(1); gbar!(A)
+        wn = l < nl - Int32(1) ? fvec(A, l + Int32(1), 0) : fvec(A, 64, 0)
+        xwr_ph!(A, l, Int32(7), wn, false, xs, seq, Pi); seq += Int32(2); xs += Int32(1); gbar!(A)
     end
     if head
-        norm_ph!(A, fvec(A, Int32(64), 0), seq, Pi); seq += Int32(1); gbar!(A)
         gemv_ph!(A, Int32(64), (Int32(1),), seq, Val(P)); seq += Int32(1); gbar!(A)
         gen = A.mode == Int32(0)
         hmax_ph!(A, pos0, seq, Pi, gen ? Pi - Int32(1) : Int32(0)); seq += Int32(1); gbar!(A)
@@ -1092,6 +1114,7 @@ function fwd!(A::KA, pos0::Int32, seq::Int32, xs::Int32, head::Bool, frominp::Bo
     end
     seq, xs
 end
+
 # the request: prefill (or score) the input PMAX positions a forward (the rest one at a time), then decode ngen
 function k_req!(A::KA)
     tid() == Int32(0) && umin64(A.acct, memtime())
@@ -1308,7 +1331,7 @@ end
 struct HostX
     p::Ptr{UInt8}; nbytes::Int
 end
-const HXOUT = 4 * (XSZ + 2 * ND * PMAX * 2)                 # byte offsets: counters, then tokens
+const HXOUT = 8XSZ + 4 * (2 * ND * PMAX * 2)                 # byte offsets: counters, then tokens
 const HXTOK = HXOUT + 64
 function HostX(maxgen)
     n = HXTOK + 4 * maxgen; r = Ref{Ptr{Cvoid}}(C_NULL)
@@ -1343,7 +1366,7 @@ end
 # idle, wall) seconds.
 function request!(PE::PEngine, st::Vector{DState}, inp::Vector{Int}, ngen::Int, mode::Int; lgs = nothing)
     E = PE.E; nf = cld(length(inp), PMAX) + PMAX + ngen; nphase = nf * 1100
-    unsafe_store!(Ptr{UInt32}(PE.hx.p + HXOUT), 0, 1); for d in 2:ND; unsafe_store!(Ptr{UInt32}(PE.hx.p + HXOUT), 0, d); end
+    ccall(:memset, Ptr{Cvoid}, (Ptr{UInt8}, Cint, Csize_t), PE.hx.p, 0, HXTOK)   # exchange words and counters
     accts = ROCVector{UInt64}[]
     for d in 1:ND
         AMDGPU.device!(E.dies[d].dev)
@@ -1356,12 +1379,13 @@ function request!(PE::PEngine, st::Vector{DState}, inp::Vector{Int}, ngen::Int, 
     res = NTuple{3,Float64}[]; tpre = 0.0; tdec = 0.0
     for d in 1:ND
         AMDGPU.device!(E.dies[d].dev); AMDGPU.synchronize()
-        ah = Array(accts[d]); wall = (ah[2] - ah[1]) / 1e8; ins = 0.0
+        ah = Array(accts[d]); wall = (ah[2] - ah[1]) / 1e8; iv = Tuple{Float64,Float64}[]
         d == 1 && (tpre = (ah[3] - ah[1]) / 1e8; tdec = (ah[2] - ah[3]) / 1e8)
         for s in 0:nphase-1
             b = ah[4+2s]; e = ah[5+2s]; b == typemax(UInt64) && continue
-            ins += (e - b) / 1e8
+            push!(iv, ((b - ah[1]) / 1e8, (e - ah[1]) / 1e8))
         end
+        ins = union_len(iv)                                # the phases overlap (an exchange writes while it reads)
         push!(res, (ins, wall - ins, wall))
         AMDGPU.unsafe_free!(accts[d])
     end
