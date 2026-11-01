@@ -347,6 +347,7 @@ struct KA
     pk::LP{Int32}                                          # a position whose DeltaNet state and conv ring also go to the backup slots
     nem::LP{Int32}; drf::LP{Int32}; msel::LP{Int32}        # a request's tokens out, its draft, the draft's source (0, 1)
     spec::Int32                                            # decode with MTP drafts
+    stp1::Int32; stp2::Int32                               # tokens that end a request (-1: none)
 end
 const NR = 2                                               # requests at once
 const DW = 4                                               # the widest decode forward (with MTP: 2 positions a request)
@@ -1078,6 +1079,8 @@ function hred_ph!(A::KA, slot::Int32, seq::Int32, nq::Int32)
     hb = hxa(A, slot, A.d, q); st!(hb, v, 0); st!(hb, reinterpret(Float32, ix + Int32(VPD) * A.d), 1)
     done!(A, seq, t0, true)
 end
+@inline isstop(A::KA, t) = t == A.stp1 || t == A.stp2
+# a request's next token (its last at a stop token)
 function tok_ph!(A::KA, slot::Int32, seq::Int32, nq::Int32, pfirst::Int32)
     (wgid() == Int32(0) && tid() < nq) || return
     fence_acq_sys(); t0 = memtime(); v = -Inf32; ix = Int32(0); q = tid()
@@ -1087,7 +1090,7 @@ function tok_ph!(A::KA, slot::Int32, seq::Int32, nq::Int32, pfirst::Int32)
     end
     r = ld(A.posr, pfirst + q); st!(A.tks, ix, r); n = ld(A.nem, r)
     A.d == Int32(0) && st!(A.out, ix, ld(A.rq, 4r + Int32(3)) + n)
-    st!(A.nem, n + Int32(1), r)
+    st!(A.nem, isstop(A, ix) ? ld(A.rq, 4r + Int32(2)) : n + Int32(1), r)
     done!(A, seq, t0, true)
 end
 # the forward's positions: prefill, positions a0 .. a0 + P - 1 of request r; decode (r < 0), the next position of
@@ -1171,12 +1174,12 @@ function stok_ph!(A::KA, slot::Int32, seq::Int32, nq::Int32)
         ix
     end
     p = Int32(2) * j; r = ld(A.posr, p); acc = ld(A.tok, p + Int32(1)) == g[1]
-    n = ld(A.nem, r); ng = ld(A.rq, 4r + Int32(2)); two = acc && n + Int32(1) < ng
+    n = ld(A.nem, r); ng = ld(A.rq, 4r + Int32(2)); two = acc && n + Int32(1) < ng && !isstop(A, g[1])
     if A.d == Int32(0)
         st!(A.out, g[1], ld(A.rq, 4r + Int32(3)) + n)
         two && st!(A.out, g[2], ld(A.rq, 4r + Int32(3)) + n + Int32(1))
     end
-    st!(A.nem, n + (two ? Int32(2) : Int32(1)), r); st!(A.tks, acc ? g[2] : g[1], r); st!(A.msel, acc ? Int32(1) : Int32(0), r)
+    st!(A.nem, isstop(A, g[1]) || (two && isstop(A, g[2])) ? ng : n + (two ? Int32(2) : Int32(1)), r); st!(A.tks, acc ? g[2] : g[1], r); st!(A.msel, acc ? Int32(1) : Int32(0), r)
     if !acc
         for f in (0, 1)
             a = ld(A.sl, 6Int64(r) + f); st!(A.sl, ld(A.sl, 6Int64(r) + f + 4), 6Int64(r) + f); st!(A.sl, a, 6Int64(r) + f + 4)
@@ -1587,20 +1590,21 @@ function PEngine(dies; maxgen = 8192, npos = 1024)
     VHD * RSPL <= nwg <= NWG || error("persistent kernel: $(nb[]) workgroups a CU")
     PEngine(dies, K, hx, nwg, npos, maxgen, Ref(0), clockhz(dies[1]))
 end
-function kargs(K, hx::HostX, d, maxctx, acct, inp, nreq, mode, nwg, lg, npos, rid)
+function kargs(K, hx::HostX, d, maxctx, acct, inp, nreq, mode, nwg, lg, npos, rid; stops = (-1, -1))
     k = K[d]
     KA(lp(Int64, k.tab), lp(Float32, k.x), lp(Float32, k.xt), lp(Float32, k.x16), lp(Float32, k.x32), lp(Float32, k.part), lp(Float32, k.red),
        lp(Float32, k.u), lp(Float32, k.qh), lp(Float32, k.gh), lp(Float32, k.ap), lg === nothing ? lp(Float32, k.x) : lp(Float32, lg),
        lp(Int64, k.sl), Int32(maxctx), lp(Float32, hx.p), lp(UInt32, hx.c + hx.out), Int32(d - 1), lp(UInt32, k.bar), lp(UInt64, acct),
        lp(Int32, inp), lp(Int32, k.rq), Int32(nreq), lp(Int32, hx.c + hx.tok), Int32(mode), Int32(nwg), lp(Int32, k.tok),
        lp(Int32, k.posr), lp(Int32, k.posa), lp(Int32, k.tks), Int32(npos), lp(Int64, k.ssq), Int32(rid),
-       lp(Int32, k.pk), lp(Int32, k.nem), lp(Int32, k.drf), lp(Int32, k.msel), Int32(mode == 0 && SPEC[] ? 1 : 0))
+       lp(Int32, k.pk), lp(Int32, k.nem), lp(Int32, k.drf), lp(Int32, k.msel), Int32(mode == 0 && SPEC[] ? 1 : 0),
+       Int32(stops[1]), Int32(stops[2]))
 end
 # up to NR requests at once on the four dies, one dispatch a die. reqs: (input ids, tokens to generate) each, with
 # its state sts[r] (one DState a die). mode 0: greedy; mode 1: score one request\x27s input (the logits of every
 # position into lg, a die\x27s vocabulary rows). Returns each request\x27s tokens, each die\x27s (instruction, idle, wall)
 # seconds, and the prefill and decode seconds (die 0\x27s clock).
-function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
+function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing, stops = (-1, -1))
     dies = PE.dies; npos = mode == 1 ? min(PE.npos, NSCORE) : PE.npos; nr = length(reqs)
     1 <= nr <= NR || error("$nr requests: at most $NR at once")
     mc = minimum(s[1].maxctx for s in sts)
@@ -1623,7 +1627,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
         for r in 1:nr; fill!(sts[r][d].S, 0.0f0); fill!(sts[r][d].ring, 0.0f0); end   # a request starts from zero state
         up!(K.sl, Int64[addr(getfield(sts[r][d], f)) for r in 1:nr for f in (:S, :ring, :kc, :vc, :S2, :ring2)]); up!(K.nem, zeros(Int32, NR))
         ib = dev(inp); push!(ibs, ib)
-        A = kargs(PE.K, PE.hx, d, mc, a, ib, nr, mode, PE.nwg, lgs === nothing ? nothing : lgs[d], npos, rid)
+        A = kargs(PE.K, PE.hx, d, mc, a, ib, nr, mode, PE.nwg, lgs === nothing ? nothing : lgs[d], npos, rid; stops)
         @roc groupsize = 256 gridsize = PE.nwg maxthreads = 256 waves_per_eu = KWPE[] k_req!(A)
     end
     res = NTuple{3,Float64}[]; tpre = 0.0; tdec = 0.0
@@ -1743,16 +1747,51 @@ function serve(path, sock)
     while true
         c = accept(srv)
         @async try
-            line = readline(c)
-            lock(lk) do
-                Base.invokelatest(handle, c, line)        # the newest definitions, after a reload
-            end
+            Base.invokelatest(session, c, lk)              # the newest definitions, after a reload
         catch e
             println(c, "error: ", sprint(showerror, e, catch_backtrace()))
         finally
             close(c)
         end
     end
+end
+# flashd's engine protocol (flash-sass kern/flashd.c): "timings 1" and "cancel_on_eof 1" are acknowledged, "stop A B"
+# sets the stop tokens, "sample ..." (greedy here), "img" and "snap" are taken and ignored, "info" answers the positions,
+# "chat N ID ..." runs the request and streams "tok ID" lines as the kernel writes them to host memory, then
+# "done ngen ended nprompt run_ms first_ms 0 0". Any other first line is one of handle's commands.
+function session(c, lk)
+    stops = (-1, -1)
+    while !eof(c)
+        line = readline(c); a = split(line); isempty(a) && continue
+        if a[1] in ("timings", "cancel_on_eof")
+            println(c, "ok: ", line)
+        elseif a[1] == "stop"
+            v = parse.(Int, a[2:end]); stops = (length(v) >= 1 ? v[1] : -1, length(v) >= 2 && v[2] != 0xffffffff ? v[2] : -1)
+        elseif a[1] in ("sample", "img", "snap")
+        elseif a[1] == "info"
+            println(c, "info ", MAXCTX, " 0")
+        elseif a[1] == "chat"
+            lock(() -> chat(c, parse(Int, a[2]), parse.(Int, a[3:end]), stops), lk); return
+        else
+            lock(() -> handle(c, line), lk); return
+        end
+    end
+end
+function chat(c, nnew, ids, stops)
+    PE = PK[]; nnew = clamp(nnew, 1, min(PE.maxgen, MAXCTX - length(ids)))
+    outp = Ptr{Int32}(PE.hx.c + PE.hx.tok)
+    for i in 1:nnew; unsafe_store!(outp, Int32(-1), i); end
+    t0 = time(); job = Threads.@spawn request!(PE, [(ids, nnew)], SLOTS[][1:1], 0; stops)
+    n = 0; t1 = 0.0; ended = 0
+    pump() = while n < nnew
+        t = unsafe_load(outp, n + 1); t < 0 && break
+        n += 1; n == 1 && (t1 = time()); println(c, "tok ", t); (t == stops[1] || t == stops[2]) && (ended = 1)
+    end
+    while !istaskdone(job); pump(); flush(c); sleep(0.005); end
+    res = fetch(job); pump()
+    @printf(c, "done %d %d %d %.1f %.1f 0 0\n", n, ended, length(ids), 1e3(time() - t0), 1e3(t1 - t0)); flush(c)
+    @printf("chat: %d prompt, %d out, prefill %.2f tok/s, decode %.2f tok/s, idle time %.1f%%\n", length(ids), n,
+            length(ids) / res[3], max(n - 1, 0) / max(res[4], 1e-9), idlepct(res[2])); flush(stdout)
 end
 function handle(c, line)
     a = split(line); s = SRV[]
