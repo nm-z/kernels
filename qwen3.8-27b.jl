@@ -3,7 +3,7 @@
 # Model: mradermacher/Qwen3.8-27B-GGUF Q5_K_M (static K-quants: Q5_K, Q6_K, F32; its MTP layer is blk.64).
 # Reports only: prefill tok/s, decode tok/s, and each request's time split into instruction, transfer and idle.
 #   julia -t 24 q27v.jl --model FILE --bench-gemv      the quant GEMV kernels against a host dequant, and their GB/s
-using AMDGPU, Mmap, Printf
+using AMDGPU, Mmap, Printf, Sockets
 
 # ---------------------------------------------------------------------------------------------
 # GGUF (v3): metadata, tensor table, the file mapped read-only
@@ -651,8 +651,66 @@ function load_engine(path; maxctx = 4096)
 end
 newstate(E::Engine, maxctx) = [(AMDGPU.device!(D.dev); DState(maxctx)) for D in E.dies]
 
+# ---- byte-level BPE detokenizing (GPT-2 byte map) ----
+const BDEC = let bs = [33:126; 161:172; 174:255], cs = copy(bs), n = 0
+    for b in 0:255
+        b in bs || (push!(bs, b); push!(cs, 256 + n); n += 1)
+    end
+    Dict(Char(c) => UInt8(b) for (b, c) in zip(bs, cs))
+end
+detok(vocab, ids) = String(UInt8[get(BDEC, ch, UInt8('?')) for i in ids for ch in vocab[i+1]])
+
+# ---- greedy generation from token ids: prefill PMAX at a time, then one token a forward ----
+function gen(io, E::Engine, vocab, ids::Vector{Int}, n::Int)
+    st = newstate(E, cld(length(ids) + n, CH) * CH)
+    t0 = time(); Lg = nothing
+    for p0 in 0:PMAX:length(ids)-1
+        Lg = forward!(E, st, ids[p0+1:min(p0 + PMAX, end)], p0)
+    end
+    tp = time() - t0; out = Int[argmax(view(Lg, :, size(Lg, 2))) - 1]; t1 = time()
+    for i in 1:n-1
+        Lg = forward!(E, st, [out[end]], length(ids) + i - 1)
+        push!(out, argmax(view(Lg, :, 1)) - 1)
+    end
+    td = time() - t1
+    println(io, "ids: ", join(out, " "))
+    println(io, "text: ", repr(detok(vocab, out)))
+    @printf(io, "prefill %.2f tok/s, decode %.2f tok/s\n", length(ids) / tp, (n - 1) / td)
+end
+
+# ---- the resident server: weights load once; each connection sends one command line ----
+#   kl N REF.logits.f16        KL against BF16 reference logits over the first N tokens of REF's sequence
+#   gen N ID ID ...            greedy: N tokens after the given token ids
+#   echo 'gen 32 9707 11' | socat - UNIX-CONNECT:SOCK
+function serve(path, sock)
+    E, g = load_engine(path; maxctx = 4096)
+    vocab = g.kv["tokenizer.ggml.tokens"]; lk = ReentrantLock()
+    ispath(sock) && rm(sock)
+    srv = listen(sock); println("serving on $sock"); flush(stdout)
+    while true
+        c = accept(srv)
+        @async try
+            a = split(readline(c))
+            lock(lk) do
+                if a[1] == "kl"
+                    n = parse(Int, a[2]); ids = Int.(reinterpret(Int32, read(replace(a[3], ".logits.f16" => ".ids"))))
+                    kl_test(c, E, ids, a[3], n)
+                elseif a[1] == "gen"
+                    gen(c, E, vocab, parse.(Int, a[3:end]), parse(Int, a[2]))
+                else
+                    println(c, "unknown command: ", a[1])
+                end
+            end
+        catch e
+            println(c, "error: ", sprint(showerror, e, catch_backtrace()))
+        finally
+            close(c)
+        end
+    end
+end
+
 # ---- KL of the forward against BF16 reference logits ([position][vocab] f16) over the first n tokens ----
-function kl_test(E::Engine, ids, refpath, n)
+function kl_test(io, E::Engine, ids, refpath, n)
     st = newstate(E, cld(n, CH) * CH)
     ref = Mmap.mmap(refpath, Matrix{Float16}, (NV, n))
     kls = Float64[]; top = 0; t0 = time()
@@ -665,7 +723,7 @@ function kl_test(E::Engine, ids, refpath, n)
             push!(kls, sum(exp.(lr) .* (lr .- lo))); top += argmax(r) == argmax(o)
         end
     end
-    @printf("KL vs BF16 over %d positions: mean %.4f, median %.4f, max %.3f; top-1 agreement %.3f (%.1f s)\n",
+    @printf(io, "KL vs BF16 over %d positions: mean %.4f, median %.4f, max %.3f; top-1 agreement %.3f (%.1f s)\n",
         n, sum(kls) / n, sort(kls)[cld(n, 2)], maximum(kls), top / n, time() - t0)
 end
 
@@ -703,8 +761,9 @@ function main(args)
         n = parse(Int, args[i+1]); ref = args[i+2]
         ids = Int.(reinterpret(Int32, read(replace(ref, ".logits.f16" => ".ids"))))
         E, _ = load_engine(args[k+1]; maxctx = n)
-        return kl_test(E, ids, ref, n)
+        return kl_test(stdout, E, ids, ref, n)
     end
+    (i = findfirst(==("--serve"), args)) !== nothing && return serve(args[k+1], args[i+1])
     error("nothing to do: --bench-gemv")
 end
 if abspath(PROGRAM_FILE) == @__FILE__()

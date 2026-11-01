@@ -11,7 +11,7 @@
 # The converter preserves GSQ assignments; BF16->FP16 block scales incur the errors in its model card.
 # Weights are allocated once; one cooperative persistent dispatch executes a request.
 # The BF16 input embedding stays registered in host memory, with direct GPU reads.
-using AMDGPU, Mmap, Printf, Downloads, SHA, Random
+using AMDGPU, Mmap, Printf, Downloads, SHA, Random, TOML
 
 const MODEL_REV = "34a912bde355affe80eb1af654475a6fe9feff5f"
 const MODEL_FILE = "Qwen3.6-35B-A3B-GSQ-hybrid.gguf"
@@ -148,11 +148,21 @@ function DMat(g, name)
                 unsafe_copyto!(dst+34j+18,src+36j+20,16)
             end
         end
-        W=ROCArray(packed); AMDGPU.synchronize()
+        W=ROCArray(packed); AMDGPU.synchronize(); releasepages(g,t)
         return DMat(W,142,t.dims[1],prod(t.dims[2:end]))
     end
     W=ROCArray{UInt8}(undef,t.nbytes); copyto!(W,1,g.map,t.off+1,t.nbytes)
+    AMDGPU.synchronize(); releasepages(g,t)
     DMat(W,t.typ,t.dims[1],prod(t.dims[2:end]))
+end
+function releasepages(g,t)
+    # Uploaded tensors need no second host copy; avoid paging out live desktop apps.
+    GC.@preserve g begin
+        a=UInt(pointer(g.map))+UInt(t.off); lo=cld(a,UInt(4096))*UInt(4096)
+        hi=fld(a+UInt(t.nbytes),UInt(4096))*UInt(4096)
+        hi>lo && ccall(:madvise,Cint,(Ptr{Cvoid},Csize_t,Cint),Ptr{Cvoid}(lo),hi-lo,4)
+    end
+    nothing
 end
 function k_norm!(y, x, w, n::Int32, eps::Float32)
     ti = tid0(); s = @ROCStaticLocalArray(Float32, 256)
@@ -657,6 +667,8 @@ struct PBlock
     conv::UInt64
     kc::UInt64
     vc::UInt64
+    ss::UInt64
+    cs::UInt64
     linear::Bool
 end
 PMat(m::DMat)=PMat(UInt(pointer(m.W)),Int32(m.K),Int32(m.rows),Int32(m.typ))
@@ -683,7 +695,7 @@ end
     end
     AMDGPU.Device.sync_grid(); return
 end
-@inline function p_mul_t!(y,m,x,ids,mode::Int32,n::Int32,::Val{P},::Val{T}) where {P,T}
+@noinline function p_mul_t!(y,m,x,ids,mode::Int32,n::Int32,::Val{P},::Val{T}) where {P,T}
     ti=tid0(); lane=ti&Int32(31); bid=Int32(workgroupIdx().x)-Int32(1)
     ng=Int32(gridGroupDim().x); K=m.K; xs=Int32(length(x)÷8); ys=Int32(length(y)÷8)
     W=av(UInt8,m.ptr,Int64(typemax(Int32)))
@@ -715,6 +727,7 @@ end
 @inline function p_mul!(y,m,x,ids,n::Int32,P::Val,mode::Int32=Int32(0))
     if m.typ==142; p_mul_t!(y,m,x,ids,mode,n,P,Val(142))
     elseif m.typ==8; p_mul_t!(y,m,x,ids,mode,n,P,Val(8))
+    elseif m.typ==30; p_mul_t!(y,m,x,ids,mode,n,P,Val(30))
     else; p_mul_t!(y,m,x,ids,mode,n,P,Val(0))
     end
     AMDGPU.Device.sync_grid(); return
@@ -785,7 +798,7 @@ end
     end
     return
 end
-@inline function p_blocks!(blocks,normout,b,expertids,pos::Int32,n::Int32,P::Val,ctx::Int32,
+@noinline function p_blocks!(blocks,normout,b,expertids,pos::Int32,n::Int32,P::Val,ctx::Int32,
                           snapshot::Bool=false,capture::Bool=false,ropeoff::Int32=Int32(0))
     bid=Int32(workgroupIdx().x)-Int32(1); ng=Int32(gridGroupDim().x)
     @inbounds for l in Int32(1):Int32(length(blocks))
@@ -988,7 +1001,7 @@ end
     end
     AMDGPU.Device.sync_grid(); return
 end
-@inline function p_dpropose!(s,head,emb,pos::Int32,ei,part,ix)
+@noinline function p_dpropose!(s,head,emb,pos::Int32,ei,part,ix)
     d=s.db; bid=Int32(workgroupIdx().x)-Int32(1); ng=Int32(gridGroupDim().x)
     if gid0()==0; @inbounds for p in 2:8; s.proposal[p]=s.mask; end; end
     AMDGPU.Device.sync_grid(); p_embed!(d.x,emb,s.proposal,Int32(0),Int32(8))
@@ -1106,13 +1119,14 @@ mutable struct Engine
     g::GModel
     tk::Tok
     cfg::Config
-    weights::Vector{DMat}
-    floats::Vector{ROCArray{Float32,1}}
+    keep::Vector{Any}
+    states::Vector{Any}
     blocks::ROCArray{PBlock,1}
     head::PMat
     output_norm::ROCArray{Float32,1}
     embedding::ROCArray{UInt16,1}
     b::NamedTuple
+    spec::NamedTuple
     ids::ROCArray{Int32,1}
     output::ROCArray{Int32,1}
     control::ROCArray{Int32,1}
@@ -1122,102 +1136,265 @@ mutable struct Engine
     expertids::ROCArray{Int32,1}
     ctx::Int
     groups::Int
+    mode::Int
+    kernel::Any
 end
 z(n)=AMDGPU.zeros(Float32,n)
-function Engine(g,ctx;compileonly=false)
-    AMDGPU.functional() || error("AMDGPU is not functional")
-    c=Config(g); tk=Tok(g); weights=DMat[]; floats=ROCArray{Float32,1}[]; bs=PBlock[]
-    keepvec(v)=(push!(floats,v); UInt(pointer(v)))
-    for l in 0:39
-        p="blk.$l."; linear=haskey(g.tensors,p*"ssm_a")
-        ms=ntuple(17) do i
-            n=p*MNAMES[i]
-            haskey(g.tensors,n) || return PMat(0,0,0,0)
-            t=g.tensors[n]
-            m=compileonly ? DMat(AMDGPU.zeros(UInt8,1),t.typ==42 ? 142 : t.typ,t.dims[1],prod(t.dims[2:end])) : DMat(g,n)
-            push!(weights,m); PMat(m)
-        end
-        vs=ntuple(i->haskey(g.tensors,p*VNAMES[i]) ? keepvec(compileonly ? z(1) : ROCArray(tensor_f32(g,p*VNAMES[i]))) : UInt64(0),8)
-        push!(bs,PBlock(ms,vs,keepvec(z(compileonly ? 1 : linear ? 524288 : 0)),keepvec(z(compileonly ? 1 : linear ? 32768 : 0)),
-                       keepvec(z(compileonly ? 1 : linear ? 0 : 512ctx)),keepvec(z(compileonly ? 1 : linear ? 0 : 512ctx)),linear))
-    end
-    ht=g.tensors["output.weight"]
-    head=compileonly ? DMat(AMDGPU.zeros(UInt8,1),ht.typ,ht.dims[1],ht.dims[2]) : DMat(g,"output.weight"); push!(weights,head)
-    et=g.tensors["token_embd.weight"]
-    emb=compileonly ? AMDGPU.zeros(UInt16,1) : GC.@preserve g unsafe_wrap(ROCArray,Ptr{UInt16}(pointer(g.map)+et.off),(prod(et.dims),))
-    sizes=(:x=>2048,:xn=>2048,:y=>2048,:qkv=>8192,:u=>8192,:z=>4096,:alpha=>32,:beta=>32,:qdn=>2048,:kdn=>2048,
-           :rawdn=>4096,:on=>4096,:qg=>8192,:q=>4096,:k=>512,:v=>512,:scores=>16ctx,:route=>256,:sg=>1,
-           :shg=>512,:shu=>512,:shh=>512,:shout=>2048,:eg=>4096,:eu=>4096,:eh=>4096,:ed=>16384,:weights=>8,:logits=>length(tk.text))
-    b=NamedTuple{Tuple(first.(sizes))}(Tuple(z(last(s)) for s in sizes))
-    groups=Int(AMDGPU.HIP.properties(AMDGPU.device()).multiProcessorCount)
-    Engine(g,tk,c,weights,floats,ROCArray(bs),PMat(head),ROCArray(tensor_f32(g,"output_norm.weight")),emb,b,
-           AMDGPU.zeros(Int32,ctx),AMDGPU.zeros(Int32,ctx),AMDGPU.zeros(Int32,4),AMDGPU.zeros(UInt64,3),
-           z(groups),AMDGPU.zeros(Int32,groups),AMDGPU.zeros(Int32,8),ctx,groups)
+function phase(s)
+    p=get(ENV,"QWEN36_PHASES",""); isempty(p) || open(io->println(io,time_ns()," ",s),p,"a")
 end
-function reset!(E)
-    # Every state buffer belongs to the final four floats entries of its block.
-    for B in Array(E.blocks)
-        for p in (B.state,B.conv,B.kc,B.vc)
-            for v in E.floats
-                UInt(pointer(v))==p && fill!(v,0.0f0)
+function buffers(vocab,ctx;draft=false)
+    sizes=(:x=>2048,:xn=>2048,:y=>2048,:qkv=>8192,:u=>8192,:z=>4096,:alpha=>32,:beta=>32,:qdn=>2048,:kdn=>2048,
+           :rawdn=>4096,:on=>4096,:qg=>8192,:q=>4096,:k=>(draft ? 1024 : 512),:v=>(draft ? 1024 : 512),:scores=>16ctx,:route=>256,:sg=>1,
+           :shg=>(draft ? 6144 : 512),:shu=>(draft ? 6144 : 512),:shh=>(draft ? 6144 : 512),:shout=>2048,
+           :eg=>4096,:eu=>4096,:eh=>4096,:ed=>16384,:weights=>8,:logits=>vocab,
+           :concat=>4096,:feat=>16384,:ctxh=>2048,:inp=>2048,:coeff=>512,:tmp=>2048,:sel=>256)
+    NamedTuple{Tuple(first.(sizes))}(Tuple(z(8last(s)) for s in sizes))
+end
+const DRAFT_FILE="Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf"
+const DRAFT_URL="https://huggingface.co/aminya/Qwen3.6-35B-A3B-DFlash2-GGUF/resolve/1e26e3499d865b9d2fc55e019d65b3f0e8ab6846/$DRAFT_FILE"
+const MTP_URL="https://huggingface.co/tomngdev/MTP-Qwen3.6-35B-A3B-GGUF/resolve/180800540ccfee763ff15f4150dfa446237d203b/mtp-Q8_0.gguf"
+function Engine(g,ctx;compileonly=false,mode=0,draftpath=joinpath(dirname(DEFAULT_MODEL),"draft",mode==2 ? DRAFT_FILE : "mtp-Q8_0.gguf"))
+    AMDGPU.functional() || error("AMDGPU is not functional")
+    c=Config(g); tk=Tok(g); keep=Any[]; states=Any[]
+    retain(v)=(push!(keep,v);v)
+    function mat(g,n)
+        t=g.tensors[n]
+        m=compileonly ? DMat(AMDGPU.zeros(UInt8,1),t.typ==42 ? 142 : t.typ,t.dims[1],prod(t.dims[2:end])) : DMat(g,n)
+        m.typ in (0,8,30,142) || error("$n: unexpected matrix type $(m.typ)")
+        retain(m); PMat(m)
+    end
+    vec(g,n)=UInt(pointer(retain(compileonly ? z(1) : ROCArray(tensor_f32(g,n)))))
+    function state(n;half=false)
+        a=retain(half ? AMDGPU.zeros(Float16,compileonly ? 1 : n) : z(compileonly ? 1 : n)); push!(states,a); UInt(pointer(a))
+    end
+    function block(g,l;snap=0)
+        p="blk.$l."; linear=haskey(g.tensors,p*"ssm_a")
+        ms=ntuple(i->haskey(g.tensors,p*MNAMES[i]) ? mat(g,p*MNAMES[i]) : PMat(0,0,0,0),17)
+        vs=ntuple(i->haskey(g.tensors,p*VNAMES[i]) ? vec(g,p*VNAMES[i]) : UInt64(0),8)
+        st=state(linear ? 524288 : 0); cv=state(linear ? 32768 : 0)
+        kc=state(linear ? 0 : 512ctx); vc=state(linear ? 0 : 512ctx)
+        ss=UInt(pointer(retain(z(compileonly ? 1 : linear ? snap*524288 : 0))))
+        cs=UInt(pointer(retain(z(compileonly ? 1 : linear ? snap*32768 : 0))))
+        phase("loaded block $l"); GC.gc(false)
+        PBlock(ms,vs,st,cv,kc,vc,ss,cs,linear)
+    end
+    bs=[block(g,l;snap=mode==2 ? 8 : mode==1 ? 2 : 0) for l in 0:39]
+    head=mat(g,"output.weight"); norm=retain(ROCArray(tensor_f32(g,"output_norm.weight")))
+    et=g.tensors["token_embd.weight"]
+    emb=retain(compileonly ? AMDGPU.zeros(UInt16,1) : GC.@preserve g unsafe_wrap(ROCArray,Ptr{UInt16}(pointer(g.map)+et.off),(prod(et.dims),)))
+    vocab=length(tk.text); groups=Int(AMDGPU.HIP.properties(AMDGPU.device()).multiProcessorCount)
+    b=buffers(vocab,ctx); dummy=PMat(0,0,0,0); eh=dummy; fc=dummy; selector=dummy; pred=dummy; succ=dummy
+    mn=(UInt64(0),UInt64(0),UInt64(0)); dn=(UInt64(0),UInt64(0)); mbs=PBlock[]; dbs=DPBlock[]
+    mb=mode==1 ? buffers(vocab,ctx) : b; db=mode==2 ? buffers(vocab,ctx;draft=true) : b
+    mask=Int32(248077)
+    if mode!=0
+        isfile(draftpath) || error("missing draft $draftpath; use --download --spec $(mode==2 ? "dflash2" : "mtp")")
+        dg=gguf(draftpath)
+        if mode==1
+            push!(mbs,block(dg,40)); eh=mat(dg,"blk.40.nextn.eh_proj.weight")
+            mn=ntuple(i->vec(dg,"blk.40.nextn."*("enorm.weight","hnorm.weight","shared_head_norm.weight")[i]),3)
+        else
+            get(dg.kv,"general.architecture","")=="dflash" || error("expected DFlash2 draft")
+            Int(dg.kv["dflash.block_size"])==8 || error("expected eight-position draft")
+            fc=mat(dg,"fc.weight"); selector=mat(dg,"selector_hidden.weight")
+            pred=mat(dg,"selector_predecessor.weight"); succ=mat(dg,"selector_successor.weight")
+            dn=(vec(dg,"enc.output_norm.weight"),vec(dg,"output_norm.weight"))
+            mask=Int32(dg.kv["tokenizer.ggml.mask_token_id"])
+            names=("attn_conv_proj.weight","attn_q.weight","attn_k.weight","attn_v.weight","attn_output.weight",
+                   "ffn_conv_proj.weight","ffn_gate.weight","ffn_up.weight","ffn_down.weight")
+            vn=("attn_norm.weight","attn_conv_base","attn_q_norm.weight","attn_k_norm.weight","ffn_norm.weight","ffn_conv_base")
+            for l in 0:5
+                p="blk.$l."; ms=ntuple(i->mat(dg,p*names[i]),9); vs=ntuple(i->vec(dg,p*vn[i]),6)
+                push!(dbs,DPBlock(ms,vs,state(2048*1024;half=true),state(2048*1024;half=true)))
             end
         end
     end
-    AMDGPU.synchronize(); E
+    spec=(mb=mb,db=db,mblocks=retain(ROCArray(mbs)),dblocks=retain(ROCArray(dbs)),eh=eh,fc=fc,selector=selector,pred=pred,succ=succ,
+          mnorm=mn,dnorm=dn,last=z(2048),proposal=AMDGPU.zeros(Int32,8),prediction=AMDGPU.zeros(Int32,8),mask=mask,
+          topv=z(8groups*16),topi=AMDGPU.zeros(Int32,8groups*16))
+    phase("loaded engine")
+    Engine(g,tk,c,keep,states,ROCArray(bs),head,norm,emb,b,spec,
+           AMDGPU.zeros(Int32,ctx),AMDGPU.zeros(Int32,ctx),AMDGPU.zeros(Int32,4),AMDGPU.zeros(UInt64,3),
+           z(8groups),AMDGPU.zeros(Int32,8groups),AMDGPU.zeros(Int32,64),ctx,groups,mode,nothing)
+end
+function reset!(E)
+    for a in E.states; fill!(a,zero(eltype(a))); end
+    fill!(E.spec.last,0.0f0); AMDGPU.synchronize(); E
 end
 function request_kernel(E,np,nt;compile=false)
-    args=(E.blocks,E.head,E.output_norm,E.embedding,E.b,E.ids,E.output,E.control,E.ticks,E.part,E.ix,E.expertids,
-          Int32(np),Int32(nt),Int32(E.ctx),E.tk.eos,get(E.tk.ids,"<|im_end|>",E.tk.eos))
-    k=@roc launch=false maxthreads=256 k_request!(args...)
-    compile || k(args...;groupsize=256,gridsize=E.groups,cooperative=true)
-    k
+    args=(E.blocks,E.head,E.output_norm,E.embedding,E.b,E.spec,E.ids,E.output,E.control,E.ticks,E.part,E.ix,E.expertids,
+          Int32(np),Int32(nt),Int32(E.ctx),E.tk.eos,get(E.tk.ids,"<|im_end|>",E.tk.eos),Val(E.mode))
+    if E.kernel===nothing
+        # O1 avoids LLVM's quadratic IRCE pass over the persistent request loop.
+        # This is a per-kernel configuration; AMDGPU's global compiler is unchanged.
+        tt=AMDGPU.Runtime.argument_types(map(AMDGPU.rocconvert,args)); dev=AMDGPU.device()
+        cfg=AMDGPU.GPUCompiler.CompilerConfig(AMDGPU.compiler_config(dev;maxthreads=256);opt_level=1,always_inline=false)
+        source=AMDGPU.methodinstance(typeof(k_request!),tt)
+        job=AMDGPU.GPUCompiler.CompilerJob(source,cfg)
+        arch=replace(AMDGPU.HIP.gcn_arch(dev),r"[^A-Za-z0-9_-]"=>"_")
+        key=bytes2hex(sha256(read(@__FILE__)))*"-$VERSION-$(pkgversion(AMDGPU))-$arch-$(E.mode)"
+        cache=joinpath(get(ENV,"QWEN36_CACHE",joinpath(homedir(),".cache","qwen36")),key)
+        mkpath(dirname(cache))
+        if isfile(cache*".hsaco") && isfile(cache*".entry")
+            mod=AMDGPU.HIP.HIPModule(read(cache*".hsaco"))
+            fun=AMDGPU.HIP.HIPFunction(mod,read(cache*".entry",String),Symbol[])
+        else
+            res=AMDGPU.Compiler.compile_or_lookup(job)
+            isempty(res.global_hostcalls) && isempty(res.relocations) || error("persistent kernel unexpectedly requires host pointers")
+            fun=AMDGPU.Compiler.hiplink(job,res.obj,res.entry,res.global_hostcalls,res.relocations)
+            write(cache*".hsaco.part",res.obj); mv(cache*".hsaco.part",cache*".hsaco";force=true)
+            write(cache*".entry.part",res.entry); mv(cache*".entry.part",cache*".entry";force=true)
+        end
+        E.kernel=AMDGPU.Runtime.HIPKernel{typeof(k_request!),tt}(k_request!,fun)
+        phase("compiled request")
+    end
+    compile || E.kernel(args...;groupsize=256,gridsize=E.groups,cooperative=true)
+    E.kernel
 end
 function request!(E,ids,nt)
     length(ids)+nt<=E.ctx || error("context too small")
     copyto!(E.ids,1,ids,1,length(ids)); request_kernel(E,length(ids),nt); AMDGPU.synchronize()
     ctl=Array(E.control); out=Array(E.output)[1:ctl[2]]; ticks=Array(E.ticks)
-    out, ticks, ctl
+    out,ticks,ctl
 end
+
 function download_model(path)
     mkpath(dirname(abspath(path))); tmp=path*".part"; Downloads.download(MODEL_URL,tmp)
     filesize(tmp)==MODEL_BYTES || error("incomplete download")
     bytes2hex(open(sha256,tmp))==MODEL_SHA || error("SHA-256 mismatch")
     mv(tmp,path;force=true)
 end
+# The profiler's GUI-active counter defines instruction handling: an active
+# graphics/compute command includes its memory instructions and their stalls.
+# DMA intervals outside instruction handling are transfer; everything else in
+# the CPU request range is idle. Each request has exactly one compute dispatch,
+# and all DMA copies are ordered before/after it, so aggregate active-cycle
+# counters suffice without guessing the placement of inactive cycles.
+function csvfields(s)
+    fields=String[]; io=IOBuffer(); quoted=false; i=firstindex(s)
+    while i<=lastindex(s)
+        c=s[i]; j=nextind(s,i)
+        if c=='"'
+            if quoted && j<=lastindex(s) && s[j]=='"'; write(io,'"'); i=nextind(s,j); continue; end
+            quoted=!quoted
+        elseif c==',' && !quoted
+            push!(fields,String(take!(io)))
+        else; write(io,c)
+        end
+        i=j
+    end
+    push!(fields,String(take!(io))); fields
+end
+function csvrows(path)
+    lines=readlines(path); isempty(lines) && return Dict{String,String}[]
+    head=csvfields(lines[1]); [Dict(zip(head,csvfields(s))) for s in lines[2:end] if !isempty(s)]
+end
+function column(r,names...)
+    for n in names; haskey(r,n) && return r[n]; end
+    error("profiler column $(join(names,"/")) missing from $(collect(keys(r)))")
+end
+interval(r)=(parse(Float64,column(r,"Start_Timestamp","Start_Timestamp_ns")),parse(Float64,column(r,"End_Timestamp","End_Timestamp_ns")))
+function unionlength(intervals)
+    isempty(intervals) && return 0.0
+    s=sort(intervals); a,b=s[1]; total=0.0
+    for (c,d) in s[2:end]
+        if c<=b; b=max(b,d); else; total+=b-a; a,b=c,d; end
+    end
+    total+b-a
+end
+function accounting(dir)
+    files=String[]
+    for (root,_,names) in walkdir(dir), n in names; endswith(n,".csv") && push!(files,joinpath(root,n)); end
+    markers=reduce(vcat,(csvrows(p) for p in files if occursin("marker",basename(p)));init=Dict{String,String}[])
+    ranges=filter(r->get(r,"Marker_Message",get(r,"Message",""))=="qwen36/request",markers)
+    length(ranges)==1 || error("expected one complete request marker, found $(length(ranges)); traces in $dir")
+    a,b=interval(only(ranges)); total=b-a; total>0 || error("empty request range")
+    kernels=reduce(vcat,(csvrows(p) for p in files if occursin("kernel_trace",basename(p)));init=Dict{String,String}[])
+    kernels=filter(r->begin c,d=interval(r); d>a && c<b end,kernels)
+    length(kernels)==1 || error("a request must contain one cooperative kernel, found $(length(kernels))")
+    k=only(kernels); c,d=interval(k); c=max(a,c); d=min(b,d)
+    counters=reduce(vcat,(csvrows(p) for p in files if occursin("counter",basename(p)) || occursin("pmc",basename(p)));init=Dict{String,String}[])
+    dispatch=column(k,"Dispatch_Id")
+    busy=filter(r->get(r,"Dispatch_Id","")==dispatch && get(r,"Counter_Name","")=="GPUBusy",counters)
+    length(busy)==1 || error("missing unambiguous GPUBusy measurement for request dispatch $dispatch")
+    fraction=clamp(parse(Float64,column(only(busy),"Counter_Value"))/100,0,1)
+    instruction=(d-c)*fraction
+    copies=reduce(vcat,(csvrows(p) for p in files if occursin("memory_copy",basename(p)));init=Dict{String,String}[])
+    spans=Tuple{Float64,Float64}[]
+    for r in copies
+        e,f=interval(r); e=max(a,e); f=min(b,f); f<=e && continue
+        # Instruction wins any overlap. Serial HIP copies should have none;
+        # reject it rather than infer where counter-inactive cycles occurred.
+        max(e,c)<min(f,d) && error("DMA overlaps compute; aggregate counters cannot resolve this request")
+        push!(spans,(e,f))
+    end
+    transfer=unionlength(spans); idle=max(total-instruction-transfer,0.0)
+    abs(total-instruction-transfer-idle)<=max(1.0,total*1e-12) || error("request accounting does not close")
+    Dict("total_ns"=>total,"instruction_ns"=>instruction,"transfer_ns"=>transfer,"idle_ns"=>idle,
+         "instruction_percent"=>100instruction/total,"transfer_percent"=>100transfer/total,"idle_percent"=>100idle/total,
+         "gpu_busy_percent"=>100fraction,"trace_directory"=>dir)
+end
+function profiled(args)
+    dir=mktempdir(;prefix="qwen36-profile-"); metrics=joinpath(dir,"metrics.toml"); logfile=joinpath(dir,"run.log")
+    child=filter(!=("--profile"),args)
+    cmd=`/opt/rocm/bin/rocprofv3 --kernel-trace --memory-copy-trace --marker-trace --pmc GPUBusy GRBM_COUNT GRBM_GUI_ACTIVE --kernel-include-regex '.*k_request.*' --output-format csv --output-directory $dir --output-file qwen36 -- $(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) $(@__FILE__) $child --profile-child`
+    open(logfile,"w") do io
+        run(pipeline(addenv(cmd,"QWEN36_METRICS"=>metrics);stdout=io,stderr=io))
+    end
+    m=TOML.parsefile(metrics); merge!(m,accounting(dir)); TOML.print(open(joinpath(dir,"accounting.toml"),"w"),m)
+    dest=get(ENV,"QWEN36_ACCOUNTING",""); isempty(dest) || open(io->TOML.print(io,m),dest,"w")
+    @printf("prefill tps: %.2f\ndecode tps: %.2f\nidle time %%: %.4f\n",m["prefill_tps"],m["decode_tps"],m["idle_percent"])
+end
+
 function main(args)
     if "--help" in args
-        println("julia --project=~/.julia/environments/qwen36 qwen3.6-35b-a3b.jl [--model FILE] [--prompt TEXT] [--tokens N] [--ctx N] [--raw] [--think] [--download] [--compile]")
+        println("julia --project=~/.julia/environments/qwen36 qwen3.6-35b-a3b.jl [--model FILE] [--spec none|mtp|dflash2] [--draft-file FILE] [--prompt TEXT] [--tokens N] [--ctx N] [--raw] [--think] [--download] [--compile]")
         return
     end
     opts=Dict{String,String}(); flags=Set{String}(); i=1
-    valued=Set(["--model","--prompt","--prompt-file","--tokens","--ctx"])
+    valued=Set(["--model","--prompt","--prompt-file","--tokens","--ctx","--spec","--draft-file"])
     while i<=length(args)
         a=args[i]
         if a in valued
             i<length(args) || error("$a needs a value"); opts[a]=args[i+1]; i+=2
-        elseif a in ("--raw","--think","--download","--compile")
+        elseif a in ("--raw","--think","--download","--compile","--profile","--profile-child")
             push!(flags,a); i+=1
         else; error("unknown option $a")
         end
     end
-    path=expanduser(get(opts,"--model",DEFAULT_MODEL)); "--download" in flags && return download_model(path)
+    spec=get(opts,"--spec","none"); spec in ("none","mtp","dflash2") || error("--spec must be none, mtp or dflash2")
+    mode=spec=="dflash2" ? 2 : spec=="mtp" ? 1 : 0
+    path=expanduser(get(opts,"--model",DEFAULT_MODEL))
+    draftpath=expanduser(get(opts,"--draft-file",joinpath(dirname(path),"draft",mode==2 ? DRAFT_FILE : "mtp-Q8_0.gguf")))
+    if "--download" in flags
+        isfile(path) || download_model(path)
+        if mode!=0 && !isfile(draftpath)
+            mkpath(dirname(draftpath)); Downloads.download(mode==2 ? DRAFT_URL : MTP_URL,draftpath*".part")
+            filesize(draftpath*".part")==(mode==2 ? 570468544 : 1990649728) || error("incomplete draft download")
+            mv(draftpath*".part",draftpath)
+        end
+        return
+    end
+    !("--compile" in flags || "--profile-child" in flags) && return profiled(args)
     isfile(path) || error("missing model; run with --download")
     isfile(path*".aria2") && error("model download is still running")
     nt=parse(Int,get(opts,"--tokens","32")); ctx=parse(Int,get(opts,"--ctx","2048"))
     nt>0 && ctx>0 || error("token/context counts must be positive")
     prompt=haskey(opts,"--prompt-file") ? read(opts["--prompt-file"],String) : get(opts,"--prompt","What is 2+2? Answer briefly.")
-    E=Engine(gguf(path),ctx;compileonly="--compile" in flags)
+    E=Engine(gguf(path),ctx;compileonly="--compile" in flags,mode=mode,draftpath=draftpath)
     tm=@elapsed request_kernel(E,1,1;compile=true)
     tm<=120 || error("compile time exceeds two minutes: $tm s")
     "--compile" in flags && return
-    request!(E,Int32[0],1); reset!(E)
+    text="--raw" in flags ? prompt : chat_prompt(prompt)*("--think" in flags ? "" : "\n</think>\n\n")
+    encode(E.tk,text); piece(E.tk,Int32(0)) # compile tokenizer/decoder before accepting a request
+    request!(E,Int32[0],1); reset!(E); phase("warmed engine")
     rate=Ref{Cint}()
     AMDGPU.HIP.hipDeviceGetAttribute(rate,AMDGPU.HIP.hipDeviceAttributeWallClockRate,AMDGPU.HIP.device_id(AMDGPU.device()))
     frequency=Float64(rate[])*1000; frequency>0 || error("no GPU steady clock frequency")
     # A marker covers tokenization, copies, dispatch, synchronization and decoding.
     # rocprofv3 records the same monotonic CPU time domain for all these activities.
     ccall((:roctxRangePushA,"/opt/rocm/lib/librocprofiler-sdk-roctx.so"),Cint,(Cstring,),"qwen36/request")
-    text="--raw" in flags ? prompt : chat_prompt(prompt)*("--think" in flags ? "" : "\n</think>\n\n")
     ids=encode(E.tk,text); isempty(ids) && error("empty prompt")
     out,ticks,ctl=request!(E,ids,nt)
     decoded=UInt8[]
@@ -1229,7 +1406,9 @@ function main(args)
     ccall((:roctxRangePop,"/opt/rocm/lib/librocprofiler-sdk-roctx.so"),Cint,())
     pre=Float64(ticks[2]-ticks[1])/frequency
     dec=max(Float64(ticks[3]-ticks[2])/frequency,eps(Float64)); steps=max(ctl[2]-1,0)
-    @printf("prefill tps: %.2f\ndecode tps: %.2f\nidle time %%: unmeasured\n",length(ids)/pre,steps/dec)
+    m=Dict("prefill_tps"=>length(ids)/pre,"decode_tps"=>steps/dec,"prompt_tokens"=>length(ids),"output_tokens"=>length(out))
+    dest=get(ENV,"QWEN36_METRICS",""); isempty(dest) || open(io->TOML.print(io,m),dest,"w")
+    @printf("prefill tps: %.2f\ndecode tps: %.2f\nidle time %%: unmeasured\n",m["prefill_tps"],m["decode_tps"])
 end
 if abspath(PROGRAM_FILE)==@__FILE__()
     main(ARGS)
