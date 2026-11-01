@@ -21,3 +21,12 @@ function isareq(out)
     end
     out
 end
+# the standalone GEMV bench kernel (prof/gemvb.jl)
+function isagemv(out)
+    PE = PK[]; K = PE.K; AMDGPU.device!(SRV[].dies[1].dev)
+    A = kargs(K, PE.hx, 1, 0, AMDGPU.zeros(UInt64, 4), AMDGPU.zeros(Int32, 1), 0, 0, PE.nwg, nothing, PE.npos, 0)
+    open(out, "w") do io
+        AMDGPU.@device_code_gcn io = io @roc launch = false maxthreads = 256 waves_per_eu = KWPE[] k_gemvb!(A, Int32(0), Int32(5), Int32(2), Int32(8))
+    end
+    out
+end

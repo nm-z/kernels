@@ -437,6 +437,7 @@ end
 # before each request)
 @inline hxs(A::KA, slot, d) = reinterpret(LP{UInt64}, A.hx + 8 * ((Int64(slot) * ND + d) * A.npos * NE))
 @inline st64_sys(p::LP{UInt64}, v::UInt64) = Base.llvmcall("store atomic volatile i64 %1, ptr addrspace(1) %0 monotonic, align 8\nret void", Cvoid, Tuple{LP{UInt64},UInt64}, p, v)
+@inline ld64a_sys(p::LP{UInt64}) = Base.llvmcall("%r = load atomic i64, ptr addrspace(1) %0 monotonic, align 8\nret i64 %r", UInt64, Tuple{LP{UInt64}}, p)
 @inline ld64_sys(p::LP{UInt64}) = Base.llvmcall("%r = load atomic volatile i64, ptr addrspace(1) %0 monotonic, align 8\nret i64 %r", UInt64, Tuple{LP{UInt64}}, p)
 # the embedding value of row r (this die's vocabulary rows, repacked Q5_K), element k
 @inline function embval(W::LP{UInt8}, r::Int32, k::Int32)
@@ -487,11 +488,20 @@ function xwr_ph!(A::KA, l::Int32, j::Int32, w::LP{Float32}, set::Bool, xs::Int32
     ta = UInt64(0); i = gtid()
     while i < Int32(NE) * P
         p = i ÷ Int32(NE); k = i - p * Int32(NE); o = Int64(p) * NE + k
+        # the other three dies' words, loaded together (plain atomic loads: volatile ones went one round trip at a
+        # time); this die's own share recomputed locally rather than read back over PCIe
+        us = ntuple(e -> ld64a_sys(hxs(A, slot, (A.d + Int32(e)) & Int32(ND - 1)) + 8o), Val(ND - 1))
         v = set ? 0.0f0 : ld(A.x, o)
-        for d in Int32(0):Int32(ND - 1)
-            q = hxs(A, slot, d) + 8o; u = ld64_sys(q)
+        v += if j >= Int32(0)
+            psum(A, Int64(0), ns, rows, P, p, k)
+        else
+            r = ld(A.tok, p) - Int32(VPD) * A.d
+            r >= Int32(0) && r < Int32(VPD) ? embval(W, r, k) : 0.0f0
+        end
+        for e in 1:ND-1
+            u = us[e]
             if u & 0xffffffff00000000 != tag
-                tw = memtime()
+                q = hxs(A, slot, (A.d + Int32(e)) & Int32(ND - 1)) + 8o; tw = memtime()
                 while u & 0xffffffff00000000 != tag
                     (memtime() - tw > TOUT || aborted(A)) && (atadd(A.bar + 8, UInt32(1)); break)
                     u = ld64_sys(q)
