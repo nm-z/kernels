@@ -1392,8 +1392,18 @@ function k_req!(A::KA)
     T = (@ROCStaticLocalArray(Float32, 32 * 64, false), @ROCStaticLocalArray(Float32, 32 * 64, false))   # the GEMM tiles
     tid() == Int32(0) && umin64(A.acct, memtime())
     seq = Int32(0); xs = Int32(0); xf = Int32(0); spec = A.spec != Int32(0) && A.mode == Int32(0)
-    r = Int32(0); a = Int32(0); prefill = true
+    r = Int32(0); a = Int32(0); prefill = true; pdone = Int32(0); nf = Int32(0)
     while true
+        # a cancel (host word 13 set): die 0 answers with the forward to stop at (word 12), the one after this. A die
+        # reaches that forward only after die 0's exchange writes of this one, which follow its answer, so all four
+        # stop at the same forward. Workgroup 0 reads it; a barrier gives every workgroup the same answer (bar word 19).
+        if wgid() == Int32(0) && tid() == Int32(0)
+            (A.d == Int32(0) && ldacq_sys(A.hf + 48) == UInt32(0) && ldacq_sys(A.hf + 52) != UInt32(0)) && strel_sys(A.hf + 48, UInt32(nf + Int32(1)))
+            sa = ldacq_sys(A.hf + 48); stmono(A.bar + 76, sa != UInt32(0) && UInt32(nf) >= sa ? UInt32(1) : UInt32(0))
+        end
+        gbar!(A)
+        ldmono(A.bar + 76) != UInt32(0) && break
+        nf += Int32(1)
         if prefill && r >= A.nreq                          # every prefill done
             tid() == Int32(0) && umax64(A.acct + 16, memtime())
             prefill = false
@@ -1405,6 +1415,8 @@ function k_req!(A::KA)
             mtp = spec && ngen > Int32(0)
             zero_ssq!(A, P); setpos_ph!(A, r, a, P); gbar!(A)
             seq, xs, xf = fwd!(A, P, amax, seq, xs, xf, head, pfirst, mtp, head, P - Int32(1), true, T)
+            # the prompt positions run so far, for the host's progress lines (die 0; host counter word 14)
+            pdone += P; (A.d == Int32(0) && wgid() == Int32(0) && tid() == Int32(0)) && strel_sys(A.hf + 56, UInt32(pdone))
             a += P
             a >= ninp && (r += Int32(1); a = Int32(0))
         else
@@ -1634,6 +1646,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing, stops = (-1,
     for d in 1:ND
         AMDGPU.device!(dies[d].dev); AMDGPU.synchronize()
         hz = PE.hz; ah = Array(accts[d]); wall = (ah[2] - ah[1]) / hz; iv = Tuple{Float64,Float64}[]
+        ah[3] == 0 && (ah[3] = ah[2])                     # (cancelled during the prefill)
         d == 1 && (tpre = (ah[3] - ah[1]) / hz; tdec = (ah[2] - ah[3]) / hz; LASTACCT[] = ah); ACCTS[][d] = ah
         for s in 0:nphase-1
             b = ah[4+2s]; e = ah[5+2s]; b == typemax(UInt64) && continue
@@ -1782,12 +1795,23 @@ function chat(c, nnew, ids, stops)
     outp = Ptr{Int32}(PE.hx.c + PE.hx.tok)
     for i in 1:nnew; unsafe_store!(outp, Int32(-1), i); end
     t0 = time(); job = Threads.@spawn request!(PE, [(ids, nnew)], SLOTS[][1:1], 0; stops)
-    n = 0; t1 = 0.0; ended = 0
+    n = 0; t1 = 0.0; ended = 0; pr = 0; tp = 0.0
+    prog = Ptr{UInt32}(PE.hx.c + PE.hx.out + 56)           # the prompt positions the kernel has run (host word 14)
+    function progress()                                    # "prog ran total cached", at most one every 500 ms
+        n == 0 || return
+        ran = Int(unsafe_load(prog)); now = time()
+        (ran > pr && now - tp >= 0.5) && (println(c, "prog ", ran, " ", length(ids), " 0"); pr = ran; tp = now)
+    end
     pump() = while n < nnew
         t = unsafe_load(outp, n + 1); t < 0 && break
         n += 1; n == 1 && (t1 = time()); println(c, "tok ", t); (t == stops[1] || t == stops[2]) && (ended = 1)
     end
-    while !istaskdone(job); pump(); flush(c); sleep(0.005); end
+    # cancel_on_eof: flashd closes its side when the client goes; the kernel then stops within two forwards
+    @async try
+        eof(c) && !istaskdone(job) && unsafe_store!(Ptr{UInt32}(PE.hx.c + PE.hx.out + 52), UInt32(1))
+    catch
+    end
+    while !istaskdone(job); progress(); pump(); flush(c); sleep(0.005); end
     res = fetch(job); pump()
     @printf(c, "done %d %d %d %.1f %.1f 0 0\n", n, ended, length(ids), 1e3(time() - t0), 1e3(t1 - t0)); flush(c)
     @printf("chat: %d prompt, %d out, prefill %.2f tok/s, decode %.2f tok/s, idle time %.1f%%\n", length(ids), n,
