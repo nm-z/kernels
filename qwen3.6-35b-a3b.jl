@@ -8,12 +8,13 @@
 #   ... --prepare                  losslessly pack repeated GSQ scales once
 #   ... --spec mtp|dflash2          exact greedy speculative decoding
 #   ... --compile --spec dflash2    compile/cache a mode without loading weights
+#   QWEN36_COMPILE_GFX1101=1 ... --compile  cross compile on another AMD GPU
 #   ... --model FILE --raw         complete an untemplated prompt
 # Source checkpoint: https://huggingface.co/ISTA-DASLab/Qwen3.6-35B-A3B-2Bit-GSQ
 # GGUF: https://huggingface.co/chtisgit/Qwen3.6-35B-A3B-2Bit-GSQ-hybrid-GGUF
 # The converter preserves GSQ assignments; BF16->FP16 block scales incur the errors in its model card.
 # Weights are allocated once; one cooperative persistent dispatch executes a request.
-# The BF16 input embedding stays registered in host memory, with direct GPU reads.
+# The BF16 input embedding is losslessly packed and resident on the GPU.
 # Draft matrices are cached in four bits to fit alongside the resident target.
 # Draft approximation affects acceptance only; target verification decides every token.
 using Mmap, Printf, Downloads, SHA, TOML, Libdl
@@ -237,6 +238,18 @@ end
     @inbounds UInt16(W[o+1]) | UInt16(W[o+2]) << 8
 end
 @inline half(W, o) = Float32(reinterpret(Float16, u16(W, o)))
+@inline function embvalue(W,i::Int64)
+    block=i>>6; j=Int32(i&63); a=Int32(4block)
+    o=@inbounds Int32(UInt32(W[a+1])|UInt32(W[a+2])<<8|UInt32(W[a+3])<<16|UInt32(W[a+4])<<24)
+    base=@inbounds W[o+1]
+    if base==0xff
+        return bf32(u16(W,o+Int32(1)+Int32(2)*j))
+    end
+    lo=@inbounds W[o+j+2]; packed=@inbounds W[o+Int32(66)+(j>>1)]
+    e=(packed>>(Int32(4)*(j&Int32(1))))&0x0f
+    exponent=e==0x0f ? UInt16(0) : UInt16(base)+UInt16(e)
+    bf32((UInt16(lo&0x7f))|(UInt16(lo&0x80)<<8)|(exponent<<7))
+end
 @inline function weight(W, row, k, K, ::Val{T}) where T
     if T == 42 || T == 142
         block=T==42 ? Int32(64) : Int32(128); bs=T==42 ? Int32(18) : Int32(34)
@@ -346,7 +359,49 @@ function packedweight(g,name)
     end
     mv(tmp,p;force=true); phase("packed $name"); p
 end
+function packedembedding(g)
+    t=g.tensors["token_embd.weight"]; t.typ==30 || error("expected BF16 embedding")
+    p=joinpath(homedir(),".cache","qwen36","weights-"*g.identity,"embedding.b12")
+    isfile(p) && return p
+    mkpath(dirname(p)); tmp=p*".part"; blocks=prod(t.dims)÷64; used=4blocks
+    open(tmp,"w+") do io
+        truncate(io,4blocks+129blocks)
+        packed=Mmap.mmap(io,Vector{UInt8},(4blocks+129blocks,))
+        GC.@preserve g packed begin
+            src=Ptr{UInt16}(pointer(g.map)+t.off); dst=pointer(packed)
+            for b in 0:blocks-1
+                low=255; high=0
+                for j in 1:64
+                    v=unsafe_load(src,64b+j); e=Int((v>>7)&0xff)
+                    if e!=0; low=min(low,e); high=max(high,e); end
+                end
+                low==255 && (low=0)
+                unsafe_store!(Ptr{UInt32}(dst+4b),UInt32(used))
+                if high-low>14
+                    packed[used+1]=0xff
+                    unsafe_copyto!(dst+used+1,Ptr{UInt8}(src+128b),128)
+                    used+=129
+                else
+                    packed[used+1]=UInt8(low)
+                    for j in 0:2:62
+                        v=unsafe_load(src,64b+j+1); w=unsafe_load(src,64b+j+2)
+                        ev=Int((v>>7)&0xff); ew=Int((w>>7)&0xff)
+                        cv=ev==0 ? 15 : ev-low; cw=ew==0 ? 15 : ew-low
+                        packed[used+j+2]=UInt8((v&0x7f)|((v>>8)&0x80))
+                        packed[used+j+3]=UInt8((w&0x7f)|((w>>8)&0x80))
+                        packed[used+66+j÷2]=UInt8(cv|(cw<<4))
+                    end
+                    used+=97
+                end
+            end
+        end
+        Mmap.sync!(packed); releasepages(packed,0,length(packed)); releasepages(g,t)
+    end
+    open(io->truncate(io,used),tmp,"r+")
+    mv(tmp,p;force=true); phase("packed embedding"); p
+end
 function prepare(g)
+    packedembedding(g)
     for (name,t) in sort!(collect(g.tensors);by=x->last(x).off)
         t.typ==42 && packedweight(g,name)
     end
@@ -864,8 +919,7 @@ function Config(g)
 end
 
 # The only inference path is one HIP cooperative dispatch for the whole request.
-# Descriptors point to weights allocated once at load time. The input embedding is
-# a permanently registered host mapping, read directly by the GPU (4 KiB/token).
+# Descriptors point to weights allocated once at load time.
 struct PMat
     ptr::UInt64
     K::Int16
@@ -958,11 +1012,13 @@ end
 @inline function p_embed!(x,emb,ids,off::Int32,n::Int32)
     for j in gid0():Int32(gridItemDim().x):n*Int32(2048)-Int32(1)
         p=j÷Int32(2048); c=j%Int32(2048)
-        @inbounds x[j+1]=bf32(emb[Int64(ids[off+p+1])*Int64(2048)+c+1])
+        @inbounds x[j+1]=embvalue(emb,Int64(ids[off+p+1])*Int64(2048)+c)
     end
     p_sync(); return
 end
-@inline function p_mul_t!(y,m,x,ids,mode::Int32,n::Int32,::Val{P},::Val{T}) where {P,T}
+# Keep the matrix loop as a device function. Inlining five weight formats at
+# every projection expands the persistent kernel enough to dominate codegen.
+@noinline function p_mul_t!(y,m,x,ids,mode::Int32,n::Int32,::Val{P},::Val{T}) where {P,T}
     ti=tid0(); lane=ti&Int32(31); bid=Int32(workgroupIdx().x)-Int32(1)
     ng=Int32(gridGroupDim().x); K=Int32(m.K); xs=Int32(length(x)÷8); ys=Int32(length(y)÷8)
     W=av(UInt8,m.ptr,Int64(typemax(Int32)))
@@ -1068,17 +1124,24 @@ end
     end
     p_sync(); return
 end
-@inline function p_save!(dst::UInt64,src::UInt64,p::Int32,n::Int32)
-    d=fv(dst,8n); s=fv(src,n)
-    for j in gid0():Int32(gridItemDim().x):n-Int32(1); @inbounds d[p*n+j+1]=s[j+1]; end
-    p_sync(); return
-end
-@inline function p_restore!(blocks,k::Int32)
+@inline replay(B,off::Int32,n::Int32)=fv(B.cs+UInt64(4)*UInt64(off),n)
+@inline function p_restore!(blocks,k::Int32,b,pos::Int32)
     @inbounds for l in Int32(1):Int32(length(blocks))
         B=blockref(blocks,l)
         if B.linear
-            p_copy!(fv(B.state,524288),pv(fv(B.ss,8*524288),k-Int32(1)),Int32(524288))
-            p_copy!(fv(B.conv,32768),pv(fv(B.cs,8*32768),k-Int32(1)),Int32(32768))
+            p_copy!(fv(B.state,524288),fv(B.ss,524288),Int32(524288))
+            p_copy!(fv(B.conv,32768),replay(B,Int32(0),Int32(32768)),Int32(32768))
+            for p in Int32(0):k-Int32(1)
+                k_conv!(b.u,pv(replay(B,Int32(32768),Int32(65536)),p),fv(B.conv,32768),fv(B.vec[5],32768),pos+p,Int32(8192))
+                p_sync()
+                for task in Int32(workgroupIdx().x)-Int32(1):Int32(gridGroupDim().x):Int32(511)
+                    k_delta!(b.rawdn,fv(B.state,524288),pv(replay(B,Int32(163840),Int32(16384)),p),
+                             pv(replay(B,Int32(180224),Int32(16384)),p),pv(replay(B,Int32(98304),Int32(65536)),p),
+                             pv(replay(B,Int32(196608),Int32(256)),p),pv(replay(B,Int32(196864),Int32(256)),p),
+                             fv(B.vec[4]),fv(B.vec[3]),Int32(16),task)
+                end
+                p_sync()
+            end
         end
     end
     return
@@ -1092,21 +1155,31 @@ end
         if B.linear
             p_mul!(b.qkv,M[1],b.xn,expertids,n,P); p_mul!(b.z,M[2],b.xn,expertids,n,P)
             p_mul!(b.alpha,M[3],b.xn,expertids,n,P); p_mul!(b.beta,M[4],b.xn,expertids,n,P)
+            if snapshot
+                p_copy!(fv(B.ss,524288),fv(B.state,524288),Int32(524288))
+                p_copy!(replay(B,Int32(0),Int32(32768)),fv(B.conv,32768),Int32(32768))
+                p_copy!(replay(B,Int32(32768),Int32(65536)),b.qkv,n*Int32(8192))
+            end
             for p in Int32(0):n-Int32(1)
                 k_conv!(pv(b.u,p),pv(b.qkv,p),fv(B.conv,32768),fv(V[5],32768),pos+p,Int32(8192))
                 p_sync()
-                snapshot && p_save!(B.cs,B.conv,p,Int32(32768))
             end
             for task in bid:ng:n*Int32(16)-Int32(1)
                 p=task÷Int32(16); k_qknorm!(pv(b.qdn,p),pv(b.kdn,p),pv(b.u,p),Int32(16),1.0f-6,task%Int32(16))
             end
             p_sync()
+            if snapshot
+                p_copy!(replay(B,Int32(98304),Int32(65536)),b.u,n*Int32(8192))
+                p_copy!(replay(B,Int32(163840),Int32(16384)),b.qdn,n*Int32(2048))
+                p_copy!(replay(B,Int32(180224),Int32(16384)),b.kdn,n*Int32(2048))
+                p_copy!(replay(B,Int32(196608),Int32(256)),b.alpha,n*Int32(32))
+                p_copy!(replay(B,Int32(196864),Int32(256)),b.beta,n*Int32(32))
+            end
             for p in Int32(0):n-Int32(1)
                 for task in bid:ng:Int32(511)
                     k_delta!(pv(b.rawdn,p),fv(B.state,524288),pv(b.qdn,p),pv(b.kdn,p),pv(b.u,p),pv(b.alpha,p),pv(b.beta,p),fv(V[4]),fv(V[3]),Int32(16),task)
                 end
                 p_sync()
-                snapshot && p_save!(B.ss,B.state,p,Int32(524288))
             end
             for task in bid:ng:n*Int32(32)-Int32(1)
                 p=task÷Int32(32); k_gatednorm!(pv(b.on,p),pv(b.rawdn,p),pv(b.z,p),fv(V[6]),1.0f-6,task%Int32(32))
@@ -1314,7 +1387,7 @@ end
 
 @inline function p_mprepare!(s,emb,id::Int32,prior,ei)
     m=s.mb
-    for c in gid0():Int32(gridItemDim().x):Int32(2047); @inbounds m.x[c+1]=bf32(emb[Int64(id)*2048+c+1]); end
+    for c in gid0():Int32(gridItemDim().x):Int32(2047); @inbounds m.x[c+1]=embvalue(emb,Int64(id)*2048+c); end
     p_sync()
     if workgroupIdx().x==1
         k_norm!(m.concat,m.x,fv(s.mnorm[1]),Int32(2048),1.0f-6)
@@ -1355,48 +1428,52 @@ function k_request!(blocks,head,normout,embedding,b,s,ids,output,control,ticks,p
                     np::Int32,nt::Int32,ctx::Int32,eos::Int32,imend::Int32,::Val{MODE}) where MODE
     if gid0()==0; @inbounds ticks[1]=clockgpu(); control[1]=Int32(0); control[2]=Int32(0); end
     p_sync(); pos=Int32(0)
-    while pos<np
-        n=min(Int32(8),np-pos); p_embed!(b.x,embedding,ids,pos,n)
-        p_blocks!(blocks,normout,b,expertids,pos,n,Val(8),ctx,false,MODE==2)
-        p_append!(s,b,embedding,ids,pos,pos,n,ctx,expertids,Val(MODE),true)
-        pos+=n
-        if pos==np
-            p_mul!(b.logits,head,pv(b.xn,n-Int32(1)),expertids,Int32(1),Val(8))
-            p_argmax!(b.logits,part,ix,s.prediction,head.rows,Int32(1))
+    width=MODE==2 ? Int32(8) : MODE==1 ? Int32(2) : Int32(1)
+    while pos<np || (@inbounds control[2]<nt && control[1]==0)
+        prefill=pos<np
+        n=prefill ? min(Int32(8),np-pos) : min(width,nt-(@inbounds control[2]))
+        if prefill
+            p_embed!(b.x,embedding,ids,pos,n)
+        else
+            if gid0()==0; @inbounds s.proposal[1]=control[3]; end
+            p_sync()
+            if MODE==2 && n>1; p_dpropose!(s,head,embedding,pos,expertids,part,ix)
+            elseif MODE==1 && n>1; p_mpropose!(s,head,embedding,pos,ctx,expertids,part,ix)
+            end
+            p_embed!(b.x,embedding,s.proposal,Int32(0),n)
+        end
+        p_blocks!(blocks,normout,b,expertids,pos,n,Val(8),ctx,!prefill && MODE!=0 && n>1,MODE==2)
+        if prefill
+            p_append!(s,b,embedding,ids,pos,pos,n,ctx,expertids,Val(MODE),true)
+            pos+=n
+            pos<np && continue
+        end
+        headn=prefill ? Int32(1) : n
+        p_mul!(b.logits,head,pv(b.xn,prefill ? n-Int32(1) : Int32(0)),expertids,headn,Val(8))
+        p_argmax!(b.logits,part,ix,s.prediction,head.rows,headn)
+        if prefill
             if gid0()==0
                 @inbounds id=s.prediction[1]; output[1]=id; control[2]=Int32(1); control[3]=id
                 control[1]=(id==eos || id==imend) ? Int32(1) : Int32(0); ticks[2]=clockgpu()
             end
             p_sync()
-        end
-    end
-    P=Val(8)
-    width=MODE==2 ? Int32(8) : MODE==1 ? Int32(2) : Int32(1)
-    while (@inbounds control[2]<nt && control[1]==0)
-        n=min(width,nt-(@inbounds control[2]))
-        if gid0()==0; @inbounds s.proposal[1]=control[3]; end
-        p_sync()
-        if MODE==2 && n>1; p_dpropose!(s,head,embedding,pos,expertids,part,ix)
-        elseif MODE==1 && n>1; p_mpropose!(s,head,embedding,pos,ctx,expertids,part,ix)
-        end
-        p_embed!(b.x,embedding,s.proposal,Int32(0),n)
-        p_blocks!(blocks,normout,b,expertids,pos,n,P,ctx,MODE!=0 && n>1,MODE==2)
-        p_mul!(b.logits,head,b.xn,expertids,n,P); p_argmax!(b.logits,part,ix,s.prediction,head.rows,n)
-        if gid0()==0
-            @inbounds begin
-                k=Int32(1)
-                while k<n && s.prediction[k]==s.proposal[k+1]; k+=Int32(1); end
-                control[4]=k
-                for p in Int32(0):k-Int32(1)
-                    id=s.prediction[p+1]; output[control[2]+1]=id; control[2]+=Int32(1); control[3]=id
-                    if id==eos || id==imend; control[1]=Int32(1); break; end
+        else
+            if gid0()==0
+                @inbounds begin
+                    k=Int32(1)
+                    while k<n && s.prediction[k]==s.proposal[k+1]; k+=Int32(1); end
+                    control[4]=k
+                    for p in Int32(0):k-Int32(1)
+                        id=s.prediction[p+1]; output[control[2]+1]=id; control[2]+=Int32(1); control[3]=id
+                        if id==eos || id==imend; control[1]=Int32(1); break; end
+                    end
                 end
             end
+            p_sync(); k=@inbounds control[4]
+            MODE!=0 && k<n && p_restore!(blocks,k,b,pos)
+            p_append!(s,b,embedding,s.proposal,Int32(0),pos,k,ctx,expertids,Val(MODE),false)
+            pos+=k
         end
-        p_sync(); k=@inbounds control[4]
-        MODE!=0 && k<n && p_restore!(blocks,k)
-        p_append!(s,b,embedding,s.proposal,Int32(0),pos,k,ctx,expertids,Val(MODE),false)
-        pos+=k
     end
     if gid0()==0; @inbounds ticks[3]=clockgpu(); end
     return
@@ -1411,7 +1488,7 @@ mutable struct Engine
     blocks::ROCArray{PBlock,1}
     head::PMat
     output_norm::ROCArray{Float32,1}
-    embedding::ROCArray{UInt16,1}
+    embedding::ROCArray{UInt8,1}
     b::NamedTuple
     spec::NamedTuple
     ids::ROCArray{Int32,1}
@@ -1477,16 +1554,22 @@ function Engine(g,ctx;compileonly=false,mode=0,draftpath=joinpath(dirname(DEFAUL
         vs=ntuple(i->haskey(g.tensors,p*VNAMES[i]) ? vec(g,p*VNAMES[i]) : UInt64(0),8)
         st=state(linear ? 524288 : 0); cv=state(linear ? 32768 : 0)
         kc=state(linear ? 0 : 512ctx); vc=state(linear ? 0 : 512ctx)
-        ss=UInt(pointer(retain(z(compileonly ? 1 : linear ? snap*524288 : 0))))
-        cs=UInt(pointer(retain(z(compileonly ? 1 : linear ? snap*32768 : 0))))
+        ss=UInt(pointer(retain(z(compileonly ? 1 : linear && snap>0 ? 524288 : 0))))
+        cs=UInt(pointer(retain(z(compileonly ? 1 : linear && snap>0 ? 197120 : 0))))
         phase("loaded block $l")
         PBlock(ms,vs,st,cv,kc,vc,ss,cs,linear)
     end
     bs=[block(g,l;snap=mode==2 ? 8 : mode==1 ? 2 : 0) for l in 0:39]
     head=mat(g,"output.weight"); norm=retain(ROCArray(tensor_f32(g,"output_norm.weight")))
-    et=g.tensors["token_embd.weight"]
-    emb=retain(compileonly ? AMDGPU.zeros(UInt16,1) : GC.@preserve g unsafe_wrap(ROCArray,Ptr{UInt16}(pointer(g.map)+et.off),(prod(et.dims),)))
-    vocab=length(tk.text); groups=Int(AMDGPU.HIP.properties(AMDGPU.device()).multiProcessorCount)
+    emb=if compileonly
+        retain(AMDGPU.zeros(UInt8,1))
+    else
+        packed=Mmap.mmap(packedembedding(g)); a=retain(ROCArray{UInt8}(undef,length(packed)))
+        GC.@preserve packed upload!(a,pointer(packed),length(packed))
+        releasepages(packed,0,length(packed)); a
+    end
+    vocab=length(tk.text)
+    groups=compileonly && get(ENV,"QWEN36_COMPILE_GFX1101","")=="1" ? 27 : Int(AMDGPU.HIP.properties(AMDGPU.device()).multiProcessorCount)
     b=buffers(vocab,ctx); dummy=PMat(0,0,0,0); eh=dummy; fc=dummy; selector=dummy; pred=dummy; succ=dummy
     mn=(UInt64(0),UInt64(0),UInt64(0)); dn=(UInt64(0),UInt64(0)); mbs=PBlock[]; dbs=DPBlock[]
     mb=mode==1 ? buffers(vocab,ctx) : b; db=mode==2 ? buffers(vocab,ctx;draft=true) : b
@@ -1532,7 +1615,7 @@ function reset!(E)
 end
 function request_kernel(E,np,nt;compile=false)
     sb=merge(map(rocdesc,E.spec),(mb=activations(E.spec.mb,E.descriptors[2]),db=activations(E.spec.db,E.descriptors[3])))
-    emb=PBuf{UInt16,2048length(E.tk.text)}(UInt64(pointer(E.embedding)))
+    emb=PBuf{UInt8,typemax(Int32)}(UInt64(pointer(E.embedding)))
     args=(pbuf(E.blocks),E.head,pbuf(E.output_norm),emb,activations(E.b,E.descriptors[1]),sb,
           pbuf(E.ids),pbuf(E.output),pbuf(E.control),pbuf(E.ticks),pbuf(E.part),pbuf(E.ix),pbuf(E.expertids),
           Int32(np),Int32(nt),Int32(E.ctx),E.tk.eos,get(E.tk.ids,"<|im_end|>",E.tk.eos),Val(E.mode))
@@ -1540,22 +1623,31 @@ function request_kernel(E,np,nt;compile=false)
         # O1 avoids LLVM's quadratic IRCE pass over the persistent request loop.
         # This is a per-kernel configuration; AMDGPU's global compiler is unchanged.
         tt=AMDGPU.Runtime.argument_types(map(AMDGPU.rocconvert,args)); dev=AMDGPU.device()
-        cfg=AMDGPU.GPUCompiler.CompilerConfig(AMDGPU.compiler_config(dev;maxthreads=256);opt_level=1)
+        cross=get(ENV,"QWEN36_COMPILE_GFX1101","")=="1"
+        cross && !compile && error("cross compilation cannot launch a request")
+        basecfg=AMDGPU.compiler_config(dev;maxthreads=256,wavefrontsize64=cross ? false : AMDGPU.HIP.wavefrontsize(dev)==64)
+        cfg=AMDGPU.GPUCompiler.CompilerConfig(basecfg;opt_level=1)
+        if cross
+            target=AMDGPU.GPUCompiler.GCNCompilerTarget(;dev_isa="gfx1101",features="+wavefrontsize32,-wavefrontsize64",maxthreads=256)
+            cfg=AMDGPU.GPUCompiler.CompilerConfig(cfg;target=target)
+        end
         source=AMDGPU.methodinstance(typeof(k_request!),tt)
         job=AMDGPU.GPUCompiler.CompilerJob(source,cfg)
-        arch=replace(AMDGPU.HIP.gcn_arch(dev),r"[^A-Za-z0-9_-]"=>"_")
+        arch=cross ? "gfx1101" : replace(AMDGPU.HIP.gcn_arch(dev),r"[^A-Za-z0-9_-]"=>"_")
         key=SOURCE_DIGEST*"-$VERSION-$(pkgversion(AMDGPU))-$arch-$(E.mode)-$(E.ctx)-"*bytes2hex(sha256(string(tt)))
         cache=joinpath(get(ENV,"QWEN36_CACHE",joinpath(homedir(),".cache","qwen36")),key)
         mkpath(dirname(cache))
         if isfile(cache*".hsaco") && isfile(cache*".entry")
+            cross && return cache
             mod=AMDGPU.HIP.HIPModule(read(cache*".hsaco"))
             fun=AMDGPU.HIP.HIPFunction(mod,read(cache*".entry",String),Symbol[])
         else
             res=AMDGPU.Compiler.compile_or_lookup(job)
             isempty(res.global_hostcalls) && isempty(res.relocations) || error("persistent kernel unexpectedly requires host pointers")
-            fun=AMDGPU.Compiler.hiplink(job,res.obj,res.entry,res.global_hostcalls,res.relocations)
             write(cache*".hsaco.part",res.obj); mv(cache*".hsaco.part",cache*".hsaco";force=true)
             write(cache*".entry.part",res.entry); mv(cache*".entry.part",cache*".entry";force=true)
+            cross && (phase("compiled request"); return cache)
+            fun=AMDGPU.Compiler.hiplink(job,res.obj,res.entry,res.global_hostcalls,res.relocations)
         end
         E.kernel=AMDGPU.Runtime.HIPKernel{typeof(k_request!),tt}(k_request!,fun)
         phase("compiled request")
@@ -1713,6 +1805,7 @@ function main(args)
     end
     isfile(path) || error("missing model; run with --download")
     isfile(path*".aria2") && error("model download is still running")
+    get(ENV,"QWEN36_COMPILE_GFX1101","")=="1" && !("--compile" in flags) && error("QWEN36_COMPILE_GFX1101 requires --compile")
     nt=parse(Int,get(opts,"--tokens","32")); ctx=parse(Int,get(opts,"--ctx","2048"))
     nt>0 && ctx>0 || error("token/context counts must be positive")
     prompt=haskey(opts,"--prompt-file") ? read(opts["--prompt-file"],String) : get(opts,"--prompt","What is 2+2? Answer briefly.")
