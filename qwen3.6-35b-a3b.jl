@@ -30,7 +30,6 @@ struct ProfileConfig
     data::Ptr{Cvoid}
 end
 const PROFILE_ID=Ref(ProfileClientID(24,C_NULL,0))
-const PROFILE_CONFIG=Ref(ProfileConfig(32,C_NULL,C_NULL,C_NULL))
 const PROFILE_TOOL_CONFIG=Ref{Ptr{Cvoid}}(C_NULL)
 const PROFILE_TOOL_INIT=Ref{Ptr{Cvoid}}(C_NULL)
 const PROFILE_FINISH=Ref{Ptr{Cvoid}}(C_NULL)
@@ -40,38 +39,44 @@ function profile_initialize(finalizer::Ptr{Cvoid},data::Ptr{Cvoid})::Cint
     PROFILE_FINISH[]=finalizer
     ccall(PROFILE_TOOL_INIT[],Cint,(Ptr{Cvoid},Ptr{Cvoid}),finalizer,data)
 end
-function profile_configure(version::UInt32,runtime::Ptr{UInt8},priority::UInt32,id::Ptr{ProfileClientID})::Ptr{ProfileConfig}
-    p=ccall(PROFILE_TOOL_CONFIG[],Ptr{ProfileConfig},(UInt32,Ptr{UInt8},UInt32,Ptr{ProfileClientID}),version,runtime,priority,id)
-    p==C_NULL && return C_NULL
-    cfg=unsafe_load(p); PROFILE_ID[]=unsafe_load(id); PROFILE_TOOL_INIT[]=cfg.initialize
-    PROFILE_CONFIG[]=ProfileConfig(cfg.size,@cfunction(profile_initialize,Cint,(Ptr{Cvoid},Ptr{Cvoid})),cfg.finalize,cfg.data)
-    Base.unsafe_convert(Ptr{ProfileConfig},PROFILE_CONFIG)
-end
 function profile_start()
     dir=mktempdir(;prefix="qwen36-profile-",cleanup=false); PROFILE_DIR[]=dir
     for (k,v) in ("ROCPROF_OUTPUT_PATH"=>dir,"ROCPROF_OUTPUT_FILE_NAME"=>"qwen36","ROCPROF_OUTPUT_FORMAT"=>"csv",
                   "ROCPROF_KERNEL_TRACE"=>"1","ROCPROF_MEMORY_COPY_TRACE"=>"1","ROCPROF_MARKER_API_TRACE"=>"1",
                   "ROCPROF_COUNTER_COLLECTION"=>"1","ROCPROF_COUNTERS"=>"pmc: GPUBusy GRBM_COUNT GRBM_GUI_ACTIVE",
+                  "ROCPROF_SELECTED_REGIONS"=>"1","GLOG_minloglevel"=>"3",
                   "ROCPROF_KERNEL_FILTER_INCLUDE_REGEX"=>".*k_request.*","ROCPROF_LOG_LEVEL"=>"error",
                   "ROCPROFILER_LOG_LEVEL"=>"error","ROCTX_LOG_LEVEL"=>"error")
         ENV[k]=v
     end
     tool=Libdl.dlopen("/opt/rocm/lib/rocprofiler-sdk/librocprofiler-sdk-tool.so",Libdl.RTLD_LAZY|Libdl.RTLD_LOCAL)
     push!(PROFILE_HANDLES,tool); PROFILE_TOOL_CONFIG[]=Libdl.dlsym(tool,:rocprofiler_configure)
-    p=@cfunction(profile_configure,Ptr{ProfileConfig},(UInt32,Ptr{UInt8},UInt32,Ptr{ProfileClientID}))
-    status=ccall((:rocprofiler_force_configure,"/opt/rocm/lib/librocprofiler-sdk.so"),Cint,(Ptr{Cvoid},),p)
+    # Use the tool's own configure pointer so SDK's ELF discovery deduplicates it.
+    # Its static result can retain our initialize wrapper across configuration.
+    p=ccall(PROFILE_TOOL_CONFIG[],Ptr{ProfileConfig},(UInt32,Cstring,UInt32,Ref{ProfileClientID}),10100,"qwen36",0,PROFILE_ID)
+    cfg=unsafe_load(p); PROFILE_TOOL_INIT[]=cfg.initialize
+    unsafe_store!(p,ProfileConfig(cfg.size,@cfunction(profile_initialize,Cint,(Ptr{Cvoid},Ptr{Cvoid})),cfg.finalize,cfg.data))
+    status=ccall((:rocprofiler_force_configure,"/opt/rocm/lib/librocprofiler-sdk.so"),Cint,(Ptr{Cvoid},),PROFILE_TOOL_CONFIG[])
     status==0 || error("profiler configuration failed: $status")
     dir
 end
 function profile_finish()
     f=PROFILE_FINISH[]; f==C_NULL && error("profiler did not initialize")
+    # SDK 1.1 returns the process finalizer when exactly one client is registered;
+    # that callback ignores its client-ID argument (registration.cpp).
     ccall(f,Cvoid,(ProfileClientID,),PROFILE_ID[]); PROFILE_FINISH[]=C_NULL
 end
 if abspath(PROGRAM_FILE)==@__FILE__() && !any(a->a in ("--help","--compile","--download","--prepare"),ARGS)
     profile_start()
 end
 using AMDGPU
-const SOURCE_DIGEST=bytes2hex(sha256(read(@__FILE__)))
+const SOURCE_DIGEST=let source=read(@__FILE__,String)
+    clip(a,b)=source[first(findfirst(a,source)):first(findfirst(b,source))-1]
+    bytes2hex(sha256(clip(r"(?m)^# Device primitives",r"(?m)^# Tokenizer follows")*
+                    clip(r"(?m)^struct PMat",r"(?m)^mutable struct Engine")*
+                    clip(r"(?m)^function request_kernel",r"(?m)^function request!")*
+                    match(r"(?m)^bf32\(.*$",source).match))
+end
 
 const MODEL_REV = "34a912bde355affe80eb1af654475a6fe9feff5f"
 const MODEL_FILE = "Qwen3.6-35B-A3B-GSQ-hybrid.gguf"
@@ -193,6 +198,27 @@ struct DMat
     K::Int
     rows::Int
 end
+const UPLOAD_PTR=Ref{Ptr{Cvoid}}(C_NULL)
+const UPLOAD_BYTES=32*1024*1024
+function upload!(W,src::Ptr{UInt8},nb::Int)
+    if UPLOAD_PTR[]==C_NULL
+        AMDGPU.HIP.hipHostMalloc(UPLOAD_PTR,UPLOAD_BYTES,0)
+    end
+    host=Ptr{UInt8}(UPLOAD_PTR[]); stm=AMDGPU.stream()
+    GC.@preserve W begin
+        for off in 0:UPLOAD_BYTES:nb-1
+            n=min(UPLOAD_BYTES,nb-off); unsafe_copyto!(host,src+off,n)
+            AMDGPU.HIP.hipMemcpyAsync(pointer(W)+off,host,n,AMDGPU.HIP.hipMemcpyHostToDevice,stm)
+            AMDGPU.HIP.hipStreamSynchronize(stm)
+        end
+    end
+    W
+end
+function free_upload!()
+    if UPLOAD_PTR[]!=C_NULL
+        AMDGPU.HIP.hipHostFree(UPLOAD_PTR[]); UPLOAD_PTR[]=C_NULL
+    end
+end
 function DMat(g, name)
     t = g.tensors[name]
     if t.typ==42
@@ -200,12 +226,14 @@ function DMat(g, name)
         # Remove the identical copy, preserving every weight bit and scale bit.
         t.dims[1]%128==0 || error("Q2_0 row is not a multiple of 128")
         packed=Mmap.mmap(packedweight(g,name))
-        W=ROCArray{UInt8}(undef,length(packed)); copyto!(W,packed); AMDGPU.synchronize()
+        W=ROCArray{UInt8}(undef,length(packed))
+        GC.@preserve packed upload!(W,pointer(packed),length(packed))
         releasepages(packed,0,length(packed))
         return DMat(W,142,t.dims[1],prod(t.dims[2:end]))
     end
-    W=ROCArray{UInt8}(undef,t.nbytes); copyto!(W,1,g.map,t.off+1,t.nbytes)
-    AMDGPU.synchronize(); releasepages(g,t)
+    W=ROCArray{UInt8}(undef,t.nbytes)
+    GC.@preserve g upload!(W,pointer(g.map)+t.off,t.nbytes)
+    releasepages(g,t)
     DMat(W,t.typ,t.dims[1],prod(t.dims[2:end]))
 end
 function releasepages(g,t)
@@ -1311,6 +1339,7 @@ function Engine(g,ctx;compileonly=false,mode=0,draftpath=joinpath(dirname(DEFAUL
           mnorm=mn,dnorm=dn,last=z(2048),proposal=AMDGPU.zeros(Int32,8),prediction=AMDGPU.zeros(Int32,8),mask=mask,
           topv=z(8groups*16),topi=AMDGPU.zeros(Int32,8groups*16))
     phase("loaded engine")
+    free_upload!()
     Engine(g,tk,c,keep,states,ROCArray(bs),head,norm,emb,b,spec,
            AMDGPU.zeros(Int32,ctx),AMDGPU.zeros(Int32,ctx),AMDGPU.zeros(Int32,4),AMDGPU.zeros(UInt64,3),
            z(8groups),AMDGPU.zeros(Int32,8groups),AMDGPU.zeros(Int32,64),ctx,groups,mode,nothing)
@@ -1480,6 +1509,7 @@ function main(args)
     frequency=Float64(rate[])*1000; frequency>0 || error("no GPU steady clock frequency")
     # A marker covers tokenization, copies, dispatch, synchronization and decoding.
     # rocprofv3 records the same monotonic CPU time domain for all these activities.
+    ccall((:roctxProfilerResume,"/opt/rocm/lib/librocprofiler-sdk-roctx.so"),Cint,(Cint,),0)
     ccall((:roctxRangePushA,"/opt/rocm/lib/librocprofiler-sdk-roctx.so"),Cint,(Cstring,),"qwen36/request")
     ids=encode(E.tk,text); isempty(ids) && error("empty prompt")
     out,ticks,ctl=request!(E,ids,nt)
@@ -1490,6 +1520,7 @@ function main(args)
     end
     get(ENV,"QWEN36_OUTPUT","")=="" || write(ENV["QWEN36_OUTPUT"],decoded)
     ccall((:roctxRangePop,"/opt/rocm/lib/librocprofiler-sdk-roctx.so"),Cint,())
+    ccall((:roctxProfilerPause,"/opt/rocm/lib/librocprofiler-sdk-roctx.so"),Cint,(Cint,),0)
     pre=Float64(ticks[2]-ticks[1])/frequency
     dec=max(Float64(ticks[3]-ticks[2])/frequency,eps(Float64)); steps=max(ctl[2]-1,0)
     m=Dict("prefill_tps"=>length(ids)/pre,"decode_tps"=>steps/dec,"prompt_tokens"=>length(ids),"output_tokens"=>length(out))

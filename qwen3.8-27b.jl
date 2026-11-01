@@ -569,9 +569,8 @@ struct DState
 end
 DState(maxctx) = DState(AMDGPU.zeros(Float32, 48 * VHD * DK * DK), AMDGPU.zeros(Float32, 48 * QKVD * 3),
     AMDGPU.zeros(Float16, 16 * maxctx * HD), AMDGPU.zeros(Float16, 16 * maxctx * HD), maxctx)
-function load_die(g::GGUF, dev, d; maxctx = 4096)
+function load_die(g::GGUF, dev, d, L; maxctx = 4096)
     AMDGPU.device!(dev)
-    L = [load_layer(g, l, d) for l in 0:NL-1]
     emb = DMat(g, "token_embd.weight", VPD * d, VPD); head = DMat(g, "output.weight", VPD * d, VPD)
     z(n) = AMDGPU.zeros(Float32, n)
     Die(dev, d, L, emb, head, ROCArray(f32(g, "output_norm.weight")), GBuf(VPD * 10 * PMAX, NE, PMAX), AMDGPU.zeros(Int32, PMAX),
@@ -641,11 +640,20 @@ function forward!(E::Engine, st::Vector{DState}, toks::Vector{Int}, pos0::Int; l
     end
     Lg
 end
+# the layers are read in file order, each one for all four dies at once (one pass over the file: the GGUF is on a
+# spinning disk and sentry's RAM can't cache all of it)
 function load_engine(path; maxctx = 4096)
     g = gguf(path); devs = AMDGPU.devices()
     length(devs) >= ND || error("need $ND dies, have $(length(devs))")
-    t0 = time()
-    dies = [load_die(g, devs[d+1], d; maxctx) for d in 0:ND-1]
+    t0 = time(); Ls = [Vector{DLayer}(undef, NL) for _ in 1:ND]
+    onall(f) = @sync for d in 0:ND-1
+        Threads.@spawn (AMDGPU.device!(devs[d+1]); f(d))
+    end
+    for l in 0:NL-1
+        onall(d -> (Ls[d+1][l+1] = load_layer(g, l, d)))
+    end
+    dies = Vector{Die}(undef, ND)
+    onall(d -> (dies[d+1] = load_die(g, devs[d+1], d, Ls[d+1]; maxctx)))
     @printf("weights resident on %d dies (%.0f s)\n", ND, time() - t0)
     Engine(dies), g
 end
@@ -682,30 +690,47 @@ end
 #   kl N REF.logits.f16        KL against BF16 reference logits over the first N tokens of REF's sequence
 #   gen N ID ID ...            greedy: N tokens after the given token ids
 #   echo 'gen 32 9707 11' | socat - UNIX-CONNECT:SOCK
+# the server's engine, kept across reloads of this file
+if !isdefined(Main, :SRV)
+    const SRV = Ref{Any}(nothing)
+end
 function serve(path, sock)
     E, g = load_engine(path; maxctx = 4096)
-    vocab = g.kv["tokenizer.ggml.tokens"]; lk = ReentrantLock()
+    SRV[] = (E = E, g = g, vocab = g.kv["tokenizer.ggml.tokens"], file = abspath(@__FILE__))
+    lk = ReentrantLock()
     ispath(sock) && rm(sock)
     srv = listen(sock); println("serving on $sock"); flush(stdout)
     while true
         c = accept(srv)
         @async try
-            a = split(readline(c))
+            line = readline(c)
             lock(lk) do
-                if a[1] == "kl"
-                    n = parse(Int, a[2]); ids = Int.(reinterpret(Int32, read(replace(a[3], ".logits.f16" => ".ids"))))
-                    kl_test(c, E, ids, a[3], n)
-                elseif a[1] == "gen"
-                    gen(c, E, vocab, parse.(Int, a[3:end]), parse(Int, a[2]))
-                else
-                    println(c, "unknown command: ", a[1])
-                end
+                Base.invokelatest(handle, c, line)        # the newest definitions, after a reload
             end
         catch e
             println(c, "error: ", sprint(showerror, e, catch_backtrace()))
         finally
             close(c)
         end
+    end
+end
+#   kl N REF.logits.f16        KL against BF16 reference logits over the first N tokens of REF's sequence
+#   gen N ID ID ...            greedy: N tokens after the given token ids
+#   reload                     include this file again (new code, the weights stay resident)
+#   eval CODE                  run Julia code in the server, print its value
+function handle(c, line)
+    a = split(line); s = SRV[]
+    if a[1] == "kl"
+        n = parse(Int, a[2]); ids = Int.(reinterpret(Int32, read(replace(a[3], ".logits.f16" => ".ids"))))
+        kl_test(c, s.E, ids, a[3], n)
+    elseif a[1] == "gen"
+        gen(c, s.E, s.vocab, parse.(Int, a[3:end]), parse(Int, a[2]))
+    elseif a[1] == "reload"
+        Base.include(Main, s.file); println(c, "reloaded ", s.file)
+    elseif a[1] == "eval"
+        println(c, repr(Base.include_string(Main, line[6:end])))
+    else
+        println(c, "unknown command: ", a[1])
     end
 end
 
@@ -766,6 +791,6 @@ function main(args)
     (i = findfirst(==("--serve"), args)) !== nothing && return serve(args[k+1], args[i+1])
     error("nothing to do: --bench-gemv")
 end
-if abspath(PROGRAM_FILE) == @__FILE__()
+if abspath(PROGRAM_FILE) == @__FILE__() && SRV[] === nothing
     main(ARGS)
 end
