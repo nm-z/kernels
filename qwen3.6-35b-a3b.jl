@@ -5,13 +5,73 @@
 # Run:
 #   julia --project=~/.julia/environments/qwen36 qwen3.6-35b-a3b.jl --prompt 'What is 2+2?' --tokens 32
 #   ... --download                 fetch the pinned 11.38-GiB text GGUF
+#   ... --prepare                  losslessly pack repeated GSQ scales once
+#   ... --spec mtp|dflash2          exact greedy speculative decoding
+#   ... --compile --spec dflash2    compile/cache a mode without loading weights
 #   ... --model FILE --raw         complete an untemplated prompt
 # Source checkpoint: https://huggingface.co/ISTA-DASLab/Qwen3.6-35B-A3B-2Bit-GSQ
 # GGUF: https://huggingface.co/chtisgit/Qwen3.6-35B-A3B-2Bit-GSQ-hybrid-GGUF
 # The converter preserves GSQ assignments; BF16->FP16 block scales incur the errors in its model card.
 # Weights are allocated once; one cooperative persistent dispatch executes a request.
 # The BF16 input embedding stays registered in host memory, with direct GPU reads.
-using AMDGPU, Mmap, Printf, Downloads, SHA, Random, TOML
+using Mmap, Printf, Downloads, SHA, TOML, Libdl
+# Register the SDK before HIP initializes. Wrapping its documented configure/init
+# callbacks retains the client finalizer, so traces are flushed while HIP is alive
+# instead of relying on the ordering of two libraries' process-exit handlers.
+struct ProfileClientID
+    size::Csize_t
+    name::Ptr{UInt8}
+    handle::UInt32
+end
+struct ProfileConfig
+    size::Csize_t
+    initialize::Ptr{Cvoid}
+    finalize::Ptr{Cvoid}
+    data::Ptr{Cvoid}
+end
+const PROFILE_ID=Ref(ProfileClientID(24,C_NULL,0))
+const PROFILE_CONFIG=Ref(ProfileConfig(32,C_NULL,C_NULL,C_NULL))
+const PROFILE_TOOL_CONFIG=Ref{Ptr{Cvoid}}(C_NULL)
+const PROFILE_TOOL_INIT=Ref{Ptr{Cvoid}}(C_NULL)
+const PROFILE_FINISH=Ref{Ptr{Cvoid}}(C_NULL)
+const PROFILE_HANDLES=Ptr{Cvoid}[]
+const PROFILE_DIR=Ref("")
+function profile_initialize(finalizer::Ptr{Cvoid},data::Ptr{Cvoid})::Cint
+    PROFILE_FINISH[]=finalizer
+    ccall(PROFILE_TOOL_INIT[],Cint,(Ptr{Cvoid},Ptr{Cvoid}),finalizer,data)
+end
+function profile_configure(version::UInt32,runtime::Ptr{UInt8},priority::UInt32,id::Ptr{ProfileClientID})::Ptr{ProfileConfig}
+    p=ccall(PROFILE_TOOL_CONFIG[],Ptr{ProfileConfig},(UInt32,Ptr{UInt8},UInt32,Ptr{ProfileClientID}),version,runtime,priority,id)
+    p==C_NULL && return C_NULL
+    cfg=unsafe_load(p); PROFILE_ID[]=unsafe_load(id); PROFILE_TOOL_INIT[]=cfg.initialize
+    PROFILE_CONFIG[]=ProfileConfig(cfg.size,@cfunction(profile_initialize,Cint,(Ptr{Cvoid},Ptr{Cvoid})),cfg.finalize,cfg.data)
+    Base.unsafe_convert(Ptr{ProfileConfig},PROFILE_CONFIG)
+end
+function profile_start()
+    dir=mktempdir(;prefix="qwen36-profile-",cleanup=false); PROFILE_DIR[]=dir
+    for (k,v) in ("ROCPROF_OUTPUT_PATH"=>dir,"ROCPROF_OUTPUT_FILE_NAME"=>"qwen36","ROCPROF_OUTPUT_FORMAT"=>"csv",
+                  "ROCPROF_KERNEL_TRACE"=>"1","ROCPROF_MEMORY_COPY_TRACE"=>"1","ROCPROF_MARKER_API_TRACE"=>"1",
+                  "ROCPROF_COUNTER_COLLECTION"=>"1","ROCPROF_COUNTERS"=>"pmc: GPUBusy GRBM_COUNT GRBM_GUI_ACTIVE",
+                  "ROCPROF_KERNEL_FILTER_INCLUDE_REGEX"=>".*k_request.*","ROCPROF_LOG_LEVEL"=>"error",
+                  "ROCPROFILER_LOG_LEVEL"=>"error","ROCTX_LOG_LEVEL"=>"error")
+        ENV[k]=v
+    end
+    tool=Libdl.dlopen("/opt/rocm/lib/rocprofiler-sdk/librocprofiler-sdk-tool.so",Libdl.RTLD_LAZY|Libdl.RTLD_LOCAL)
+    push!(PROFILE_HANDLES,tool); PROFILE_TOOL_CONFIG[]=Libdl.dlsym(tool,:rocprofiler_configure)
+    p=@cfunction(profile_configure,Ptr{ProfileConfig},(UInt32,Ptr{UInt8},UInt32,Ptr{ProfileClientID}))
+    status=ccall((:rocprofiler_force_configure,"/opt/rocm/lib/librocprofiler-sdk.so"),Cint,(Ptr{Cvoid},),p)
+    status==0 || error("profiler configuration failed: $status")
+    dir
+end
+function profile_finish()
+    f=PROFILE_FINISH[]; f==C_NULL && error("profiler did not initialize")
+    ccall(f,Cvoid,(ProfileClientID,),PROFILE_ID[]); PROFILE_FINISH[]=C_NULL
+end
+if abspath(PROGRAM_FILE)==@__FILE__() && !any(a->a in ("--help","--compile","--download","--prepare"),ARGS)
+    profile_start()
+end
+using AMDGPU
+const SOURCE_DIGEST=bytes2hex(sha256(read(@__FILE__)))
 
 const MODEL_REV = "34a912bde355affe80eb1af654475a6fe9feff5f"
 const MODEL_FILE = "Qwen3.6-35B-A3B-GSQ-hybrid.gguf"
@@ -31,6 +91,7 @@ struct GModel
     kv::Dict{String,Any}
     tensors::Dict{String,Tensor}
     map::Vector{UInt8}
+    identity::String
 end
 rowbytes(t::Tensor) = t.dims[1] ÷ TYPES[t.typ][1] * TYPES[t.typ][2]
 function gguf(path)
@@ -68,7 +129,8 @@ function gguf(path)
             base + off + nb <= filesize(path) || error("$path: incomplete download ($n is past EOF)")
             tensors[n] = Tensor(typ, dims, base + off, nb)
         end
-        GModel(kv, tensors, Mmap.mmap(path))
+        identity=bytes2hex(sha256(string(realpath(path),':',stat(path).mtime,':',filesize(path))))
+        GModel(kv, tensors, Mmap.mmap(path),identity)
     end
 end
 bytes(g, t::Tensor) = view(g.map, t.off+1:t.off+t.nbytes)
@@ -137,7 +199,34 @@ function DMat(g, name)
         # The source repeats each group-of-128 scale in two 64-value blocks.
         # Remove the identical copy, preserving every weight bit and scale bit.
         t.dims[1]%128==0 || error("Q2_0 row is not a multiple of 128")
-        nb=t.nbytes÷36; packed=Vector{UInt8}(undef,nb*34)
+        packed=Mmap.mmap(packedweight(g,name))
+        W=ROCArray{UInt8}(undef,length(packed)); copyto!(W,packed); AMDGPU.synchronize()
+        releasepages(packed,0,length(packed))
+        return DMat(W,142,t.dims[1],prod(t.dims[2:end]))
+    end
+    W=ROCArray{UInt8}(undef,t.nbytes); copyto!(W,1,g.map,t.off+1,t.nbytes)
+    AMDGPU.synchronize(); releasepages(g,t)
+    DMat(W,t.typ,t.dims[1],prod(t.dims[2:end]))
+end
+function releasepages(g,t)
+    # Uploaded tensors need no second host copy; avoid paging out live desktop apps.
+    releasepages(g.map,t.off,t.nbytes)
+end
+function releasepages(data,off,nb)
+    GC.@preserve data begin
+        a=UInt(pointer(data))+UInt(off); lo=cld(a,UInt(4096))*UInt(4096)
+        hi=fld(a+UInt(nb),UInt(4096))*UInt(4096)
+        hi>lo && ccall(:madvise,Cint,(Ptr{Cvoid},Csize_t,Cint),Ptr{Cvoid}(lo),hi-lo,4)
+    end
+    nothing
+end
+function packedweight(g,name)
+    t=g.tensors[name]; nb=t.nbytes÷36
+    p=joinpath(homedir(),".cache","qwen36","weights-"*g.identity,name*".q2")
+    isfile(p) && filesize(p)==34nb && return p
+    mkpath(dirname(p)); tmp=p*".part"
+    open(tmp,"w+") do io
+        truncate(io,34nb); packed=Mmap.mmap(io,Vector{UInt8},(34nb,))
         GC.@preserve g packed begin
             src=pointer(g.map)+t.off; dst=pointer(packed)
             for j in 0:nb-1
@@ -148,21 +237,14 @@ function DMat(g, name)
                 unsafe_copyto!(dst+34j+18,src+36j+20,16)
             end
         end
-        W=ROCArray(packed); AMDGPU.synchronize(); releasepages(g,t)
-        return DMat(W,142,t.dims[1],prod(t.dims[2:end]))
+        Mmap.sync!(packed); releasepages(packed,0,length(packed)); releasepages(g,t)
     end
-    W=ROCArray{UInt8}(undef,t.nbytes); copyto!(W,1,g.map,t.off+1,t.nbytes)
-    AMDGPU.synchronize(); releasepages(g,t)
-    DMat(W,t.typ,t.dims[1],prod(t.dims[2:end]))
+    mv(tmp,p;force=true); phase("packed $name"); p
 end
-function releasepages(g,t)
-    # Uploaded tensors need no second host copy; avoid paging out live desktop apps.
-    GC.@preserve g begin
-        a=UInt(pointer(g.map))+UInt(t.off); lo=cld(a,UInt(4096))*UInt(4096)
-        hi=fld(a+UInt(t.nbytes),UInt(4096))*UInt(4096)
-        hi>lo && ccall(:madvise,Cint,(Ptr{Cvoid},Csize_t,Cint),Ptr{Cvoid}(lo),hi-lo,4)
+function prepare(g)
+    for (name,t) in sort!(collect(g.tensors);by=x->last(x).off)
+        t.typ==42 && packedweight(g,name)
     end
-    nothing
 end
 function k_norm!(y, x, w, n::Int32, eps::Float32)
     ti = tid0(); s = @ROCStaticLocalArray(Float32, 256)
@@ -650,9 +732,9 @@ end
 # a permanently registered host mapping, read directly by the GPU (4 KiB/token).
 struct PMat
     ptr::UInt64
-    K::Int32
+    K::Int16
+    typ::Int16
     rows::Int32
-    typ::Int32
 end
 const MNAMES=("attn_qkv.weight","attn_gate.weight","ssm_alpha.weight","ssm_beta.weight","ssm_out.weight",
               "attn_q.weight","attn_k.weight","attn_v.weight","attn_output.weight","ffn_gate_inp.weight",
@@ -671,7 +753,18 @@ struct PBlock
     cs::UInt64
     linear::Bool
 end
-PMat(m::DMat)=PMat(UInt(pointer(m.W)),Int32(m.K),Int32(m.rows),Int32(m.typ))
+PMat(m::DMat)=PMat(UInt(pointer(m.W)),Int16(m.K),Int16(m.typ),Int32(m.rows))
+# Sizes are type parameters: the persistent loop carries one pointer per buffer,
+# instead of retaining 36 four-word array descriptors in scarce scalar registers.
+struct PBuf{T,N}
+    ptr::UInt64
+end
+@inline Base.length(::PBuf{T,N}) where {T,N}=N
+@inline Base.eltype(::PBuf{T,N}) where {T,N}=T
+@inline Base.pointer(b::PBuf{T,N}) where {T,N}=Core.LLVMPtr{T,1}(b.ptr)
+@inline Base.getindex(b::PBuf,i::Integer)=unsafe_load(pointer(b),i)
+@inline Base.setindex!(b::PBuf,v,i::Integer)=(unsafe_store!(pointer(b),v,i);v)
+pbuf(a)=PBuf{eltype(a),length(a)}(UInt(pointer(a)))
 @inline av(::Type{T},p::UInt64,n::Integer) where T =
     AMDGPU.ROCDeviceArray{T,1,1}((Int(n),),Core.LLVMPtr{T,1}(p))
 @inline fv(p::UInt64,n::Integer=16384)=av(Float32,p,n)
@@ -695,16 +788,18 @@ end
     end
     AMDGPU.Device.sync_grid(); return
 end
-@noinline function p_mul_t!(y,m,x,ids,mode::Int32,n::Int32,::Val{P},::Val{T}) where {P,T}
+@inline function p_mul_t!(y,m,x,ids,mode::Int32,n::Int32,::Val{P},::Val{T}) where {P,T}
     ti=tid0(); lane=ti&Int32(31); bid=Int32(workgroupIdx().x)-Int32(1)
-    ng=Int32(gridGroupDim().x); K=m.K; xs=Int32(length(x)÷8); ys=Int32(length(y)÷8)
+    ng=Int32(gridGroupDim().x); K=Int32(m.K); xs=Int32(length(x)÷8); ys=Int32(length(y)÷8)
     W=av(UInt8,m.ptr,Int64(typemax(Int32)))
     if mode==0
         for row in bid*Int32(8)+(ti>>Int32(5)):ng*Int32(8):m.rows-Int32(1)
             a=ntuple(_->0.0f0,Val(P))
             for k in lane:Int32(32):K-Int32(1)
                 w=weight(W,row,k,K,Val(T))
-                a=ntuple(j->j<=n ? fma(w,(@inbounds x[(j-1)*xs+k+1]),a[j]) : a[j],Val(P))
+                a=let previous=a
+                    ntuple(j->j<=n ? fma(w,(@inbounds x[(j-1)*xs+k+1]),previous[j]) : previous[j],Val(P))
+                end
             end
             for p in 1:P
                 v=sum32(a[p]); lane==0 && p<=n && (@inbounds y[(p-1)*ys+row+1]=v)
@@ -798,7 +893,7 @@ end
     end
     return
 end
-@noinline function p_blocks!(blocks,normout,b,expertids,pos::Int32,n::Int32,P::Val,ctx::Int32,
+@inline function p_blocks!(blocks,normout,b,expertids,pos::Int32,n::Int32,P::Val,ctx::Int32,
                           snapshot::Bool=false,capture::Bool=false,ropeoff::Int32=Int32(0))
     bid=Int32(workgroupIdx().x)-Int32(1); ng=Int32(gridGroupDim().x)
     @inbounds for l in Int32(1):Int32(length(blocks))
@@ -920,7 +1015,8 @@ end
         for j in 1:4; v=fma(qv[j],kk[j],v); end
         v=AMDGPU.Device.shfl(sum32(v),Int32(0),UInt32(32))*0.08838834764831845f0
         nm=max(mx,v); os=exp(mx-nm); ns=exp(v-nm)
-        den=fma(den,os,ns); mx=nm; acc=ntuple(j->fma(acc[j],os,vv[j]*ns),Val(4))
+        den=fma(den,os,ns); mx=nm
+        acc=let previous=acc; ntuple(j->fma(previous[j],os,vv[j]*ns),Val(4)); end
     end
     sh=@ROCStaticLocalArray(Float32,1040)
     @inbounds begin
@@ -933,7 +1029,8 @@ end
             d=0.0f0; a=ntuple(_->0.0f0,Val(4))
             for w in Int32(0):Int32(7)
                 f=sh[w*130+1]==-Inf32 ? 0.0f0 : exp(sh[w*130+1]-m)
-                d=fma(sh[w*130+2],f,d); a=ntuple(j->fma(sh[w*130+3+lane+32*(j-1)],f,a[j]),Val(4))
+                d=fma(sh[w*130+2],f,d)
+                a=let previous=a; ntuple(j->fma(sh[w*130+3+lane+32*(j-1)],f,previous[j]),Val(4)); end
             end
             for j in 1:4; out[p*4096+h*128+lane+32*(j-1)+1]=a[j]/d; end
         end
@@ -1001,7 +1098,7 @@ end
     end
     AMDGPU.Device.sync_grid(); return
 end
-@noinline function p_dpropose!(s,head,emb,pos::Int32,ei,part,ix)
+@inline function p_dpropose!(s,head,emb,pos::Int32,ei,part,ix)
     d=s.db; bid=Int32(workgroupIdx().x)-Int32(1); ng=Int32(gridGroupDim().x)
     if gid0()==0; @inbounds for p in 2:8; s.proposal[p]=s.mask; end; end
     AMDGPU.Device.sync_grid(); p_embed!(d.x,emb,s.proposal,Int32(0),Int32(8))
@@ -1033,12 +1130,12 @@ end
         k_norm!(m.concat,m.x,fv(s.mnorm[1]),Int32(2048),1.0f-6)
         k_norm!(av(Float32,UInt64(pointer(m.concat))+UInt64(8192),2048),prior,fv(s.mnorm[2]),Int32(2048),1.0f-6)
     end
-    AMDGPU.Device.sync_grid(); p_mul!(m.x,s.eh,m.concat,ei,Int32(1),Val(1)); return
+    AMDGPU.Device.sync_grid(); p_mul!(m.x,s.eh,m.concat,ei,Int32(1),Val(8)); return
 end
 @inline function p_mcache!(s,emb,id::Int32,prior,t::Int32,ctx::Int32,ei)
     p_mprepare!(s,emb,id,prior,ei); m=s.mb; B=@inbounds s.mblocks[1]
     p_norm!(m.xn,m.x,fv(B.vec[1]),Int32(2048),Int32(1))
-    p_mul!(m.k,B.mat[7],m.xn,ei,Int32(1),Val(1)); p_mul!(m.v,B.mat[8],m.xn,ei,Int32(1),Val(1))
+    p_mul!(m.k,B.mat[7],m.xn,ei,Int32(1),Val(8)); p_mul!(m.v,B.mat[8],m.xn,ei,Int32(1),Val(8))
     for h in Int32(workgroupIdx().x)-Int32(1):Int32(gridGroupDim().x):Int32(1)
         k_attnprep!(m.q,fv(B.kc,512ctx),fv(B.vc,512ctx),m.qg,m.k,m.v,fv(B.vec[7]),fv(B.vec[8]),t-Int32(1),Int32(16),Int32(2),1.0f7,1.0f-6,h+Int32(16),t)
     end
@@ -1046,8 +1143,8 @@ end
 end
 @inline function p_mpropose!(s,head,emb,pos::Int32,ctx::Int32,ei,part,ix)
     p_mprepare!(s,emb,(@inbounds s.proposal[1]),s.last,ei)
-    p_blocks!(s.mblocks,fv(s.mnorm[3]),s.mb,ei,pos-Int32(1),Int32(1),Val(1),ctx,false,false,Int32(1))
-    p_mul!(s.mb.logits,head,s.mb.xn,ei,Int32(1),Val(1))
+    p_blocks!(s.mblocks,fv(s.mnorm[3]),s.mb,ei,pos-Int32(1),Int32(1),Val(8),ctx,false,false,Int32(1))
+    p_mul!(s.mb.logits,head,s.mb.xn,ei,Int32(1),Val(8))
     p_argmax!(s.mb.logits,part,ix,s.proposal,head.rows,Int32(1),Int32(1)); return
 end
 @inline function p_append!(s,b,emb,input,off::Int32,pos::Int32,n::Int32,ctx::Int32,ei,::Val{MODE},prefill::Bool) where MODE
@@ -1074,7 +1171,7 @@ function k_request!(blocks,head,normout,embedding,b,s,ids,output,control,ticks,p
         p_append!(s,b,embedding,ids,pos,pos,n,ctx,expertids,Val(MODE),true)
         pos+=n
         if pos==np
-            p_mul!(b.logits,head,pv(b.xn,n-Int32(1)),expertids,Int32(1),Val(1))
+            p_mul!(b.logits,head,pv(b.xn,n-Int32(1)),expertids,Int32(1),Val(8))
             p_argmax!(b.logits,part,ix,s.prediction,head.rows,Int32(1))
             if gid0()==0
                 @inbounds id=s.prediction[1]; output[1]=id; control[2]=Int32(1); control[3]=id
@@ -1083,17 +1180,17 @@ function k_request!(blocks,head,normout,embedding,b,s,ids,output,control,ticks,p
             AMDGPU.Device.sync_grid()
         end
     end
-    P=MODE==2 ? Val(8) : MODE==1 ? Val(2) : Val(1)
+    P=Val(8)
     width=MODE==2 ? Int32(8) : MODE==1 ? Int32(2) : Int32(1)
     while (@inbounds control[2]<nt && control[1]==0)
         n=min(width,nt-(@inbounds control[2]))
         if gid0()==0; @inbounds s.proposal[1]=control[3]; end
         AMDGPU.Device.sync_grid()
-        if MODE==2; p_dpropose!(s,head,embedding,pos,expertids,part,ix)
-        elseif MODE==1; p_mpropose!(s,head,embedding,pos,ctx,expertids,part,ix)
+        if MODE==2 && n>1; p_dpropose!(s,head,embedding,pos,expertids,part,ix)
+        elseif MODE==1 && n>1; p_mpropose!(s,head,embedding,pos,ctx,expertids,part,ix)
         end
         p_embed!(b.x,embedding,s.proposal,Int32(0),n)
-        p_blocks!(blocks,normout,b,expertids,pos,n,P,ctx,MODE!=0,MODE==2)
+        p_blocks!(blocks,normout,b,expertids,pos,n,P,ctx,MODE!=0 && n>1,MODE==2)
         p_mul!(b.logits,head,b.xn,expertids,n,P); p_argmax!(b.logits,part,ix,s.prediction,head.rows,n)
         if gid0()==0
             @inbounds begin
@@ -1176,7 +1273,7 @@ function Engine(g,ctx;compileonly=false,mode=0,draftpath=joinpath(dirname(DEFAUL
         kc=state(linear ? 0 : 512ctx); vc=state(linear ? 0 : 512ctx)
         ss=UInt(pointer(retain(z(compileonly ? 1 : linear ? snap*524288 : 0))))
         cs=UInt(pointer(retain(z(compileonly ? 1 : linear ? snap*32768 : 0))))
-        phase("loaded block $l"); GC.gc(false)
+        phase("loaded block $l")
         PBlock(ms,vs,st,cv,kc,vc,ss,cs,linear)
     end
     bs=[block(g,l;snap=mode==2 ? 8 : mode==1 ? 2 : 0) for l in 0:39]
@@ -1223,17 +1320,18 @@ function reset!(E)
     fill!(E.spec.last,0.0f0); AMDGPU.synchronize(); E
 end
 function request_kernel(E,np,nt;compile=false)
-    args=(E.blocks,E.head,E.output_norm,E.embedding,E.b,E.spec,E.ids,E.output,E.control,E.ticks,E.part,E.ix,E.expertids,
+    sb=merge(E.spec,(mb=map(pbuf,E.spec.mb),db=map(pbuf,E.spec.db)))
+    args=(E.blocks,E.head,E.output_norm,E.embedding,map(pbuf,E.b),sb,E.ids,E.output,E.control,E.ticks,E.part,E.ix,E.expertids,
           Int32(np),Int32(nt),Int32(E.ctx),E.tk.eos,get(E.tk.ids,"<|im_end|>",E.tk.eos),Val(E.mode))
     if E.kernel===nothing
         # O1 avoids LLVM's quadratic IRCE pass over the persistent request loop.
         # This is a per-kernel configuration; AMDGPU's global compiler is unchanged.
         tt=AMDGPU.Runtime.argument_types(map(AMDGPU.rocconvert,args)); dev=AMDGPU.device()
-        cfg=AMDGPU.GPUCompiler.CompilerConfig(AMDGPU.compiler_config(dev;maxthreads=256);opt_level=1,always_inline=false)
+        cfg=AMDGPU.GPUCompiler.CompilerConfig(AMDGPU.compiler_config(dev;maxthreads=256);opt_level=1)
         source=AMDGPU.methodinstance(typeof(k_request!),tt)
         job=AMDGPU.GPUCompiler.CompilerJob(source,cfg)
         arch=replace(AMDGPU.HIP.gcn_arch(dev),r"[^A-Za-z0-9_-]"=>"_")
-        key=bytes2hex(sha256(read(@__FILE__)))*"-$VERSION-$(pkgversion(AMDGPU))-$arch-$(E.mode)"
+        key=SOURCE_DIGEST*"-$VERSION-$(pkgversion(AMDGPU))-$arch-$(E.mode)-$(E.ctx)"
         cache=joinpath(get(ENV,"QWEN36_CACHE",joinpath(homedir(),".cache","qwen36")),key)
         mkpath(dirname(cache))
         if isfile(cache*".hsaco") && isfile(cache*".entry")
@@ -1307,7 +1405,7 @@ function accounting(dir)
     files=String[]
     for (root,_,names) in walkdir(dir), n in names; endswith(n,".csv") && push!(files,joinpath(root,n)); end
     markers=reduce(vcat,(csvrows(p) for p in files if occursin("marker",basename(p)));init=Dict{String,String}[])
-    ranges=filter(r->get(r,"Marker_Message",get(r,"Message",""))=="qwen36/request",markers)
+    ranges=filter(r->get(r,"Marker_Message",get(r,"Message",get(r,"Function","")))=="qwen36/request",markers)
     length(ranges)==1 || error("expected one complete request marker, found $(length(ranges)); traces in $dir")
     a,b=interval(only(ranges)); total=b-a; total>0 || error("empty request range")
     kernels=reduce(vcat,(csvrows(p) for p in files if occursin("kernel_trace",basename(p)));init=Dict{String,String}[])
@@ -1335,21 +1433,9 @@ function accounting(dir)
          "instruction_percent"=>100instruction/total,"transfer_percent"=>100transfer/total,"idle_percent"=>100idle/total,
          "gpu_busy_percent"=>100fraction,"trace_directory"=>dir)
 end
-function profiled(args)
-    dir=mktempdir(;prefix="qwen36-profile-"); metrics=joinpath(dir,"metrics.toml"); logfile=joinpath(dir,"run.log")
-    child=filter(!=("--profile"),args)
-    cmd=`/opt/rocm/bin/rocprofv3 --kernel-trace --memory-copy-trace --marker-trace --pmc GPUBusy GRBM_COUNT GRBM_GUI_ACTIVE --kernel-include-regex '.*k_request.*' --output-format csv --output-directory $dir --output-file qwen36 -- $(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) $(@__FILE__) $child --profile-child`
-    open(logfile,"w") do io
-        run(pipeline(addenv(cmd,"QWEN36_METRICS"=>metrics);stdout=io,stderr=io))
-    end
-    m=TOML.parsefile(metrics); merge!(m,accounting(dir)); TOML.print(open(joinpath(dir,"accounting.toml"),"w"),m)
-    dest=get(ENV,"QWEN36_ACCOUNTING",""); isempty(dest) || open(io->TOML.print(io,m),dest,"w")
-    @printf("prefill tps: %.2f\ndecode tps: %.2f\nidle time %%: %.4f\n",m["prefill_tps"],m["decode_tps"],m["idle_percent"])
-end
-
 function main(args)
     if "--help" in args
-        println("julia --project=~/.julia/environments/qwen36 qwen3.6-35b-a3b.jl [--model FILE] [--spec none|mtp|dflash2] [--draft-file FILE] [--prompt TEXT] [--tokens N] [--ctx N] [--raw] [--think] [--download] [--compile]")
+        println("julia --project=~/.julia/environments/qwen36 qwen3.6-35b-a3b.jl [--model FILE] [--spec none|mtp|dflash2] [--draft-file FILE] [--prompt TEXT] [--tokens N] [--ctx N] [--raw] [--think] [--download] [--prepare] [--compile]")
         return
     end
     opts=Dict{String,String}(); flags=Set{String}(); i=1
@@ -1358,7 +1444,7 @@ function main(args)
         a=args[i]
         if a in valued
             i<length(args) || error("$a needs a value"); opts[a]=args[i+1]; i+=2
-        elseif a in ("--raw","--think","--download","--compile","--profile","--profile-child")
+        elseif a in ("--raw","--think","--download","--prepare","--compile")
             push!(flags,a); i+=1
         else; error("unknown option $a")
         end
@@ -1376,7 +1462,7 @@ function main(args)
         end
         return
     end
-    !("--compile" in flags || "--profile-child" in flags) && return profiled(args)
+    "--prepare" in flags && return prepare(gguf(path))
     isfile(path) || error("missing model; run with --download")
     isfile(path*".aria2") && error("model download is still running")
     nt=parse(Int,get(opts,"--tokens","32")); ctx=parse(Int,get(opts,"--ctx","2048"))
@@ -1408,7 +1494,10 @@ function main(args)
     dec=max(Float64(ticks[3]-ticks[2])/frequency,eps(Float64)); steps=max(ctl[2]-1,0)
     m=Dict("prefill_tps"=>length(ids)/pre,"decode_tps"=>steps/dec,"prompt_tokens"=>length(ids),"output_tokens"=>length(out))
     dest=get(ENV,"QWEN36_METRICS",""); isempty(dest) || open(io->TOML.print(io,m),dest,"w")
-    @printf("prefill tps: %.2f\ndecode tps: %.2f\nidle time %%: unmeasured\n",m["prefill_tps"],m["decode_tps"])
+    profile_finish(); merge!(m,accounting(PROFILE_DIR[]))
+    open(io->TOML.print(io,m),joinpath(PROFILE_DIR[],"accounting.toml"),"w")
+    dest=get(ENV,"QWEN36_ACCOUNTING",""); isempty(dest) || open(io->TOML.print(io,m),dest,"w")
+    @printf("prefill tps: %.2f\ndecode tps: %.2f\nidle time %%: %.4f\n",m["prefill_tps"],m["decode_tps"],m["idle_percent"])
 end
 if abspath(PROGRAM_FILE)==@__FILE__()
     main(ARGS)

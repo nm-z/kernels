@@ -432,12 +432,12 @@ function k_dnrec!(on, S, u, zb, al, be, dtb, ssa, sn, P::Int32)
         s = let s = s; ntuple(j -> s[j] * a, Val(64)) end
         e = 0.0f0
         for j in 1:64; e = fma(s[j], @inbounds(ks[Int32(64)*jh+Int32(j)]), e); end
-        e += AMDGPU.Device.shfl_xor(e, 1)
+        e += AMDGPU.Device.shfl_xor(e, Cint(1))
         e = bt * (@inbounds(u[ub+Int32(1024)+Int32(DK)*lv+i+Int32(1)]) - e)
         s = let s = s, e = e; ntuple(j -> fma(e, @inbounds(ks[Int32(64)*jh+Int32(j)]), s[j]), Val(64)) end
         o = 0.0f0
         for j in 1:64; o = fma(s[j], @inbounds(qs[Int32(64)*jh+Int32(j)]), o); end
-        o = (o + AMDGPU.Device.shfl_xor(o, 1)) * isc
+        o = (o + AMDGPU.Device.shfl_xor(o, Cint(1))) * isc
         r = 1.0f0 / sqrt(wgsum(jh == Int32(0) ? o * o : 0.0f0, red) / Float32(DK) + EPS)
         if jh == Int32(0)
             z = @inbounds zb[p*Int32(DK*VHD)+Int32(DK)*lv+i+Int32(1)]
