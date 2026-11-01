@@ -109,60 +109,53 @@ end
 # ---------------------------------------------------------------------------------------------
 # Device GEMV for decode and verify widths: y[p][r] = sum_k W[r][k] x[p][k] for P positions (1..8), the weights read
 # once for all P. One lane per row: a wavefront takes 64 rows, a workgroup 256, and K is cut into slices of KS
-# elements, one workgroup per (256 rows, slice). The weights are repacked once at load so a wavefront's 16-byte loads
-# of its 64 rows are one contiguous 1 KB run: row r = 64 G + lane, block b, 16-byte chunk c of the block at
-# ((G nb + b) nchunk + c) 1024 + 16 lane (Q6_K's 2-byte d goes to its own array, so its 208 bytes are 13 chunks).
-# The slice of x sits in shared memory as xs[k P + p] and every lane reads the same address (a broadcast). A lane
-# sums q x over each scale group and the group's sum of x (one per group, made once when x is staged) is applied
-# per group: Q5_K group value = d sc Σqx - dmin mn Σx, Q6_K = d sc (Σqx - 32 Σx). So a weight element costs a
-# byte extract and a convert before its P multiply-adds. Each slice writes partial sums part[slice][p][row]; the
-# consumer adds the slices (gemv_sum! below for the bench).
+# elements, one workgroup per (256 rows, slice); a wavefront needs nothing from the others (no shared memory, no
+# barrier). The weights are repacked once at load so a wavefront's 16-byte loads of its 64 rows are one contiguous
+# 1 KB run: row r = 64 G + lane, block b, 16-byte chunk c of the block at ((G nb + b) nchunk + c) 1024 + 16 lane
+# (Q6_K's 2-byte d goes to its own array, so its other 208 bytes are 13 chunks). x is the same for every lane, so it
+# is read with scalar loads into SGPRs, which the multiply-adds take as an operand; it is laid out [k][p]
+# (xt[k P + p]) with the sums of each scale group beside it (xsm[g P + p]), both made by k_xprep!. A lane sums q x
+# over each scale group and applies the group's sum of x once: Q5_K group value = d sc Σqx - dmin mn Σx, Q6_K
+# = d sc (Σqx - 32 Σx), so a weight element costs a byte extract and a convert before its P multiply-adds. Each
+# slice writes partial sums part[slice][p][row]; the consumer adds the slices (k_gemv_sum! here).
 # ---------------------------------------------------------------------------------------------
 const KS = 512
 const NCH = Dict(GQ5_K => 11, GQ6_K => 13)                 # 16-byte chunks a block
+const GSZ = Dict(GQ5_K => 32, GQ6_K => 16)                 # elements a scale group
 const V4U = NTuple{4,VecElement{UInt32}}
-const V4F = NTuple{4,VecElement{Float32}}
 @inline function ld128(W, off)
     v = unsafe_load(reinterpret(Core.LLVMPtr{V4U,1}, pointer(W) + (off % UInt32)), 1, Val(16))
     (v[1].value, v[2].value, v[3].value, v[4].value)
 end
-@inline function lds4(xs, i)                              # shared floats i .. i + 3 (i a multiple of 4)
-    v = unsafe_load(reinterpret(Core.LLVMPtr{V4F,3}, pointer(xs) + Int32(4) * i), 1, Val(16))
-    (v[1].value, v[2].value, v[3].value, v[4].value)
-end
-@inline function xg(xs, i, ::Val{N}) where {N}            # shared floats i .. i + N - 1 (N, i multiples of 4)
-    q = ntuple(j -> lds4(xs, i + Int32(4 * (j - 1))), Val(N ÷ 4))
-    ntuple(j -> q[(j-1)>>2+1][(j-1)&3+1], Val(N))
-end
+# x[i] as an invariant load: with a uniform i it becomes a scalar load
+@inline ldc(x, i) = Base.llvmcall(("""
+    define float @ldc(ptr addrspace(1) %p, i32 %i) #0 {
+        %e = sext i32 %i to i64
+        %q = getelementptr inbounds float, ptr addrspace(1) %p, i64 %e
+        %v = load float, ptr addrspace(1) %q, align 4, !invariant.load !0
+        ret float %v
+    }
+    attributes #0 = { alwaysinline }
+    !0 = !{}
+    """, "ldc"), Float32, Tuple{Core.LLVMPtr{Float32,1},Int32}, pointer(x), Int32(i))
+@inline xc(x, i, ::Val{N}) where {N} = ntuple(j -> ldc(x, i + Int32(j - 1)), Val(N))
 @inline f16(u) = Float32(reinterpret(Float16, UInt16(u)))
 @inline fmav(a::NTuple{P,Float32}, w, x, o) where {P} = ntuple(p -> fma(w, x[o+p], a[p]), Val(P))
-@inline p4(P) = (P + 3) & ~3
-# i, made to depend on dep (an empty asm the compiler can't see through): a word's x reads wait for the word
-# LA(P) words back to finish, so about LA(P) words' x (4 P floats each) are in registers
-@inline gate(i::Int32, dep::Float32) = Base.llvmcall("""
-    %r = call i32 asm "; gate \$0 \$2", "=v,0,v"(i32 %0, float %1)
-    ret i32 %r""", Int32, Tuple{Int32,Float32}, i, dep)
-@inline LA(P) = clamp(8 ÷ P, 2, 8)
-# stage x[k0 .. k0 + n) for all P into xs[k P + p], then the sums of each GS-element group into xs[KS P + g P4 + p]
-@inline function stage!(xs, x, t, k0, n, ldx, ::Val{P}, ::Val{GS}) where {P,GS}
-    i = t
-    @inbounds while i < n * Int32(P)
-        p = i ÷ n; k = i - p * n
-        xs[k*Int32(P)+p+Int32(1)] = x[p*ldx+k0+k+Int32(1)]
-        i += Int32(256)
+# x[p ldx + k] into xt[k P + p], and the sum of each GS-element group into xsm[g P + p]
+function k_xprep!(xt, xsm, x, K::Int32, ldx::Int32, ::Val{P}, ::Val{GS}) where {P,GS}
+    i = (Int32(workgroupIdx().x) - Int32(1)) * Int32(256) + Int32(workitemIdx().x) - Int32(1)
+    if i < K * Int32(P)
+        k = i ÷ Int32(P); p = i - k * Int32(P)
+        @inbounds xt[i+Int32(1)] = x[p*ldx+k+Int32(1)]
     end
-    sync_workgroup()
-    i = t
-    @inbounds while i < (n ÷ Int32(GS)) * Int32(P)
-        gi = i ÷ Int32(P); p = i - gi * Int32(P)
-        s = 0.0f0
+    if i < (K ÷ Int32(GS)) * Int32(P)
+        g = i ÷ Int32(P); p = i - g * Int32(P); s = 0.0f0
         for e in Int32(0):Int32(GS - 1)
-            s += xs[(gi*Int32(GS)+e)*Int32(P)+p+Int32(1)]
+            s += @inbounds x[p*ldx+g*Int32(GS)+e+Int32(1)]
         end
-        xs[Int32(KS * P)+gi*Int32(p4(P))+p+Int32(1)] = s
-        i += Int32(256)
+        @inbounds xsm[i+Int32(1)] = s
     end
-    sync_workgroup()
+    return
 end
 # Q5_K (scale, min) of sub-block s from the three scale words
 @inline function scmn(u0, u1, u2, ::Val{s}) where {s}
@@ -172,39 +165,33 @@ end
     h = 8 * (s - 4)
     Float32(((u2 >> h) & 0x0f) | ((u0 >> (h + 6)) & 0x03) << 4), Float32(((u2 >> (h + 4)) & 0x0f) | ((u1 >> (h + 6)) & 0x03) << 4)
 end
-@inline xsum(xs, g, ::Val{P}) where {P} = xg(xs, Int32(KS * P) + g * Int32(p4(P)), Val(p4(P)))
-function k_gemv_q5k!(part, W, x, nb::Int32, ldx::Int32, rows::Int32, ::Val{P}) where {P}
-    xs = @ROCStaticLocalArray(Float32, KS * P + (KS ÷ 32) * p4(P), false)
+function k_gemv_q5k!(part, W, xt, xsm, nb::Int32, rows::Int32, ::Val{P}) where {P}
     t = Int32(workitemIdx().x) - Int32(1); lane = t & Int32(63); G = (Int32(workgroupIdx().x) - Int32(1)) * Int32(4) + (t >> Int32(6))
     sl = Int32(workgroupIdx().y) - Int32(1); b0 = sl * Int32(KS ÷ 256); nbs = min(Int32(KS ÷ 256), nb - b0)
-    stage!(xs, x, t, b0 * Int32(256), nbs * Int32(256), ldx, Val(P), Val(32))
     acc = ntuple(_ -> 0.0f0, Val(P))
     o = (G * nb + b0) * Int32(11 * 1024) + lane * Int32(16)
-    tks = ntuple(_ -> 0.0f0, Val(LA(P)))
-    for b in Int32(0):nbs-Int32(1)
+    for b in b0:b0+nbs-Int32(1)
         c = let o = o; ntuple(i -> ld128(W, o + Int32(1024 * (i - 1))), Val(11)) end; o += Int32(11 * 1024)
         d = f16(c[1][1] & 0xffff); dmin = f16(c[1][1] >> 16); u0, u1, u2 = c[1][2], c[1][3], c[1][4]
         qh = (c[2]..., c[3]...)
         Base.Cartesian.@nexprs 4 j -> begin
             qs = (c[2j+2]..., c[2j+3]...)
-            # sub-block 2j - 2 (low nibbles), then 2j - 1 (high), so one group's x is live at a time
+            # sub-block 2j - 2 (low nibbles), then 2j - 1 (high nibbles)
             sa = ntuple(_ -> 0.0f0, Val(P))
             Base.Cartesian.@nexprs 8 w -> begin
                 qa = (qs[w] & 0x0f0f0f0f) | ((qh[w] >> (2j - 2)) & 0x01010101) << 4
-                xa = xg(xs, gate(Int32(256 * P) * b, tks[1]) + Int32((64 * (j - 1) + 4 * (w - 1)) * P), Val(4P))
+                xa = xc(xt, sgate(Int32(256 * P) * b, tks[1]) + Int32((64 * (j - 1) + 4 * (w - 1)) * P), Val(4P))
                 Base.Cartesian.@nexprs 4 i -> (sa = fmav(sa, Float32((qa >> (8i - 8)) & 0xff), xa, (i - 1) * P))
-                tks = (Base.tail(tks)..., sa[1])
             end
             sb = ntuple(_ -> 0.0f0, Val(P))
             Base.Cartesian.@nexprs 8 w -> begin
                 qb = ((qs[w] >> 4) & 0x0f0f0f0f) | ((qh[w] >> (2j - 1)) & 0x01010101) << 4
-                xv = xg(xs, gate(Int32(256 * P) * b, tks[1]) + Int32((64 * (j - 1) + 32 + 4 * (w - 1)) * P), Val(4P))
+                xv = xc(xt, sgate(Int32(256 * P) * b, tks[1]) + Int32((64 * (j - 1) + 32 + 4 * (w - 1)) * P), Val(4P))
                 Base.Cartesian.@nexprs 4 i -> (sb = fmav(sb, Float32((qb >> (8i - 8)) & 0xff), xv, (i - 1) * P))
-                tks = (Base.tail(tks)..., sb[1])
             end
             sca, mna = scmn(u0, u1, u2, Val(2j - 2)); scb, mnb = scmn(u0, u1, u2, Val(2j - 1))
             ga = Int32(8) * b + Int32(2j - 2)
-            xsa = xsum(xs, ga, Val(P)); xsb = xsum(xs, ga + Int32(1), Val(P))
+            xsa = xc(xsm, ga * Int32(P), Val(P)); xsb = xc(xsm, (ga + Int32(1)) * Int32(P), Val(P))
             da = d * sca; ma = -dmin * mna; db = d * scb; mb = -dmin * mnb
             acc = let a = acc, sa = sa, sb = sb, xsa = xsa, xsb = xsb, da = da, ma = ma, db = db, mb = mb
                 ntuple(p -> fma(mb, xsb[p], fma(db, sb[p], fma(ma, xsa[p], fma(da, sa[p], a[p])))), Val(P))
@@ -216,42 +203,35 @@ function k_gemv_q5k!(part, W, x, nb::Int32, ldx::Int32, rows::Int32, ::Val{P}) w
     end
     return
 end
-function k_gemv_q6k!(part, W, D, x, nb::Int32, ldx::Int32, rows::Int32, ::Val{P}) where {P}
-    xs = @ROCStaticLocalArray(Float32, KS * P + (KS ÷ 16) * p4(P), false)
+function k_gemv_q6k!(part, W, D, xt, xsm, nb::Int32, rows::Int32, ::Val{P}) where {P}
     t = Int32(workitemIdx().x) - Int32(1); lane = t & Int32(63); G = (Int32(workgroupIdx().x) - Int32(1)) * Int32(4) + (t >> Int32(6))
     sl = Int32(workgroupIdx().y) - Int32(1); b0 = sl * Int32(KS ÷ 256); nbs = min(Int32(KS ÷ 256), nb - b0)
-    stage!(xs, x, t, b0 * Int32(256), nbs * Int32(256), ldx, Val(P), Val(16))
     acc = ntuple(_ -> 0.0f0, Val(P))
     o = (G * nb + b0) * Int32(13 * 1024) + lane * Int32(16); od = (G * nb + b0) * Int32(64) + lane + Int32(1)
-    tks = ntuple(_ -> 0.0f0, Val(LA(P)))
-    for b in Int32(0):nbs-Int32(1)
+    for b in b0:b0+nbs-Int32(1)
         d = f16(@inbounds D[od]); od += Int32(64)
-        sc = ld128(W, o + Int32(12 * 1024))
-        Base.Cartesian.@nexprs 2 h -> begin                                # each half loads its own 6 chunks
-            ch = let o = o; ntuple(i -> ld128(W, o + Int32(1024 * (i - 1))), Val(12)) end
-            qla = (ch[4h-3]..., ch[4h-2]...); qlb = (ch[4h-1]..., ch[4h]...); qh = (ch[2h+7]..., ch[2h+8]...)
-            Base.Cartesian.@nexprs 4 m -> begin
-                # group m of the half: quant nibble m (low of ql a, low of ql b, high of a, high of b), high bits 2m - 2
-                Base.Cartesian.@nexprs 2 is -> begin
-                    sm = ntuple(_ -> 0.0f0, Val(P))
-                    Base.Cartesian.@nexprs 4 ww -> begin
-                        w = 4 * (is - 1) + ww
-                        ql = m & 1 == 1 ? qla[w] : qlb[w]
-                        q = ((ql >> (m > 2 ? 4 : 0)) & 0x0f0f0f0f) | ((qh[w] >> (2m - 2)) & 0x03030303) << 4
-                        xm = xg(xs, gate(Int32(256 * P) * b, tks[1]) + Int32((128 * (h - 1) + 32 * (m - 1) + 4 * (w - 1)) * P), Val(4P))
-                        Base.Cartesian.@nexprs 4 i -> (sm = fmav(sm, Float32((q >> (8i - 8)) & 0xff), xm, (i - 1) * P))
-                        tks = (Base.tail(tks)..., sm[1])
-                    end
-                    gi = 8 * (h - 1) + (is - 1) + 2 * (m - 1)               # the group (and scale) index in the block
-                    ds = d * Float32(reinterpret(Int8, UInt8((sc[gi>>2+1] >> (8 * (gi & 3))) & 0xff)))
-                    xsm = xsum(xs, Int32(16) * b + Int32(gi), Val(P))
-                    acc = let a = acc, ds = ds, xsm = xsm, sm = sm
-                        ntuple(p -> fma(-32.0f0 * ds, xsm[p], fma(ds, sm[p], a[p])), Val(P))
-                    end
+        c = let o = o; ntuple(i -> ld128(W, o + Int32(1024 * (i - 1))), Val(13)) end; o += Int32(13 * 1024)
+        sc = c[13]
+        Base.Cartesian.@nexprs 2 h -> begin
+            qla = (c[4h-3]..., c[4h-2]...); qlb = (c[4h-1]..., c[4h]...); qh = (c[2h+7]..., c[2h+8]...)
+            # group m of the half: nibble m (low of ql a, low of ql b, high of a, high of b), high bits 2m - 2
+            Base.Cartesian.@nexprs 4 m -> Base.Cartesian.@nexprs 2 is -> begin
+                sm = ntuple(_ -> 0.0f0, Val(P))
+                Base.Cartesian.@nexprs 4 ww -> begin
+                    w = 4 * (is - 1) + ww
+                    ql = m & 1 == 1 ? qla[w] : qlb[w]
+                    q = ((ql >> (m > 2 ? 4 : 0)) & 0x0f0f0f0f) | ((qh[w] >> (2m - 2)) & 0x03030303) << 4
+                    xm = xc(xt, sgate(Int32(256 * P) * b, tks[1]) + Int32((128 * (h - 1) + 32 * (m - 1) + 4 * (w - 1)) * P), Val(4P))
+                    Base.Cartesian.@nexprs 4 i -> (sm = fmav(sm, Float32((q >> (8i - 8)) & 0xff), xm, (i - 1) * P))
+                end
+                gi = 8 * (h - 1) + (is - 1) + 2 * (m - 1)                   # the group (and scale) index in the block
+                ds = d * Float32(reinterpret(Int8, UInt8((sc[gi>>2+1] >> (8 * (gi & 3))) & 0xff)))
+                xsg = xc(xsm, (Int32(16) * b + Int32(gi)) * Int32(P), Val(P))
+                acc = let a = acc, ds = ds, xsg = xsg, sm = sm
+                    ntuple(p -> fma(-32.0f0 * ds, xsg[p], fma(ds, sm[p], a[p])), Val(P))
                 end
             end
         end
-        o += Int32(13 * 1024)
     end
     for p in 1:P
         @inbounds part[(sl*Int32(P)+Int32(p-1))*rows+G*Int32(64)+lane+Int32(1)] = acc[p]
@@ -296,18 +276,24 @@ function DMat(g::GGUF, name::String, r0 = 0, n = -1)
     DMat(t.typ, t.dims[1], n, ROCArray(W), ROCArray(D))
 end
 nslices(m::DMat) = cld(m.K, KS)
-# y[p ldy + r] = Σ_k W[r][k] x[p ldx + k], through part (nslices(m) P rows floats)
-function gemv!(y, part, m::DMat, x, P::Int; ldx = m.K, ldy = m.rows)
+# scratch of a GEMV at P positions: partial sums, x in [k][p] order, its group sums
+struct GBuf
+    part::ROCVector{Float32}; xt::ROCVector{Float32}; xsm::ROCVector{Float32}
+end
+GBuf(m::DMat, P) = GBuf(AMDGPU.zeros(Float32, nslices(m) * P * m.rows), AMDGPU.zeros(Float32, m.K * P), AMDGPU.zeros(Float32, m.K ÷ 16 * P))
+# y[p ldy + r] = Σ_k W[r][k] x[p ldx + k]
+function gemv!(y, gb::GBuf, m::DMat, x, P::Int; ldx = m.K, ldy = m.rows)
     m.K % 256 == 0 || error("gemv!: K = $(m.K)")
     nb = Int32(m.K ÷ 256); g = (m.rows ÷ 256, nslices(m))
+    @roc groupsize = 256 gridsize = cld(m.K * P, 256) k_xprep!(gb.xt, gb.xsm, x, Int32(m.K), Int32(ldx), Val(P), Val(GSZ[m.typ]))
     if m.typ == GQ5_K
-        @roc groupsize = 256 maxthreads = 256 gridsize = g k_gemv_q5k!(part, m.W, x, nb, Int32(ldx), Int32(m.rows), Val(P))
+        @roc groupsize = 256 maxthreads = 256 gridsize = g k_gemv_q5k!(gb.part, m.W, gb.xt, gb.xsm, nb, Int32(m.rows), Val(P))
     elseif m.typ == GQ6_K
-        @roc groupsize = 256 maxthreads = 256 gridsize = g k_gemv_q6k!(part, m.W, m.D, x, nb, Int32(ldx), Int32(m.rows), Val(P))
+        @roc groupsize = 256 maxthreads = 256 gridsize = g k_gemv_q6k!(gb.part, m.W, m.D, gb.xt, gb.xsm, nb, Int32(m.rows), Val(P))
     else
         error("gemv!: type $(m.typ)")
     end
-    @roc groupsize = 256 gridsize = cld(m.rows * P, 256) k_gemv_sum!(y, part, Int32(nslices(m)), Int32(m.rows), Int32(ldy), Int32(P))
+    @roc groupsize = 256 gridsize = cld(m.rows * P, 256) k_gemv_sum!(y, gb.part, Int32(nslices(m)), Int32(m.rows), Int32(ldy), Int32(P))
     y
 end
 
@@ -319,8 +305,8 @@ function bench_gemv(g::GGUF)
         t = g.t[name]; K = t.dims[1]; R = nrows(t)
         m = DMat(g, name)
         for P in (1, 2, 4, 8)
-            xh = randn(Float32, K * P); x = ROCArray(xh); y = AMDGPU.zeros(Float32, R * P); part = AMDGPU.zeros(Float32, nslices(m) * P * R)
-            for _ in 1:5; gemv!(y, part, m, x, P); end; AMDGPU.synchronize()          # warm (clocks ramp)
+            xh = randn(Float32, K * P); x = ROCArray(xh); y = AMDGPU.zeros(Float32, R * P); gb = GBuf(m, P)
+            for _ in 1:5; gemv!(y, gb, m, x, P); end; AMDGPU.synchronize()          # warm (clocks ramp)
             yh = Array(y); err = 0.0; ref = 0.0
             for r in (0, 1, 63, 64, R ÷ 2 + 5, R - 1)
                 wr = dq_row(t, rowview(g, t, r, 1))
@@ -329,7 +315,7 @@ function bench_gemv(g::GGUF)
                     err = max(err, abs(yh[(p-1)*R+r+1] - e)); ref = max(ref, abs(e))
                 end
             end
-            n = 50; tm = @elapsed (for _ in 1:n; gemv!(y, part, m, x, P); end; AMDGPU.synchronize())
+            n = 50; tm = @elapsed (for _ in 1:n; gemv!(y, gb, m, x, P); end; AMDGPU.synchronize())
             bytes = R * rowbytes(t)
             @printf("%-26s %-5s %5d x %5d  P=%d  %.3f ms  %6.1f GB/s  max err %.2e of %.2e\n", name, t.typ == GQ5_K ? "Q5_K" : "Q6_K",
                 R, K, P, 1e3 * tm / n, n * bytes / tm / 1e9, err, ref)
