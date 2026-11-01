@@ -488,6 +488,7 @@ const QTR = NE ÷ ND
 @inline hxr(A::KA, slot, q, s) = reinterpret(LP{UInt64}, A.hx + 8 * (((Int64(slot) * ND + q) * ND + s) * A.npos * QTR))
 @inline hxg(A::KA, slot, r, s) = reinterpret(LP{UInt64}, A.hx + 8 * ((((Int64(2) + slot) * ND + r) * ND + s) * A.npos * QTR))
 @inline hxd(A::KA, slot, s) = reinterpret(LP{UInt64}, A.hx + 8 * ((Int64(slot) * ND + s) * DW * NE))   # (inside hxr's space)
+@inline st32_sys(p::LP{UInt32}, v::UInt32) = Base.llvmcall("store atomic i32 %1, ptr addrspace(1) %0 monotonic, align 4\nret void", Cvoid, Tuple{LP{UInt32},UInt32}, p, v)
 @inline ld64a_sys(p::LP{UInt64}) = Base.llvmcall("%r = load atomic i64, ptr addrspace(1) %0 monotonic, align 8\nret i64 %r", UInt64, Tuple{LP{UInt64}}, p)
 @inline st64_sys(p::LP{UInt64}, v::UInt64) = Base.llvmcall("store atomic i64 %1, ptr addrspace(1) %0 monotonic, align 8\nret void", Cvoid, Tuple{LP{UInt64},UInt64}, p, v)
 @inline xword(v::Float32, tag::UInt64) = UInt64(reinterpret(UInt32, v)) | tag
@@ -501,7 +502,7 @@ const QTR = NE ÷ ND
     end
     reinterpret(Float32, UInt32(u & 0xffffffff))
 end
-function xwr_ph!(A::KA, l::Int32, j::Int32, w::LP{Float32}, set::Bool, xs::Int32, seq::Int32, P::Int32)
+function xwr_ph!(A::KA, l::Int32, j::Int32, w::LP{Float32}, set::Bool, xs::Int32, xf::Int32, seq::Int32, P::Int32)
     t0 = memtime(); slot = xs & Int32(1); d = A.d
     tag = UInt64(A.rid & Int32(255)) << 56 | UInt64((xs + Int32(1)) & Int32(0xffffff)) << 32
     rows, ns, W = if j >= Int32(0)                       # (one assignment each: the closure below captures them)
@@ -536,38 +537,68 @@ function xwr_ph!(A::KA, l::Int32, j::Int32, w::LP{Float32}, set::Bool, xs::Int32
             i += nthr(A)
         end
     else
-        # prefill: bytes matter more than round trips. 1. this die's share of the other quarters, to their owners
+        # prefill: bytes matter more than round trips, so plain 4-byte floats, and a die's workgroups each raise its
+        # counter for the phase (hf + 16: phase, die) after their stores; a reader waits for the other dies' counts
+        # (nwg per bulk exchange, xf of them before this one) and then reads. 1. this die's share of the other
+        # quarters, to their owners
+        want = UInt32(A.nwg) * UInt32(xf + Int32(1))
         i = gtid(); did = i < Int32(QTR) * P
         while i < Int32(QTR) * P
             p = i ÷ Int32(QTR); kk = i - p * Int32(QTR); o = Int64(p) * QTR + kk
             for e in Int32(1):Int32(ND - 1)
                 q = (d + e) & Int32(ND - 1)
-                st64_sys(hxr(A, slot, q, d) + 8o, xword(share(p, q * Int32(QTR) + kk), tag))
+                st32_sys(reinterpret(LP{UInt32}, hxr(A, slot, q, d)) + 4o, reinterpret(UInt32, share(p, q * Int32(QTR) + kk)))
             end
             i += nthr(A)
         end
+        xraise!(A, 0)
         done!(A, seq, t0, did)
-        # 2. this die's quarter: the four shares summed and sent out; then the other quarters' totals
+        # 2. this die's quarter: the four shares summed, sent out and applied
+        xawait!(A, 0, want); ta = memtime()
         i = gtid()
         while i < Int32(QTR) * P
             p = i ÷ Int32(QTR); kk = i - p * Int32(QTR); o = Int64(p) * QTR + kk
-            u3 = ntuple(e -> ld64a_sys(hxr(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 8o), Val(ND - 1))
-            mine = share(p, d * Int32(QTR) + kk)
-            sh = ntuple(e -> xwait(A, hxr(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 8o, u3[e], tag), Val(ND - 1))
-            ta == UInt64(0) && (ta = memtime())
-            tot = dsum(mine, sh, d)
+            sh = ntuple(e -> reinterpret(Float32, ld(reinterpret(LP{UInt32}, hxr(A, slot, d, (d + Int32(e)) & Int32(ND - 1))), o)), Val(ND - 1))
+            tot = dsum(share(p, d * Int32(QTR) + kk), sh, d)
             for e in Int32(1):Int32(ND - 1)
-                st64_sys(hxg(A, slot, (d + e) & Int32(ND - 1), d) + 8o, xword(tot, tag))
+                st32_sys(reinterpret(LP{UInt32}, hxg(A, slot, (d + e) & Int32(ND - 1), d)) + 4o, reinterpret(UInt32, tot))
             end
-            g3 = ntuple(e -> ld64a_sys(hxg(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 8o), Val(ND - 1))
-            tq = ntuple(e -> xwait(A, hxg(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 8o, g3[e], tag), Val(ND - 1))
-            for e in Int32(0):Int32(ND - 1)                 # quarter (d + e) mod 4
-                xput!(A, w, set, p, ((d + e) & Int32(ND - 1)) * Int32(QTR) + kk, e == Int32(0) ? tot : tq[e], P)
+            xput!(A, w, set, p, d * Int32(QTR) + kk, tot, P)
+            i += nthr(A)
+        end
+        xraise!(A, 1)
+        # 3. the other quarters' totals
+        xawait!(A, 1, want)
+        i = gtid()
+        while i < Int32(QTR) * P
+            p = i ÷ Int32(QTR); kk = i - p * Int32(QTR); o = Int64(p) * QTR + kk
+            for e in Int32(1):Int32(ND - 1)
+                q = (d + e) & Int32(ND - 1)
+                xput!(A, w, set, p, q * Int32(QTR) + kk, reinterpret(Float32, ld(reinterpret(LP{UInt32}, hxg(A, slot, d, q)), o)), P)
             end
             i += nthr(A)
         end
     end
     did && tid() == Int32(0) && (pa = A.acct + 8 * (3 + 2Int64(seq + Int32(1))); umin64(pa, ta); umax64(pa + 8, memtime()))
+end
+@inline xcnt(A::KA, ph, d) = A.hf + 16 + 4 * (2Int64(d) + ph)
+@inline ataddsys(p::LP{UInt32}, v::UInt32) = Base.llvmcall("%r = atomicrmw add ptr addrspace(1) %0, i32 %1 release, align 4\nret i32 %r", UInt32, Tuple{LP{UInt32},UInt32}, p, v)
+@inline function xraise!(A::KA, ph)                        # this workgroup's stores of phase ph are out
+    fence_rel_sys(); sync_workgroup()
+    tid() == Int32(0) && ataddsys(xcnt(A, ph, A.d), UInt32(1))
+end
+@inline function xawait!(A::KA, ph, want::UInt32)          # every other die's workgroups have raised phase ph
+    if tid() == Int32(0) && !aborted(A)
+        t0 = memtime()
+        for e in Int32(1):Int32(ND - 1)
+            q = xcnt(A, ph, (A.d + e) & Int32(ND - 1))
+            while ldacq_sys(q) < want
+                (memtime() - t0 > TOUT) && (atadd(A.bar + 8, UInt32(1)); break)
+                ssleep()
+            end
+        end
+    end
+    sync_workgroup(); fence_acq_sys()
 end
 # the four shares in die order: die s's is sh[(s - d) mod 4], this die's own mine
 @inline function dsum(mine::Float32, sh::NTuple{3,Float32}, d::Int32)
@@ -1264,8 +1295,9 @@ end
     l == Int32(MTPL) ? (mhead ? Int32(21) : Int32(16)) : isrec(l) ? Int32(9) : Int32(10)
 # head: the trunk's head over positions pfirst .. P - 1; mtp: the MTP layer after it, its head (mhead) over
 # positions mpf ..; pre: a prefill forward; spec: a verify forward (pairs of positions)
-function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, head::Bool, pfirst::Int32, mtp::Bool, mhead::Bool, mpf::Int32, pre::Bool, T)
-    xwr_ph!(A, Int32(0), Int32(-1), fvec(A, 0, 0), true, xs, seq, P); seq += Int32(2); xs += Int32(1); gbar!(A)
+function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, xf::Int32, head::Bool, pfirst::Int32, mtp::Bool, mhead::Bool, mpf::Int32, pre::Bool, T)
+    bx = P > Int32(DW)                                     # (the exchanges' counted path, prefill)
+    xwr_ph!(A, Int32(0), Int32(-1), fvec(A, 0, 0), true, xs, xf, seq, P); seq += Int32(2); xs += Int32(1); xf += bx ? Int32(1) : Int32(0); gbar!(A)
     nlr = Int32(ldacq(A.bar + 12)); nl = nlr == Int32(0) ? Int32(NL) : nlr   # bar[3]: layers to run (0: all), for debugging
     gen = A.mode == Int32(0); spec = !pre && A.spec != Int32(0)
     l = Int32(0); i = Int32(0)
@@ -1291,7 +1323,7 @@ function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, head::Bool, p
             else
                 j0 == Int32(4) ? fvec(A, l, 1) : l < nl - Int32(1) ? fvec(A, l + Int32(1), 0) : fvec(A, 64, 0)
             end
-            xwr_ph!(A, l, j0, wn, j0 == Int32(-1) || j0 == Int32(3), xs, seq, P); seq += Int32(2); xs += Int32(1)
+            xwr_ph!(A, l, j0, wn, j0 == Int32(-1) || j0 == Int32(3), xs, xf, seq, P); seq += Int32(2); xs += Int32(1); xf += bx ? Int32(1) : Int32(0)
         elseif kind == S_ACT
             act_ph!(A, l, seq, P); seq += Int32(1)
         elseif kind == S_HMAX
@@ -1319,7 +1351,7 @@ function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, head::Bool, p
                 l == Int32(64) ? (mtp ? Int32(MTPL) : Int32(MTPL + 1)) : Int32(MTPL + 1)
         end
     end
-    seq, xs
+    seq, xs, xf
 end
 # the requests (up to NR), one dispatch: each request's prefill (or scoring) in forwards of as many positions as fit
 # (npos), then the decode steps of all of them together: a position a request a forward, or with MTP (spec) two
@@ -1328,7 +1360,7 @@ end
 function k_req!(A::KA)
     T = (@ROCStaticLocalArray(Float32, 32 * 64, false), @ROCStaticLocalArray(Float32, 32 * 64, false))   # the GEMM tiles
     tid() == Int32(0) && umin64(A.acct, memtime())
-    seq = Int32(0); xs = Int32(0); spec = A.spec != Int32(0) && A.mode == Int32(0)
+    seq = Int32(0); xs = Int32(0); xf = Int32(0); spec = A.spec != Int32(0) && A.mode == Int32(0)
     r = Int32(0); a = Int32(0); prefill = true
     while true
         if prefill && r >= A.nreq                          # every prefill done
@@ -1341,7 +1373,7 @@ function k_req!(A::KA)
             head = A.mode == Int32(1) || (a + P == ninp && ngen > Int32(0)); pfirst = A.mode == Int32(1) ? Int32(0) : P - Int32(1)
             mtp = spec && ngen > Int32(0)
             zero_ssq!(A, P); setpos_ph!(A, r, a, P); gbar!(A)
-            seq, xs = fwd!(A, P, amax, seq, xs, head, pfirst, mtp, head, P - Int32(1), true, T)
+            seq, xs, xf = fwd!(A, P, amax, seq, xs, xf, head, pfirst, mtp, head, P - Int32(1), true, T)
             a += P
             a >= ninp && (r += Int32(1); a = Int32(0))
         else
@@ -1354,7 +1386,7 @@ function k_req!(A::KA)
             end
             P == Int32(0) && break
             zero_ssq!(A, P); setpos_ph!(A, Int32(-1), Int32(0), P); gbar!(A)
-            seq, xs = fwd!(A, P, amax, seq, xs, true, Int32(0), spec, spec, Int32(0), false, T)
+            seq, xs, xf = fwd!(A, P, amax, seq, xs, xf, true, Int32(0), spec, spec, Int32(0), false, T)
         end
     end
     tid() == Int32(0) && umax64(A.acct + 8, memtime())
@@ -1552,7 +1584,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
     inp = Int32.(vcat(first.(reqs)...)); ioff = cumsum([0; length.(first.(reqs))]); ooff = cumsum([0; last.(reqs)])
     rq = Int32.(vcat([[ioff[r], length(reqs[r][1]), reqs[r][2], ooff[r]] for r in 1:nr]...))
     nphase = (sum(cld(length(i), npos) for (i, _) in reqs) + maximum(last, reqs) + 2) * 1100; rid = (PE.rid[] += 1)
-    unsafe_store!(Ptr{UInt64}(PE.hx.c + PE.hx.out), 0, 1); unsafe_store!(Ptr{UInt64}(PE.hx.c + PE.hx.out), 0, 2)   # the counters
+    for i in 1:8; unsafe_store!(Ptr{UInt64}(PE.hx.c + PE.hx.out), 0, i); end   # the counters
     accts = ROCVector{UInt64}[]; ibs = ROCVector{Int32}[]
     for d in 1:ND
         AMDGPU.device!(dies[d].dev); K = PE.K[d]
@@ -1568,7 +1600,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
     for d in 1:ND
         AMDGPU.device!(dies[d].dev); AMDGPU.synchronize()
         hz = PE.hz; ah = Array(accts[d]); wall = (ah[2] - ah[1]) / hz; iv = Tuple{Float64,Float64}[]
-        d == 1 && (tpre = (ah[3] - ah[1]) / hz; tdec = (ah[2] - ah[3]) / hz; LASTACCT[] = ah)
+        d == 1 && (tpre = (ah[3] - ah[1]) / hz; tdec = (ah[2] - ah[3]) / hz; LASTACCT[] = ah); ACCTS[][d] = ah
         for s in 0:nphase-1
             b = ah[4+2s]; e = ah[5+2s]; b == typemax(UInt64) && continue
             push!(iv, ((b - ah[1]) / hz, (e - ah[1]) / hz))
@@ -1588,6 +1620,9 @@ if !isdefined(Main, :KWPE)
 end
 if !isdefined(Main, :LASTACCT)
     const LASTACCT = Ref{Vector{UInt64}}(UInt64[])        # die 0's phase times of the last request, for profiling
+end
+if !isdefined(Main, :ACCTS)
+    const ACCTS = Ref([UInt64[] for _ in 1:4])            # every die's phase times of the last request
 end
 if !isdefined(Main, :SPEC)
     const SPEC = Ref(true)                                 # decode with MTP drafts (spec 0 | 1)
