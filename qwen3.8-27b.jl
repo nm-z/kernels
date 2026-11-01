@@ -125,23 +125,33 @@ end
     a = ldb(W, o + s + 4); lo = ldb(W, o + s - 4); hi = ldb(W, o + s)
     (Float32((a & 0x0f) | (lo >> 6) << 4), Float32((a >> 4) | (hi >> 6) << 4))
 end
-# Each workgroup (4 wavefronts) takes 16 rows, 4 a wavefront; rows must be a multiple of 16. x goes through shared
-# memory 1,024 elements at a time, one plane per position (xs[p KC + k]). A wavefront step covers two 256-element
-# blocks: half the lanes each, a lane 8 elements of its block (one 32-bit word of Q5_K quants or two 16-bit words of
-# Q6_K quants). The lane reads its 8 x values for all P positions into registers once and uses them for its 4 rows.
-const KC = 1024
+# Each workgroup (4 wavefronts) takes 16 rows, 4 a wavefront; rows must be a multiple of 16, K of 512. A step covers
+# two 256-element blocks: half the lanes each, a lane 8 elements of its block (one 32-bit word of Q5_K quants, or two
+# 16-bit words of Q6_K quants). The step's x (512 elements, all P positions) sits in shared memory in read order,
+# xs[buf][p][64 slot + lane], so every read is 64 consecutive floats. x is double-buffered and the next step's
+# weight words are loaded before the current step computes, so each step has one barrier and its global loads in
+# flight under the arithmetic. A lane reads its x four slots at a time and uses them for its 4 rows.
+const KC = 512
 @inline ld32(W, off) = unsafe_load(reinterpret(Core.LLVMPtr{UInt32,1}, pointer(W) + off))
 @inline ld16(W, off) = unsafe_load(reinterpret(Core.LLVMPtr{UInt16,1}, pointer(W) + off))
 @inline f16(u::UInt16) = Float32(reinterpret(Float16, u))
-@inline function stage_x!(xs, x, t, kb, ldx, ::Val{P}) where {P}
-    i = t
-    @inbounds while i < Int32(KC * P)
-        p = i ÷ Int32(KC)
-        xs[i+Int32(1)] = x[p*ldx+kb+(i-p*Int32(KC))+Int32(1)]
-        i += Int32(256)
+@inline function xslot(k, ::Val{F}) where {F}         # plane position of step element k (0..511), format F (5 or 6)
+    bl = k >> Int32(8); r = k & Int32(255)
+    lane, slot = F == 5 ?
+        (Int32(32) * bl + Int32(8) * (r >> Int32(6)) + ((r >> Int32(2)) & Int32(7)), Int32(4) * ((r >> Int32(5)) & Int32(1)) + (r & Int32(3))) :
+        (Int32(32) * bl + Int32(16) * (r >> Int32(7)) + ((r >> Int32(1)) & Int32(15)), Int32(2) * ((r >> Int32(5)) & Int32(3)) + (r & Int32(1)))
+    Int32(64) * slot + lane
+end
+# this thread's 2P x values of step g (thread t takes flat indices t + 256 j of the P x 512 step)
+@inline xload(x, t, g, ldx, ::Val{P}) where {P} =
+    ntuple(j -> (i = t + Int32(256 * (j - 1)); p = i >> Int32(9); @inbounds x[p*ldx+Int32(KC)*g+(i&Int32(511))+Int32(1)]), Val(2P))
+@inline function xstore!(xs, xr::NTuple{N,Float32}, t, buf, ::Val{P}, ::Val{F}) where {N,P,F}
+    for j in 1:N
+        i = t + Int32(256 * (j - 1)); p = i >> Int32(9)
+        @inbounds xs[Int32(KC * P)*buf+Int32(KC)*p+xslot(i & Int32(511), Val(F))+Int32(1)] = xr[j]
     end
 end
-@inline xv(xs, k, ::Val{P}) where {P} = ntuple(p -> @inbounds(xs[(p-1)*KC+k+1]), Val(P))
+@inline xv(xs, buf, slot, lane, ::Val{P}) where {P} = ntuple(p -> @inbounds(xs[Int32(KC * P)*buf+Int32(KC*(p-1))+Int32(64)*slot+lane+Int32(1)]), Val(P))
 @inline fmav(a::NTuple{P,Float32}, w, x::NTuple{P,Float32}) where {P} = ntuple(p -> fma(w, x[p], a[p]), Val(P))
 @inline function wsum!(y, acc::NTuple{P,Float32}, lane, row, ldy) where {P}
     for p in 1:P
@@ -149,65 +159,93 @@ end
         lane == Int32(0) && @inbounds(y[(p-1)*ldy+row+1] = v)
     end
 end
+# Q5_K (scale, min) of sub-blocks s0 and s0 + 1 (s0 even) from the three scale words
+@inline function smk4w(u0, u1, u2, s0)
+    sh = Int32(8) * (s0 & Int32(3))
+    pick(sh) = s0 < Int32(4) ?
+        ((u0 >> sh) & 0x3f, (u1 >> sh) & 0x3f) :
+        (((u2 >> sh) & 0x0f) | ((u0 >> (sh + Int32(6))) & 0x03) << 4, ((u2 >> (sh + Int32(4))) & 0x0f) | ((u1 >> (sh + Int32(6))) & 0x03) << 4)
+    (a, b), (c, e) = pick(sh), pick(sh + Int32(8))
+    Float32(a), Float32(b), Float32(c), Float32(e)
+end
+# a lane's words of one row and block: Q5_K (d dmin, 3 scale words, quant word, high-bit word)
+@inline function w5(W, o, jj, e0)
+    (ld32(W, o), ld32(W, o + Int32(4)), ld32(W, o + Int32(8)), ld32(W, o + Int32(12)), ld32(W, o + Int32(48) + Int32(32) * jj + e0), ld32(W, o + Int32(16) + e0))
+end
 function k_gemv_q5k!(y, W, x, nb::Int32, ldx::Int32, ldy::Int32, ::Val{P}) where {P}
-    xs = @ROCStaticLocalArray(Float32, 8192, false)
+    xs = @ROCStaticLocalArray(Float32, 2 * KC * P, false)
     t = Int32(workitemIdx().x) - Int32(1); lane = t & Int32(63); wave = t >> Int32(6)
     r0 = (Int32(workgroupIdx().x) - Int32(1)) * Int32(16) + wave * Int32(4)
     bs = lane >> Int32(5); jj = (lane >> Int32(3)) & Int32(3); e0 = (lane & Int32(7)) * Int32(4); s0 = Int32(2) * jj
-    rbytes = nb * Int32(176)
-    Base.Cartesian.@nexprs 4 r -> (acc_r = ntuple(_ -> 0.0f0, Val(P)))
-    for kb in Int32(0):Int32(KC):nb*Int32(256)-Int32(1)
-        sync_workgroup(); stage_x!(xs, x, t, kb, ldx, Val(P)); sync_workgroup()
-        for st in Int32(0):Int32(1)
-            bl = Int32(2) * st + bs; b = (kb >> Int32(8)) + bl
-            kx = Int32(256) * bl + Int32(64) * jj + e0
-            Base.Cartesian.@nexprs 4 i -> (xl_i = xv(xs, kx + Int32(i - 1), Val(P)); xh_i = xv(xs, kx + Int32(31 + i), Val(P)))
-            Base.Cartesian.@nexprs 4 r -> begin
-                o = (r0 + Int32(r - 1)) * rbytes + b * Int32(176)
-                dd = ld32(W, o); d = f16(UInt16(dd & 0xffff)); dmin = f16(UInt16(dd >> 16))
-                sc0, mn0 = smk4(W, o + Int32(4), s0); sc1, mn1 = smk4(W, o + Int32(4), s0 + Int32(1))
-                a0 = d * sc0; m0 = dmin * mn0; a1 = d * sc1; m1 = dmin * mn1
-                qs = ld32(W, o + Int32(48) + Int32(32) * jj + e0); qh = ld32(W, o + Int32(16) + e0) >> s0
-                Base.Cartesian.@nexprs 4 i -> begin
-                    bt = qs >> (8 * (i - 1)); hb = qh >> (8 * (i - 1))
-                    acc_r = fmav(acc_r, a0 * Float32((bt & 0x0f) | (hb & 0x1) << 4) - m0, xl_i)
-                    acc_r = fmav(acc_r, a1 * Float32(((bt >> 4) & 0x0f) | ((hb >> 1) & 0x1) << 4) - m1, xh_i)
-                end
-            end
+    rbytes = nb * Int32(176); ns = nb >> Int32(1)
+    Base.Cartesian.@nexprs 4 r -> (acc_r = ntuple(_ -> 0.0f0, Val(P)); ob_r = (r0 + Int32(r - 1)) * rbytes + bs * Int32(176))
+    xstore!(xs, xload(x, t, Int32(0), ldx, Val(P)), t, Int32(0), Val(P), Val(5))
+    Base.Cartesian.@nexprs 4 r -> (w_r = w5(W, ob_r, jj, e0))
+    sync_workgroup()
+    for g in Int32(0):ns-Int32(1)
+        buf = g & Int32(1); gn = min(g + Int32(1), ns - Int32(1))
+        xr = xload(x, t, gn, ldx, Val(P))
+        Base.Cartesian.@nexprs 4 r -> (wn_r = w5(W, ob_r + gn * Int32(352), jj, e0))
+        Base.Cartesian.@nexprs 4 r -> begin
+            dd, u0, u1, u2, qs, qh = w_r
+            d = f16(UInt16(dd & 0xffff)); dmin = f16(UInt16(dd >> 16))
+            sc0, mn0, sc1, mn1 = smk4w(u0, u1, u2, s0)
+            a0_r = d * sc0; m0_r = dmin * mn0; a1_r = d * sc1; m1_r = dmin * mn1
+            ql_r = (qs & 0x0f0f0f0f) | ((qh >> s0) & 0x01010101) << 4
+            qu_r = ((qs >> 4) & 0x0f0f0f0f) | ((qh >> (s0 + Int32(1))) & 0x01010101) << 4
         end
+        Base.Cartesian.@nexprs 4 i -> (xi_i = xv(xs, buf, Int32(i - 1), lane, Val(P)))
+        Base.Cartesian.@nexprs 4 r -> Base.Cartesian.@nexprs 4 i -> (acc_r = fmav(acc_r, a0_r * Float32((ql_r >> (8 * (i - 1))) & 0xff) - m0_r, xi_i))
+        Base.Cartesian.@nexprs 4 i -> (xi_i = xv(xs, buf, Int32(i + 3), lane, Val(P)))
+        Base.Cartesian.@nexprs 4 r -> Base.Cartesian.@nexprs 4 i -> (acc_r = fmav(acc_r, a1_r * Float32((qu_r >> (8 * (i - 1))) & 0xff) - m1_r, xi_i))
+        xstore!(xs, xr, t, buf ⊻ Int32(1), Val(P), Val(5))
+        sync_workgroup()
+        Base.Cartesian.@nexprs 4 r -> (w_r = wn_r)
     end
     Base.Cartesian.@nexprs 4 r -> wsum!(y, acc_r, lane, r0 + Int32(r - 1), ldy)
     return
 end
+# a lane's words of one row and block: Q6_K (d, low quants of groups 1 2 and 3 4, high bits, the 4 scale bytes)
+@inline function w6(W, o, h, l2, is)
+    so = o + Int32(192) + Int32(8) * h + is
+    (ld16(W, o + Int32(208)), ld16(W, o + Int32(64) * h + l2), ld16(W, o + Int32(64) * h + l2 + Int32(32)), ld16(W, o + Int32(128) + Int32(32) * h + l2),
+     ldb(W, so), ldb(W, so + Int32(2)), ldb(W, so + Int32(4)), ldb(W, so + Int32(6)))
+end
+@inline q6(b0, bh) = Float32(Int32((b0 & 0x0f) | (bh & 0x03) << 4) - Int32(32))
 function k_gemv_q6k!(y, W, x, nb::Int32, ldx::Int32, ldy::Int32, ::Val{P}) where {P}
-    xs = @ROCStaticLocalArray(Float32, 8192, false)
+    xs = @ROCStaticLocalArray(Float32, 2 * KC * P, false)
     t = Int32(workitemIdx().x) - Int32(1); lane = t & Int32(63); wave = t >> Int32(6)
     r0 = (Int32(workgroupIdx().x) - Int32(1)) * Int32(16) + wave * Int32(4)
     # a lane: elements l2, l2 + 1 of half h in each of the half's four 32-element groups
     bs = lane >> Int32(5); h = (lane >> Int32(4)) & Int32(1); l2 = (lane & Int32(15)) * Int32(2); is = l2 >> Int32(4)
-    rbytes = nb * Int32(210)
-    Base.Cartesian.@nexprs 4 r -> (acc_r = ntuple(_ -> 0.0f0, Val(P)))
-    for kb in Int32(0):Int32(KC):nb*Int32(256)-Int32(1)
-        sync_workgroup(); stage_x!(xs, x, t, kb, ldx, Val(P)); sync_workgroup()
-        for st in Int32(0):Int32(1)
-            bl = Int32(2) * st + bs; b = (kb >> Int32(8)) + bl
-            kx = Int32(256) * bl + Int32(128) * h + l2
-            Base.Cartesian.@nexprs 2 e -> Base.Cartesian.@nexprs 4 g -> (x_g_e = xv(xs, kx + Int32(32 * (g - 1) + e - 1), Val(P)))
+    rbytes = nb * Int32(210); ns = nb >> Int32(1)
+    Base.Cartesian.@nexprs 4 r -> (acc_r = ntuple(_ -> 0.0f0, Val(P)); ob_r = (r0 + Int32(r - 1)) * rbytes + bs * Int32(210))
+    xstore!(xs, xload(x, t, Int32(0), ldx, Val(P)), t, Int32(0), Val(P), Val(6))
+    Base.Cartesian.@nexprs 4 r -> (w_r = w6(W, ob_r, h, l2, is))
+    sync_workgroup()
+    for g in Int32(0):ns-Int32(1)
+        buf = g & Int32(1); gn = min(g + Int32(1), ns - Int32(1))
+        xr = xload(x, t, gn, ldx, Val(P))
+        Base.Cartesian.@nexprs 4 r -> (wn_r = w6(W, ob_r + gn * Int32(420), h, l2, is))
+        Base.Cartesian.@nexprs 4 r -> begin
+            dh, q0_r, q1_r, qh_r, s1, s2, s3, s4 = w_r
+            d = f16(dh)
+            c1_r = d * Float32(reinterpret(Int8, s1)); c2_r = d * Float32(reinterpret(Int8, s2))
+            c3_r = d * Float32(reinterpret(Int8, s3)); c4_r = d * Float32(reinterpret(Int8, s4))
+        end
+        Base.Cartesian.@nexprs 2 e -> begin
+            Base.Cartesian.@nexprs 4 gg -> (xg_gg = xv(xs, buf, Int32(2 * (gg - 1) + e - 1), lane, Val(P)))
             Base.Cartesian.@nexprs 4 r -> begin
-                o = (r0 + Int32(r - 1)) * rbytes + b * Int32(210)
-                d = f16(ld16(W, o + Int32(208)))
-                q0 = ld16(W, o + Int32(64) * h + l2); q1 = ld16(W, o + Int32(64) * h + l2 + Int32(32)); qh = ld16(W, o + Int32(128) + Int32(32) * h + l2)
-                so = o + Int32(192) + Int32(8) * h + is
-                Base.Cartesian.@nexprs 4 g -> (c_g = d * Float32(reinterpret(Int8, ldb(W, so + Int32(2 * (g - 1))))))
-                Base.Cartesian.@nexprs 2 e -> begin
-                    b0 = q0 >> (8 * (e - 1)); b1 = q1 >> (8 * (e - 1)); bh = qh >> (8 * (e - 1))
-                    acc_r = fmav(acc_r, c_1 * Float32(Int32((b0 & 0x0f) | (bh & 0x03) << 4) - Int32(32)), x_1_e)
-                    acc_r = fmav(acc_r, c_2 * Float32(Int32((b1 & 0x0f) | ((bh >> 2) & 0x03) << 4) - Int32(32)), x_2_e)
-                    acc_r = fmav(acc_r, c_3 * Float32(Int32(((b0 >> 4) & 0x0f) | ((bh >> 4) & 0x03) << 4) - Int32(32)), x_3_e)
-                    acc_r = fmav(acc_r, c_4 * Float32(Int32(((b1 >> 4) & 0x0f) | ((bh >> 6) & 0x03) << 4) - Int32(32)), x_4_e)
-                end
+                b0 = q0_r >> (8 * (e - 1)); b1 = q1_r >> (8 * (e - 1)); bh = qh_r >> (8 * (e - 1))
+                acc_r = fmav(acc_r, c1_r * q6(b0, bh), xg_1)
+                acc_r = fmav(acc_r, c2_r * q6(b1, bh >> 2), xg_2)
+                acc_r = fmav(acc_r, c3_r * q6(b0 >> 4, bh >> 4), xg_3)
+                acc_r = fmav(acc_r, c4_r * q6(b1 >> 4, bh >> 6), xg_4)
             end
         end
+        xstore!(xs, xr, t, buf ⊻ Int32(1), Val(P), Val(6))
+        sync_workgroup()
+        Base.Cartesian.@nexprs 4 r -> (w_r = wn_r)
     end
     Base.Cartesian.@nexprs 4 r -> wsum!(y, acc_r, lane, r0 + Int32(r - 1), ldy)
     return
@@ -222,9 +260,9 @@ DMat(g::GGUF, name::String, r0 = 0, n = -1) = (t = g.t[name]; n < 0 && (n = nrow
 function gemv!(y, m::DMat, x, P::Int; ldx = m.K, ldy = m.rows)
     (m.K % KC == 0 && m.rows % 16 == 0) || error("gemv!: $(m.rows) x $(m.K): K must be a multiple of $KC, rows of 16"); nb = Int32(m.K ÷ 256); g = cld(m.rows, 16)
     if m.typ == GQ5_K
-        @roc groupsize = 256 gridsize = g k_gemv_q5k!(y, m.W, x, nb, Int32(ldx), Int32(ldy), Val(P))
+        @roc groupsize = 256 maxthreads = 256 gridsize = g k_gemv_q5k!(y, m.W, x, nb, Int32(ldx), Int32(ldy), Val(P))
     elseif m.typ == GQ6_K
-        @roc groupsize = 256 gridsize = g k_gemv_q6k!(y, m.W, x, nb, Int32(ldx), Int32(ldy), Val(P))
+        @roc groupsize = 256 maxthreads = 256 gridsize = g k_gemv_q6k!(y, m.W, x, nb, Int32(ldx), Int32(ldy), Val(P))
     else
         error("gemv!: type $(m.typ)")
     end
