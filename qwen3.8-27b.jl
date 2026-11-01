@@ -107,7 +107,7 @@ end
     Float32(((u2 >> h) & 0x0f) | ((u0 >> (h + 6)) & 0x03) << 4), Float32(((u2 >> (h + 4)) & 0x0f) | ((u1 >> (h + 6)) & 0x03) << 4)
 end
 # one wavefront: rows 64 G .. 64 G + 63, K slice sl, into part
-@noinline function gemv5!(part, W, xt, xsm, nb::Int32, rows::Int32, G::Int32, sl::Int32, lane::Int32, ::Val{P}) where {P}
+@inline function gemv5!(part, W, xt, xsm, nb::Int32, rows::Int32, G::Int32, sl::Int32, lane::Int32, ::Val{P}) where {P}
     b0 = sl * Int32(KS ÷ 256); nbs = min(Int32(KS ÷ 256), nb - b0)
     acc = ntuple(_ -> 0.0f0, Val(P))
     o = (G * nb + b0) * Int32(11 * 1024) + lane * Int32(16)
@@ -145,7 +145,7 @@ end
     return
 end
 # one wavefront: rows 64 G .. 64 G + 63, K slice sl, into part
-@noinline function gemv6!(part, W, D, xt, xsm, nb::Int32, rows::Int32, G::Int32, sl::Int32, lane::Int32, ::Val{P}) where {P}
+@inline function gemv6!(part, W, D, xt, xsm, nb::Int32, rows::Int32, G::Int32, sl::Int32, lane::Int32, ::Val{P}) where {P}
     b0 = sl * Int32(KS ÷ 256); nbs = min(Int32(KS ÷ 256), nb - b0)
     acc = ntuple(_ -> 0.0f0, Val(P)); tks = ntuple(_ -> 0.0f0, Val(LA(P)))
     o = (G * nb + b0) * Int32(13 * 1024) + lane * Int32(16); od = (G * nb + b0) * Int32(64) + lane + Int32(1)
@@ -368,10 +368,10 @@ end
 @inline gtid() = Int32(256) * wgid() + tid()
 @inline nthr(A::KA) = Int32(256) * A.nwg
 # partial sums of matrix slot js[m]: floats after the ones of js[1 .. m - 1]
-@inline function pof(A::KA, l, js::NTuple{N,Int32}, m, P) where {N}
+@inline function pof(A::KA, l, j0, m, P)                  # where matrix j0 + m - 1's sums start in part (the group j0 ..)
     o = Int64(0)
-    for i in 1:m-1
-        _, rows, nb, _, _ = mat(A, l, js[i]); o += Int64(nsx(nb, P)) * P * rows
+    for i in Int32(0):Int32(m - 2)
+        _, rows, nb, _, _ = mat(A, l, Int32(j0) + i); o += Int64(nsx(nb, P)) * P * rows
     end
     o
 end
@@ -381,14 +381,16 @@ end
     s
 end
 # the items (64 rows, one K slice) of the matrices js of layer l, over every wavefront of the die
-function gemv_ph!(A::KA, l::Int32, js::NTuple{N,Int32}, seq::Int32, ::Val{P}, zs::Bool = false) where {N,P}
+function gemv_ph!(A::KA, l::Int32, j0::Int32, nm::Int32, seq::Int32, ::Val{P}, zs::Bool = false) where {P}
     zs && zero_ssq!(A, Int32(P))
-    t = tid(); lane = t & Int32(63); gw = Int32(4) * wgid() + (t >> Int32(6)); NW = Int32(4) * A.nwg
+    # the wavefront index, uniform (readfirstlane): so is everything an item derives from it, and x is read with
+    # scalar loads
+    t = tid(); lane = t & Int32(63); gw = AMDGPU.Device.readfirstlane(Int32(4) * wgid() + (t >> Int32(6))); NW = Int32(4) * A.nwg
     t0 = memtime(); did = false
     xr = sbuf(A.xt, NE * 4 * A.npos); x16 = sbuf(A.x16, NE ÷ 4 * A.npos); x32 = sbuf(A.x32, NE ÷ 8 * A.npos)
     base = Int32(0); o = Int64(0)
-    for m in 1:N
-        woff, rows, nb, typ, doff = mat(A, l, js[m]); ns = nsl(nb); n = (rows >> Int32(6)) * ns
+    for m in Int32(0):nm-Int32(1)
+        woff, rows, nb, typ, doff = mat(A, l, j0 + m); ns = nsl(nb); n = (rows >> Int32(6)) * ns
         g = gw + max(Int32(0), cld(base - gw, NW)) * NW
         while g < base + n
             it = g - base; G = it ÷ ns; sl = it - G * ns
@@ -509,9 +511,7 @@ end
     i = gtid()
     while i < P; st!(A.ssq, Int64(0), i); i += nthr(A); end
 end
-const JQKV = (Int32(0), Int32(1), Int32(2), Int32(3))      # qkv z alpha beta  |  q k v
-const JQKVA = (Int32(0), Int32(1), Int32(2))
-const JFF = (Int32(5), Int32(6))                            # gate up
+# table slots: 0..3 qkv z alpha beta (DeltaNet) | 0..2 q k v (attention); 4 out; 5, 6 gate up; 7 down
 # DeltaNet conv + silu, one thread a channel
 function conv_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
     t0 = memtime(); 
@@ -545,8 +545,8 @@ function rec_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
     t0 = memtime()
     kh = lv & Int32(3); t = tid(); i = t >> Int32(1); jh = t & Int32(1)
     ri = ridx(l); so = (Int64(lv) * DK + i) * DK + 64jh; rc = Int32(-1); Sp = reinterpret(LP{Float32}, Int64(0))
-    _, _, nbz, _, _ = mat(A, l, Int32(1)); nsz = nsx(nbz, P); oz = pof(A, l, JQKV, 2, P)
-    _, _, nba, _, _ = mat(A, l, Int32(2)); nsa = nsx(nba, P); oa = pof(A, l, JQKV, 3, P); ob4 = pof(A, l, JQKV, 4, P)
+    _, _, nbz, _, _ = mat(A, l, Int32(1)); nsz = nsx(nbz, P); oz = pof(A, l, 0, 2, P)
+    _, _, nba, _, _ = mat(A, l, Int32(2)); nsa = nsx(nba, P); oa = pof(A, l, 0, 3, P); ob4 = pof(A, l, 0, 4, P)
     dtb = fvec(A, l, 3); ssa = fvec(A, l, 4); sn = fvec(A, l, 5)
     s = ntuple(_ -> 0.0f0, Val(64))
     isc = 1.0f0 / sqrt(Float32(DK))
@@ -646,8 +646,8 @@ function aprep_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
     cd = @ROCStaticLocalArray(UInt8, HD, false)
     t0 = memtime(); did = false; t = tid()
     _, rq, nbq, _, _ = mat(A, l, Int32(0)); nsq = nsx(nbq, P)
-    _, rk, nbk, _, _ = mat(A, l, Int32(1)); nsk = nsx(nbk, P); ok = pof(A, l, JQKVA, 2, P)
-    _, rv, nbv, _, _ = mat(A, l, Int32(2)); nsv = nsx(nbv, P); ov = pof(A, l, JQKVA, 3, P)
+    _, rk, nbk, _, _ = mat(A, l, Int32(1)); nsk = nsx(nbk, P); ok = pof(A, l, 0, 2, P)
+    _, rv, nbv, _, _ = mat(A, l, Int32(2)); nsv = nsx(nbv, P); ov = pof(A, l, 0, 3, P)
     qn = fvec(A, l, 2); kn = fvec(A, l, 3); koff = Int64(aidx(l)) * A.maxctx * KVROW
     it = wgid()
     while it < Int32(8) * P                                 # 6 query heads, the key, the value
@@ -815,7 +815,7 @@ end
 function act_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
     t0 = memtime()
     did = false; i = gtid()
-    _, rg, nbg, _, _ = mat(A, l, Int32(5)); ns = nsx(nbg, P); ou = pof(A, l, JFF, 2, P)
+    _, rg, nbg, _, _ = mat(A, l, Int32(5)); ns = nsx(nbg, P); ou = pof(A, l, 5, 2, P)
     while i < Int32(4352) * P                              # a wavefront: 64 elements of one position (4352 = 68 x 64)
         p = i ÷ Int32(4352); k = i - p * Int32(4352)
         v = silu(psum(A, Int64(0), ns, rg, P, p, k) * rinv(A, p)) * (psum(A, ou, ns, rg, P, p, k) * rinv(A, p))
@@ -965,11 +965,11 @@ end
     end
 end
 # the (64 rows, 64 positions) tiles of the matrices js of layer l, positions pf .. P - 1, over the workgroups
-function gemm_ph!(A::KA, l::Int32, js::NTuple{N,Int32}, seq::Int32, P::Int32, Ws, Xs, zs::Bool = false, pf::Int32 = Int32(0)) where {N}
+function gemm_ph!(A::KA, l::Int32, j0::Int32, nm::Int32, seq::Int32, P::Int32, Ws, Xs, zs::Bool = false, pf::Int32 = Int32(0))
     zs && zero_ssq!(A, P)
     t0 = memtime(); did = false; npt = cld(P - pf, Int32(64)); base = Int32(0); o = Int64(0); w = wgid()
-    for m in 1:N
-        woff, rows, nb, typ, doff = mat(A, l, js[m]); n = (rows >> Int32(6)) * npt
+    for m in Int32(0):nm-Int32(1)
+        woff, rows, nb, typ, doff = mat(A, l, j0 + m); n = (rows >> Int32(6)) * npt
         g = w + max(Int32(0), cld(base - w, A.nwg)) * A.nwg
         while g < base + n
             i = g - base; G = i ÷ npt; pt = i - G * npt
@@ -980,72 +980,116 @@ function gemm_ph!(A::KA, l::Int32, js::NTuple{N,Int32}, seq::Int32, P::Int32, Ws
     end
     done!(A, seq, t0, did)
 end
-@inline mat_ph!(A::KA, l, js, seq, P, T, zs::Bool = false, pf::Int32 = Int32(0)) =
-    P > Int32(NR) ? gemm_ph!(A, Int32(l), js, seq, P, T[1], T[2], zs, pf) :   # prefill; decode (a position a request): GEMV
-    P == Int32(1) ? gemv_ph!(A, Int32(l), js, seq, Val(1), zs) : gemv_ph!(A, Int32(l), js, seq, Val(2), zs)   # (all P positions)
+# matrices j0 .. j0 + nm - 1 of layer l (consecutive table slots)
+@inline mat_ph!(A::KA, l, j0, nm, seq, P, T, zs::Bool = false, pf::Int32 = Int32(0)) =
+    P > Int32(NR) ? gemm_ph!(A, Int32(l), Int32(j0), Int32(nm), seq, P, T[1], T[2], zs, pf) :   # prefill; decode (a position a request): GEMV
+    P == Int32(1) ? gemv_ph!(A, Int32(l), Int32(j0), Int32(nm), seq, Val(1), zs) : gemv_ph!(A, Int32(l), Int32(j0), Int32(nm), seq, Val(2), zs)   # (all P positions)
 
-# ---- one forward of P positions (setpos_ph! set them): P > 1 (prefill) with GEMMs, P = 1 or 2 (decode) with GEMVs;
-# amax: one past the largest position; gen: the head takes positions pfirst .. P - 1 into tokens of step k ----
+# ---- one forward of P positions (setpos_ph! set them): P > NR (prefill) with GEMMs, P <= NR (decode) with GEMVs;
+# amax: one past the largest position; head: the head takes positions pfirst .. P - 1 (into tokens of step k).
+# A layer is a short program of steps run by one loop, so each phase is in the kernel once (compile time).
+const S_MAT, S_CONV, S_REC, S_APREP, S_ATTN, S_ACOMB, S_XWR, S_ACT, S_HMAX, S_HRED, S_XSIG, S_TOK = Int32.(1:12)
+# step i of layer l (64: the head): (kind, first matrix slot, matrices, zero the sums of squares first)
+@inline function lstep(l::Int32, i::Int32)
+    if l == Int32(64)
+        i == Int32(0) && return S_MAT, Int32(1), Int32(1), false
+        return (i == Int32(1) ? S_HMAX : i == Int32(2) ? S_HRED : i == Int32(3) ? S_XSIG : S_TOK), Int32(0), Int32(0), false
+    end
+    if isrec(l)
+        i == Int32(0) && return S_MAT, Int32(0), Int32(4), false   # qkv z alpha beta
+        i == Int32(1) && return S_CONV, Int32(0), Int32(0), false
+        i == Int32(2) && return S_REC, Int32(0), Int32(0), false
+        i -= Int32(3)
+    else
+        i == Int32(0) && return S_MAT, Int32(0), Int32(3), false   # q k v
+        i == Int32(1) && return S_APREP, Int32(0), Int32(0), false
+        i == Int32(2) && return S_ATTN, Int32(0), Int32(0), false
+        i == Int32(3) && return S_ACOMB, Int32(0), Int32(0), false
+        i -= Int32(4)
+    end
+    i == Int32(0) && return S_MAT, Int32(4), Int32(1), true         # out
+    i == Int32(1) && return S_XWR, Int32(4), Int32(0), false
+    i == Int32(2) && return S_MAT, Int32(5), Int32(2), false        # gate up
+    i == Int32(3) && return S_ACT, Int32(0), Int32(0), false
+    i == Int32(4) && return S_MAT, Int32(7), Int32(1), true         # down
+    return S_XWR, Int32(7), Int32(0), false
+end
+@inline nsteps(l::Int32, gen::Bool) = l == Int32(64) ? (gen ? Int32(5) : Int32(2)) : isrec(l) ? Int32(9) : Int32(10)
 function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, head::Bool, pfirst::Int32, k::Int32, T)
     xwr_ph!(A, Int32(0), Int32(-1), fvec(A, 0, 0), true, xs, seq, P); seq += Int32(2); xs += Int32(1); gbar!(A)
     nlr = Int32(ldacq(A.bar + 12)); nl = nlr == Int32(0) ? Int32(NL) : nlr   # bar[3]: layers to run (0: all), for debugging
-    for l in Int32(0):nl-Int32(1)
-        if isrec(l)
-            mat_ph!(A, l, JQKV, seq, P, T); seq += Int32(1); gbar!(A)
-            conv_ph!(A, l, seq, P); seq += Int32(1); gbar!(A)
-            rec_ph!(A, l, seq, P); seq += Int32(1); gbar!(A)
+    gen = A.mode == Int32(0); nq = P - pfirst
+    l = Int32(0); i = Int32(0)
+    while l < nl || (head && l == Int32(64))
+        kind, j0, nm, zs = lstep(l, i)
+        if kind == S_MAT
+            mat_ph!(A, l, j0, nm, seq, P, T, zs, l == Int32(64) ? pfirst : Int32(0)); seq += Int32(1)
+        elseif kind == S_CONV
+            conv_ph!(A, l, seq, P); seq += Int32(1)
+        elseif kind == S_REC
+            rec_ph!(A, l, seq, P); seq += Int32(1)
+        elseif kind == S_APREP
+            aprep_ph!(A, l, seq, P); seq += Int32(1)
+        elseif kind == S_ATTN
+            attn_ph!(A, l, amax, seq, P, T); seq += Int32(1)
+        elseif kind == S_ACOMB
+            acomb_ph!(A, amax, seq, P); seq += Int32(1)
+        elseif kind == S_XWR
+            wn = j0 == Int32(4) ? fvec(A, l, 1) : l < nl - Int32(1) ? fvec(A, l + Int32(1), 0) : fvec(A, 64, 0)
+            xwr_ph!(A, l, j0, wn, false, xs, seq, P); seq += Int32(2); xs += Int32(1)
+        elseif kind == S_ACT
+            act_ph!(A, l, seq, P); seq += Int32(1)
+        elseif kind == S_HMAX
+            hmax_ph!(A, seq, P, pfirst); seq += Int32(1)
+        elseif kind == S_HRED
+            hred_ph!(A, xs & Int32(1), seq, nq); seq += Int32(1)
+        elseif kind == S_XSIG
+            xsig!(A, xs)
         else
-            mat_ph!(A, l, JQKVA, seq, P, T); seq += Int32(1); gbar!(A)
-            aprep_ph!(A, l, seq, P); seq += Int32(1); gbar!(A)
-            attn_ph!(A, l, amax, seq, P, T); seq += Int32(1); gbar!(A)
-            acomb_ph!(A, amax, seq, P); seq += Int32(1); gbar!(A)
+            tok_ph!(A, xs & Int32(1), seq, nq, pfirst, k); seq += Int32(1); xs += Int32(1)
         end
-        mat_ph!(A, l, (Int32(4),), seq, P, T, true); seq += Int32(1); gbar!(A)
-        xwr_ph!(A, l, Int32(4), fvec(A, l, 1), false, xs, seq, P); seq += Int32(2); xs += Int32(1); gbar!(A)
-        mat_ph!(A, l, JFF, seq, P, T); seq += Int32(1); gbar!(A)
-        act_ph!(A, l, seq, P); seq += Int32(1); gbar!(A)
-        mat_ph!(A, l, (Int32(7),), seq, P, T, true); seq += Int32(1); gbar!(A)
-        wn = l < nl - Int32(1) ? fvec(A, l + Int32(1), 0) : fvec(A, 64, 0)
-        xwr_ph!(A, l, Int32(7), wn, false, xs, seq, P); seq += Int32(2); xs += Int32(1); gbar!(A)
-    end
-    if head
-        mat_ph!(A, Int32(64), (Int32(1),), seq, P, T, false, pfirst); seq += Int32(1); gbar!(A)
-        hmax_ph!(A, seq, P, pfirst); seq += Int32(1); gbar!(A)
-        if A.mode == Int32(0)
-            nq = P - pfirst
-            hred_ph!(A, xs & Int32(1), seq, nq); seq += Int32(1); gbar!(A)
-            xsig!(A, xs); gbar!(A)
-            tok_ph!(A, xs & Int32(1), seq, nq, pfirst, k); seq += Int32(1); xs += Int32(1); gbar!(A)
+        gbar!(A)
+        i += Int32(1)
+        if i == nsteps(l, gen)
+            i = Int32(0); l = l == nl - Int32(1) ? Int32(64) : l + Int32(1)
         end
     end
     seq, xs
 end
 # the requests (up to NR), one dispatch: each request's prefill (or scoring) in forwards of as many positions as fit
-# (npos), then the decode steps of all of them together, a position a request a forward
+# (npos), then the decode steps of all of them together, a position a request a forward. One call of fwd! (one copy
+# of the forward in the kernel): each loop turn picks the next forward.
 function k_req!(A::KA)
     T = (@ROCStaticLocalArray(Float32, 32 * 64, false), @ROCStaticLocalArray(Float32, 32 * 64, false))   # the GEMM tiles
     tid() == Int32(0) && umin64(A.acct, memtime())
     seq = Int32(0); xs = Int32(0); kmax = Int32(0)
-    for r in Int32(0):A.nreq-Int32(1)
-        ninp = ld(A.rq, 4r + Int32(1)); ngen = ld(A.rq, 4r + Int32(2)); kmax = max(kmax, ngen); a = Int32(0)
-        while a < ninp
-            P = min(A.npos, ninp - a); last = a + P == ninp
+    for q in Int32(0):A.nreq-Int32(1); kmax = max(kmax, ld(A.rq, 4q + Int32(2))); end
+    r = Int32(0); a = Int32(0); k = Int32(1); prefill = true
+    while true
+        if prefill && r >= A.nreq                          # every prefill done
+            tid() == Int32(0) && umax64(A.acct + 16, memtime())
+            prefill = false
+        end
+        if prefill
+            ninp = ld(A.rq, 4r + Int32(1)); ngen = ld(A.rq, 4r + Int32(2))
+            P = min(A.npos, ninp - a); amax = a + P
+            head = A.mode == Int32(1) || (a + P == ninp && ngen > Int32(0)); pfirst = A.mode == Int32(1) ? Int32(0) : P - Int32(1)
             zero_ssq!(A, P); setpos_ph!(A, r, a, P, Int32(0)); gbar!(A)
-            head = A.mode == Int32(1) || (last && ngen > Int32(0))
-            seq, xs = fwd!(A, P, a + P, seq, xs, head, A.mode == Int32(1) ? Int32(0) : P - Int32(1), Int32(0), T)
+            seq, xs = fwd!(A, P, amax, seq, xs, head, pfirst, Int32(0), T)
             a += P
-        end
-    end
-    tid() == Int32(0) && umax64(A.acct + 16, memtime())   # the prefill ends
-    for k in Int32(1):kmax-Int32(1)
-        P = Int32(0); amax = Int32(0)
-        for q in Int32(0):A.nreq-Int32(1)
-            if ld(A.rq, 4q + Int32(2)) > k
-                P += Int32(1); amax = max(amax, ld(A.rq, 4q + Int32(1)) + k)
+            a >= ninp && (r += Int32(1); a = Int32(0))
+        else
+            k < kmax || break
+            P = Int32(0); amax = Int32(0)
+            for q in Int32(0):A.nreq-Int32(1)
+                if ld(A.rq, 4q + Int32(2)) > k
+                    P += Int32(1); amax = max(amax, ld(A.rq, 4q + Int32(1)) + k)
+                end
             end
+            zero_ssq!(A, P); setpos_ph!(A, Int32(-1), Int32(0), P, k); gbar!(A)
+            seq, xs = fwd!(A, P, amax, seq, xs, true, Int32(0), k, T)
+            k += Int32(1)
         end
-        zero_ssq!(A, P); setpos_ph!(A, Int32(-1), Int32(0), P, k); gbar!(A)
-        seq, xs = fwd!(A, P, amax, seq, xs, true, Int32(0), k, T)
     end
     tid() == Int32(0) && umax64(A.acct + 8, memtime())
     return

@@ -42,6 +42,16 @@ const PROFILE_FINISH=Ref{Ptr{Cvoid}}(C_NULL)
 const PROFILE_HANDLES=Ptr{Cvoid}[]
 const PROFILE_DIR=Ref("")
 const PROFILE_SIGNALS=Tuple{Int,Vector{UInt8}}[]
+const PROFILE_POWER=Pair{String,String}[]
+function set_power(path,value)
+    open(`sudo -n tee $path`,"w",devnull) do io
+        write(io,value,"\n")
+    end
+end
+function restore_power()
+    for (path,value) in PROFILE_POWER; set_power(path,value); end
+    empty!(PROFILE_POWER)
+end
 function restore_profile_signals()
     for (sig,act) in PROFILE_SIGNALS
         ccall(:sigaction,Cint,(Cint,Ptr{Cvoid},Ptr{Cvoid}),sig,act,C_NULL)
@@ -65,6 +75,19 @@ function profile_configure(version::UInt32,runtime::Ptr{UInt8},priority::UInt32,
 end
 function profile_start()
     dir=mktempdir(;prefix="qwen36-profile-",cleanup=false); PROFILE_DIR[]=dir
+    atexit(restore_power)
+    # RDNA3 gates some perfmon clocks in AUTO. ROCm requires STABLE_STD for
+    # meaningful PMC data. Preserve the user's setting and restore it on exit.
+    # https://rocm.docs.amd.com/projects/rocprofiler-sdk/en/latest/how-to/using-rocprofv3.html#setting-gpu-performance-level-for-pmc-profiling
+    for card in readdir("/sys/class/drm";join=true)
+        occursin(r"^card[0-9]+$",basename(card)) || continue
+        path=joinpath(card,"device","power_dpm_force_performance_level")
+        isfile(path) || continue
+        old=strip(read(path,String))
+        old=="profile_standard" && continue
+        open(io->println(io,path,'\t',old),joinpath(dir,"power-backup.tsv"),"a")
+        push!(PROFILE_POWER,path=>old); set_power(path,"profile_standard")
+    end
     # Julia uses SIGSEGV for GC safepoints. The tool's glog failure handler must
     # not replace Julia's handler when a profiler is loaded into a running Julia.
     empty!(PROFILE_SIGNALS)
@@ -93,6 +116,7 @@ function profile_finish()
     # The tool stops its contexts and flushes its buffers. SDK retains its HSA
     # interception state until normal process shutdown, after HIP destroys queues.
     ccall(f,Cvoid,(Ptr{Cvoid},),PROFILE_TOOL_DATA[]); PROFILE_TOOL_FINI[]=C_NULL
+    restore_power()
 end
 if abspath(PROGRAM_FILE)==@__FILE__() && !any(a->a in ("--help","--compile","--download","--prepare"),ARGS)
     profile_start()
@@ -195,6 +219,18 @@ end
 end
 @inline sigm(x) = 1.0f0 / (1.0f0 + exp(-x))
 @inline clockgpu() = ccall("extern __ockl_steadyctr_u64", llvmcall, UInt64, ())
+# Phases are serialized. Reuse one workgroup workspace rather than reserving
+# separate LDS allocations for every inlined normalization/reduction callsite.
+@inline function scratch(::Type{T},n::Integer,offset::Integer=0) where T
+    p=Base.llvmcall(("""
+    @qwen36_workgroup_scratch = linkonce_odr addrspace(3) global [1040 x i32] undef, align 16
+    define ptr addrspace(3) @entry() alwaysinline {
+      %p = getelementptr [1040 x i32], ptr addrspace(3) @qwen36_workgroup_scratch, i32 0, i32 0
+      ret ptr addrspace(3) %p
+    }
+    ""","entry"),Core.LLVMPtr{UInt32,3},Tuple{})
+    AMDGPU.ROCDeviceArray{T,1,3}((Int(n),),reinterpret(Core.LLVMPtr{T,3},p)+offset)
+end
 @inline silu(x) = x * sigm(x)
 @inline softplus(x) = max(x, 0.0f0) + log1p(exp(-abs(x)))
 @inline function u16(W, o)
@@ -342,7 +378,7 @@ function packdraft(g,name)
     mv(tmp,p;force=true); phase("packed draft $name"); p
 end
 function k_norm!(y, x, w, n::Int32, eps::Float32)
-    ti = tid0(); s = @ROCStaticLocalArray(Float32, 256)
+    ti = tid0(); s = scratch(Float32,256)
     a = 0.0f0
     for i in ti:Int32(256):n-Int32(1)
         @inbounds a = fma(x[i+1], x[i+1], a)
@@ -355,6 +391,7 @@ function k_norm!(y, x, w, n::Int32, eps::Float32)
     for i in ti:Int32(256):n-Int32(1)
         @inbounds y[i+1] = x[i+1]*scale*w[i+1]
     end
+    sync_workgroup()
     return
 end
 function k_add!(x,y,n::Int32)
@@ -386,7 +423,7 @@ function k_conv!(u,x,st,w,t::Int32,n::Int32)
 end
 function k_qknorm!(q,k,u,nk::Int32,eps::Float32,h::Int32)
     d=tid0()
-    sq=@ROCStaticLocalArray(Float32,256); sk=@ROCStaticLocalArray(Float32,256)
+    sq=scratch(Float32,256); sk=scratch(Float32,256,256)
     @inbounds begin
         qv=d<128 ? u[128h+d+1] : 0.0f0; kv=d<128 ? u[128nk+128h+d+1] : 0.0f0
         sq[d+1]=qv*qv; sk[d+1]=kv*kv; sync_workgroup()
@@ -399,6 +436,7 @@ function k_qknorm!(q,k,u,nk::Int32,eps::Float32,h::Int32)
             k[128h+d+1]=kv/max(sqrt(sk[1]),eps)
         end
     end
+    sync_workgroup()
     return
 end
 function k_delta!(o,state,q,k,u,a,b,dt,aa,nk::Int32,bh::Int32)
@@ -426,7 +464,7 @@ function k_delta!(o,state,q,k,u,a,b,dt,aa,nk::Int32,bh::Int32)
 end
 function k_gatednorm!(o,raw,z,w,eps::Float32,h::Int32)
     d=tid0()
-    sh=@ROCStaticLocalArray(Float32,256)
+    sh=scratch(Float32,256)
     @inbounds begin
         x=d<128 ? raw[128h+d+1] : 0.0f0; sh[d+1]=x*x; sync_workgroup()
         for s in (128,64,32,16,8,4,2,1)
@@ -434,6 +472,7 @@ function k_gatednorm!(o,raw,z,w,eps::Float32,h::Int32)
         end
         d<128 && (o[128h+d+1]=x/sqrt(sh[1]/128.0f0+eps)*w[d+1]*silu(z[128h+d+1]))
     end
+    sync_workgroup()
     return
 end
 
@@ -441,7 +480,7 @@ end
 # Text positions are equal on all IMRoPE axes, so the multimodal sections coincide here.
 function k_attnprep!(q,kc,vc,qg,k,v,qn,kn,t::Int32,nq::Int32,nkv::Int32,theta::Float32,eps::Float32,h::Int32,ropepos::Int32=t)
     d=tid0()
-    sh=@ROCStaticLocalArray(Float32,256); ss=@ROCStaticLocalArray(Float32,256)
+    sh=scratch(Float32,256); ss=scratch(Float32,256,256)
     isq=h<nq; hh=isq ? h : h-nq
     @inbounds begin
         x=isq ? qg[512hh+d+1] : k[256hh+d+1]
@@ -463,6 +502,7 @@ function k_attnprep!(q,kc,vc,qg,k,v,qn,kn,t::Int32,nq::Int32,nkv::Int32,theta::F
             ix=(t*nkv+hh)*256+d+1; kc[ix]=y; vc[ix]=v[256hh+d+1]
         end
     end
+    sync_workgroup()
     return
 end
 function k_attnscore!(scores,q,kc,t::Int32,nq::Int32,nkv::Int32,ctx::Int32,h::Int32,chunk::Int32)
@@ -479,7 +519,7 @@ function k_attnscore!(scores,q,kc,t::Int32,nq::Int32,nkv::Int32,ctx::Int32,h::In
     return
 end
 function k_softmax!(p,t::Int32,ctx::Int32,h::Int32)
-    d=tid0(); sh=@ROCStaticLocalArray(Float32,256)
+    d=tid0(); sh=scratch(Float32,256)
     m=-Inf32
     for i in d:Int32(256):t; @inbounds m=max(m,p[h*ctx+i+1]); end
     sh[d+1]=m; sync_workgroup()
@@ -496,6 +536,7 @@ function k_softmax!(p,t::Int32,ctx::Int32,h::Int32)
     end
     den=sh[1]
     for i in d:Int32(256):t; @inbounds p[h*ctx+i+1]/=den; end
+    sync_workgroup()
     return
 end
 function k_attnout!(o,p,vc,qg,t::Int32,nq::Int32,nkv::Int32,ctx::Int32,h::Int32)
@@ -970,16 +1011,25 @@ end
     W=av(UInt8,m.ptr,Int64(typemax(Int32)))
     if mode==0
         for row in bid*Int32(8)+(ti>>Int32(5)):ng*Int32(8):m.rows-Int32(1)
-            a=ntuple(_->0.0f0,Val(P))
+            a0=0.0f0; a1=0.0f0; a2=0.0f0; a3=0.0f0
+            a4=0.0f0; a5=0.0f0; a6=0.0f0; a7=0.0f0
             for k in lane:Int32(32):K-Int32(1)
                 w=weight(W,row,k,K,Val(T))
-                a=let previous=a
-                    ntuple(j->j<=n ? fma(w,(@inbounds x[(j-1)*xs+k+1]),previous[j]) : previous[j],Val(P))
+                @inbounds begin
+                    a0=fma(w,x[k+1],a0)
+                    n>1 && (a1=fma(w,x[xs+k+1],a1))
+                    n>2 && (a2=fma(w,x[2xs+k+1],a2))
+                    n>3 && (a3=fma(w,x[3xs+k+1],a3))
+                    n>4 && (a4=fma(w,x[4xs+k+1],a4))
+                    n>5 && (a5=fma(w,x[5xs+k+1],a5))
+                    n>6 && (a6=fma(w,x[6xs+k+1],a6))
+                    n>7 && (a7=fma(w,x[7xs+k+1],a7))
                 end
             end
-            for p in 1:P
-                v=sum32(a[p]); lane==0 && p<=n && (@inbounds y[(p-1)*ys+row+1]=v)
-            end
+            p_store!(y,a0,Int32(0),row,ys,n,lane); p_store!(y,a1,Int32(1),row,ys,n,lane)
+            p_store!(y,a2,Int32(2),row,ys,n,lane); p_store!(y,a3,Int32(3),row,ys,n,lane)
+            p_store!(y,a4,Int32(4),row,ys,n,lane); p_store!(y,a5,Int32(5),row,ys,n,lane)
+            p_store!(y,a6,Int32(6),row,ys,n,lane); p_store!(y,a7,Int32(7),row,ys,n,lane)
         end
     else
         rpe=mode==1 ? Int32(512) : Int32(2048); R=Int32(8)*rpe
@@ -992,6 +1042,12 @@ end
             end
             a=sum32(a); lane==0 && (@inbounds y[p*ys+rr+1]=a)
         end
+    end
+    return
+end
+@inline function p_store!(y,a,p::Int32,row::Int32,ys::Int32,n::Int32,lane::Int32)
+    if p<n
+        v=sum32(a); lane==0 && (@inbounds y[p*ys+row+1]=v)
     end
     return
 end
@@ -1025,7 +1081,7 @@ end
 end
 @inline function p_argmax!(logits,part,ix,out,n::Int32,active::Int32,off::Int32=Int32(0))
     bid=Int32(workgroupIdx().x)-Int32(1); ti=tid0(); ng=Int32(gridGroupDim().x)
-    sh=@ROCStaticLocalArray(Float32,256); si=@ROCStaticLocalArray(Int32,256)
+    sh=scratch(Float32,256); si=scratch(Int32,256,256)
     @inbounds for p in Int32(0):active-Int32(1)
         best=-Inf32; id=typemax(Int32)
         for j in gid0():Int32(gridItemDim().x):n-Int32(1)
@@ -1195,7 +1251,7 @@ end
         den=fma(den,os,ns); mx=nm
         acc=let previous=acc; ntuple(j->fma(previous[j],os,vv[j]*ns),Val(4)); end
     end
-    sh=@ROCStaticLocalArray(Float32,1040)
+    sh=scratch(Float32,1040)
     @inbounds begin
         lane==0 && (sh[warp*130+1]=mx; sh[warp*130+2]=den)
         for j in 1:4; sh[warp*130+3+lane+32*(j-1)]=acc[j]; end
@@ -1232,7 +1288,7 @@ end
 end
 @inline function p_dselect!(s,part,ix,ei)
     d=s.db; bid=Int32(workgroupIdx().x)-Int32(1); ng=Int32(gridGroupDim().x); ti=tid0(); vocab=Int32(length(d.logits)÷8)
-    sh=@ROCStaticLocalArray(Float32,256); si=@ROCStaticLocalArray(Int32,256)
+    sh=scratch(Float32,256); si=scratch(Int32,256,256)
     @inbounds for p in Int32(1):Int32(7)
         prev=Inf32; previ=Int32(-1)
         for rank in Int32(0):Int32(15)
@@ -1473,7 +1529,7 @@ function Engine(g,ctx;compileonly=false,mode=0,draftpath=joinpath(dirname(DEFAUL
     head=mat(g,"output.weight"); norm=retain(ROCArray(tensor_f32(g,"output_norm.weight")))
     et=g.tensors["token_embd.weight"]
     emb=retain(compileonly ? AMDGPU.zeros(UInt16,1) : GC.@preserve g unsafe_wrap(ROCArray,Ptr{UInt16}(pointer(g.map)+et.off),(prod(et.dims),)))
-    vocab=length(tk.text); groups=2Int(AMDGPU.HIP.properties(AMDGPU.device()).multiProcessorCount)
+    vocab=length(tk.text); groups=8Int(AMDGPU.HIP.properties(AMDGPU.device()).multiProcessorCount)
     b=buffers(vocab,ctx); dummy=PMat(0,0,0,0); eh=dummy; fc=dummy; selector=dummy; pred=dummy; succ=dummy
     mn=(UInt64(0),UInt64(0),UInt64(0)); dn=(UInt64(0),UInt64(0)); mbs=PBlock[]; dbs=DPBlock[]
     mb=mode==1 ? buffers(vocab,ctx) : b; db=mode==2 ? buffers(vocab,ctx;draft=true) : b
@@ -1519,7 +1575,8 @@ function reset!(E)
 end
 function request_kernel(E,np,nt;compile=false)
     sb=merge(map(rocdesc,E.spec),(mb=activations(E.spec.mb,E.descriptors[2]),db=activations(E.spec.db,E.descriptors[3])))
-    args=(pbuf(E.blocks),E.head,pbuf(E.output_norm),pbuf(E.embedding),activations(E.b,E.descriptors[1]),sb,
+    emb=PBuf{UInt16,2048length(E.tk.text)}(UInt64(pointer(E.embedding)))
+    args=(pbuf(E.blocks),E.head,pbuf(E.output_norm),emb,activations(E.b,E.descriptors[1]),sb,
           pbuf(E.ids),pbuf(E.output),pbuf(E.control),pbuf(E.ticks),pbuf(E.part),pbuf(E.ix),pbuf(E.expertids),
           Int32(np),Int32(nt),Int32(E.ctx),E.tk.eos,get(E.tk.ids,"<|im_end|>",E.tk.eos),Val(E.mode))
     if E.kernel===nothing
@@ -1709,7 +1766,7 @@ function main(args)
     text="--raw" in flags ? prompt : chat_prompt(prompt)*("--think" in flags ? "" : "\n</think>\n\n")
     encode(E.tk,text); piece(E.tk,Int32(0)) # compile tokenizer/decoder before accepting a request
     get(ENV,"QWEN36_OUTPUT","")=="" || write(ENV["QWEN36_OUTPUT"],UInt8[])
-    request!(E,encode(E.tk,text),1); reset!(E); phase("warmed engine"); memorystats("warmed")
+    request!(E,Int32[0],1); reset!(E); phase("warmed engine"); memorystats("warmed")
     rate=Ref{Cint}()
     AMDGPU.HIP.hipDeviceGetAttribute(rate,AMDGPU.HIP.hipDeviceAttributeWallClockRate,AMDGPU.HIP.device_id(AMDGPU.device()))
     frequency=Float64(rate[])*1000; frequency>0 || error("no GPU steady clock frequency")
@@ -1729,7 +1786,7 @@ function main(args)
     ccall((:roctxProfilerPause,"/opt/rocm/lib/librocprofiler-sdk-roctx.so"),Cint,(Cint,),0)
     pre=Float64(ticks[2]-ticks[1])/frequency
     dec=max(Float64(ticks[3]-ticks[2])/frequency,eps(Float64)); steps=max(ctl[2]-1,0)
-    m=Dict{String,Any}("prefill_tps"=>length(ids)/pre,"decode_tps"=>steps/dec,"prompt_tokens"=>length(ids),"output_tokens"=>length(out))
+    m=Dict{String,Any}("prefill_tps"=>length(ids)/pre,"decode_tps"=>steps/dec,"prompt_tokens"=>length(ids),"output_tokens"=>length(out),"token_ids"=>out)
     dest=get(ENV,"QWEN36_METRICS",""); isempty(dest) || open(io->TOML.print(io,m),dest,"w")
     memorystats("completed"); close_host!(E); profile_finish(); merge!(m,accounting(PROFILE_DIR[]))
     open(io->TOML.print(io,m),joinpath(PROFILE_DIR[],"accounting.toml"),"w")
