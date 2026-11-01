@@ -1077,7 +1077,7 @@ function load_layer(g::GGUF, l, d)
     q = DMat(g, p * "attn_q.weight", [(3072d, 3072)], all20)
     k = DMat(g, p * "attn_k.weight", [(256d, 256)], all20); v = DMat(g, p * "attn_v.weight", [(256d, 256)], all20)
     out = DMat(g, p * "attn_output.weight", [(0, NE)], [(6d, 6)])
-    DLayer(false, an, pn, gate, up, down, q, k, v, nothing, out, dev(f32(g, p * "attn_q_norm.weight")), dev(f32(g, p * "attn_k_norm.weight")), ROCArray(NOV), ROCArray(NOV))
+    DLayer(false, an, pn, gate, up, down, q, k, v, nothing, out, dev(f32(g, p * "attn_q_norm.weight")), dev(f32(g, p * "attn_k_norm.weight")), dev(NOV), dev(NOV))
 end
 struct Die
     dev::HIPDevice; d::Int
