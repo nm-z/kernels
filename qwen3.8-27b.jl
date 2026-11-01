@@ -1617,6 +1617,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
     nphase = (sum(cld(length(i), npos) for (i, _) in reqs) + maximum(last, reqs) + 2) * 1100; rid = (PE.rid[] += 1)
     for i in 1:8; unsafe_store!(Ptr{UInt64}(PE.hx.c + PE.hx.out), 0, i); end   # the counters
     Libc.memset(PE.hx.p, 0, 8 * 2 * ND * DW * NE)         # the decode exchange words (their tags restart)
+    DPMLOCK[] && dpm!(dies, "high")                       # the clocks up for the request (the dies can't tell it's coming)
     accts = ROCVector{UInt64}[]; ibs = ROCVector{Int32}[]
     for d in 1:ND
         AMDGPU.device!(dies[d].dev); K = PE.K[d]
@@ -1641,6 +1642,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
         push!(res, (ins, wall - ins, wall))
         AMDGPU.unsafe_free!(accts[d]); AMDGPU.unsafe_free!(ibs[d])
     end
+    DPMLOCK[] && dpm!(dies, "auto")                       # and back down while the model waits
     ab = [(AMDGPU.device!(D.dev); Array(K.bar)[3]) for (D, K) in zip(dies, PE.K)]
     AMDGPU.device!(dies[1].dev); bh = Array(PE.K[1].bar); ACC[] = (Int(bh[17]), Int(bh[18]))
     any(!=(0), ab) && (error("persistent kernel aborted (a wait passed 10 s): $ab"))
@@ -1655,6 +1657,13 @@ if !isdefined(Main, :LASTACCT)
 end
 if !isdefined(Main, :ACCTS)
     const ACCTS = Ref([UInt64[] for _ in 1:4])            # every die's phase times of the last request
+end
+# a die's performance level (sysfs power_dpm_force_performance_level of its PCI device; writable by the wheel group
+# on sentry, a udev rule): forced high for a request's dispatch, auto between requests (300 MHz, about 26 W a die)
+dpmfile(D::Die) = (b = AMDGPU.HIP.properties(D.dev).pciBusID; "/sys/bus/pci/devices/0000:" * string(b, base = 16, pad = 2) * ":00.0/power_dpm_force_performance_level")
+dpm!(dies, lv) = foreach(D -> try write(dpmfile(D), lv) catch end, dies)
+if !isdefined(Main, :DPMLOCK)
+    const DPMLOCK = Ref(true)                              # dpm on | off
 end
 if !isdefined(Main, :SPEC)
     const SPEC = Ref(true)                                 # decode with MTP drafts (spec 0 | 1)
@@ -1758,6 +1767,8 @@ function handle(c, line)
     elseif a[1] == "kl"
         n = parse(Int, a[2]); ids = Int.(reinterpret(Int32, read(replace(a[3], ".logits.f16" => ".ids"))))
         kl(c, PK[], ids, a[3], n)
+    elseif a[1] == "dpm"                                 # dpm 0 | 1: lock the clocks high for each request
+        DPMLOCK[] = a[2] == "1"; println(c, "dpm ", DPMLOCK[])
     elseif a[1] == "spec"                                # spec 0 | 1: MTP drafting off or on
         SPEC[] = a[2] == "1"; println(c, "spec ", SPEC[])
     elseif a[1] == "reload"
