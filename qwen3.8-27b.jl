@@ -86,8 +86,18 @@ const V4U = NTuple{4,VecElement{UInt32}}
 @inline wptr(a::Core.LLVMPtr) = a
 @inline pst!(a, v, i) = unsafe_store!(wptr(a), v, i)
 @inline dld(a, i) = unsafe_load(wptr(a), i)
+# 16 weight bytes a lane, non-temporal: each weight is read once a token, and a decode forward streams about 76 MB a
+# layer through the 4 MB L2, which would otherwise evict the code, x, the partial sums and the state every phase
 @inline function ld128(W, off)
-    v = unsafe_load(reinterpret(Core.LLVMPtr{V4U,1}, wptr(W) + (off % UInt32)), 1, Val(16))
+    p = reinterpret(Core.LLVMPtr{V4U,1}, wptr(W) + (off % UInt32))
+    v = Base.llvmcall(("""
+        define <4 x i32> @ldnt(ptr addrspace(1) %p) #0 {
+            %v = load <4 x i32>, ptr addrspace(1) %p, align 16, !nontemporal !0
+            ret <4 x i32> %v
+        }
+        attributes #0 = { alwaysinline }
+        !0 = !{i32 1}
+        """, "ldnt"), V4U, Tuple{Core.LLVMPtr{V4U,1}}, p)
     (v[1].value, v[2].value, v[3].value, v[4].value)
 end
 # q, made to depend on dep (an empty asm the compiler can't see through): a word's quants are converted only after
