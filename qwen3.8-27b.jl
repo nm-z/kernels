@@ -674,34 +674,10 @@ end
     while i < P; st!(A.ssq, Int64(0), i); i += nthr(A); end
 end
 # table slots: 0..3 qkv z alpha beta (DeltaNet) | 0..2 q k v (attention); 4 out; 5, 6 gate up; 7 down
-# DeltaNet conv + silu, one thread a channel
-function conv_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
-    t0 = memtime(); 
-    c = gtid(); did = c < Int32(QKVD)
-    if did
-        _, rows, nb, _, _ = mat(A, l, Int32(0)); ns = nsx(nb, P)
-        ro = 4 * (Int64(ridx(l)) * 3 * QKVD); cw = fvec(A, l, 2); rc = Int32(-1); ring = reinterpret(LP{Float32}, Int64(0))
-        r1 = 0.0f0; r2 = 0.0f0; r3 = 0.0f0
-        w1 = ld(cw, 4c); w2 = ld(cw, 4c + 1); w3 = ld(cw, 4c + 2); w4 = ld(cw, 4c + 3)
-        for p in Int32(0):P-Int32(1)
-            r = ld(A.posr, p)
-            if r != rc                                     # the request's ring
-                rc >= Int32(0) && (st!(ring, r1, 3c); st!(ring, r2, 3c + 1); st!(ring, r3, 3c + 2))
-                ring = reinterpret(LP{Float32}, slp(A, r, 1)) + ro; rc = r
-                r1 = ld(ring, 3c); r2 = ld(ring, 3c + 1); r3 = ld(ring, 3c + 2)
-            end
-            x = psum(A, Int64(0), ns, rows, P, p, c) * rinv(A, p)
-            st!(A.u, silu(w1 * r1 + w2 * r2 + w3 * r3 + w4 * x), Int64(p) * QKVD + c)
-            r1, r2, r3 = r2, r3, x
-            if ld(A.pk, p) == Int32(1)
-                rb = reinterpret(LP{Float32}, slp(A, r, 5)) + ro; st!(rb, r1, 3c); st!(rb, r2, 3c + 1); st!(rb, r3, 3c + 2)
-            end
-        end
-        st!(ring, r1, 3c); st!(ring, r2, 3c + 1); st!(ring, r3, 3c + 2)
-    end
-    done!(A, seq, t0, did)
-end
-# the gated delta rule: a value head's 128 state rows in RSPL slices of 16, one workgroup a slice (workgroup
+# the gated delta rule, with the conv + silu of the qkv channels it reads (threads 0 .. 127: the head's query
+# channels, 128 .. 255: its key channels; the first lane of each row: the row's value channel). Every workgroup of a
+# key head computes those query and key convs (cheaper than a phase and a grid barrier of their own); the conv
+# rings are written by one workgroup a channel. A value head's 128 state rows in RSPL slices of 16, one workgroup a slice (workgroup
 # RSPL lv + q); a row's 128 columns over 16 lanes, 8 each, so a wavefront's state loads are one contiguous 2 KB run.
 # Every load a position needs is issued before its first reduction. A slice writes its rows of
 # S q / sqrt(128) ssm_norm silu(z) (all but the head's rmsnorm) into xt, their 16-sum into x16 and their raw sum of
@@ -715,6 +691,7 @@ end
 function rec_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
     qs = @ROCStaticLocalArray(Float32, DK, false); ks = @ROCStaticLocalArray(Float32, DK, false)
     red = @ROCStaticLocalArray(Float32, 2RED, false); fl = @ROCStaticLocalArray(Int32, 1, false)
+    vsh = @ROCStaticLocalArray(Float32, 16, false)
     w = wgid(); w < Int32(VHD * RSPL) || return
     t0 = memtime()
     lv = w ÷ Int32(RSPL); q = w - lv * Int32(RSPL)
@@ -723,26 +700,47 @@ function rec_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
     _, _, nbz, _, _ = mat(A, l, Int32(1)); nsz = nsx(nbz, P); oz = pof(A, l, 0, 2, P)
     _, _, nba, _, _ = mat(A, l, Int32(2)); nsa = nsx(nba, P); oa = pof(A, l, 0, 3, P); ob4 = pof(A, l, 0, 4, P)
     dtb = ld(fvec(A, l, 3), lv); ssa = ld(fvec(A, l, 4), lv); sni = ld(fvec(A, l, 5), i)
+    _, rqkv, nbq, _, _ = mat(A, l, Int32(0)); nsq = nsx(nbq, P); cw = fvec(A, l, 2); ro = 4 * (Int64(ri) * 3 * QKVD)
+    ch = t < Int32(DK) ? DK * kh + t : Int32(512) + DK * kh + (t - Int32(DK)); cv = Int32(1024) + k
+    vl = (t & Int32(15)) == Int32(0); own = lv == kh && q == Int32(0)   # (own: this workgroup writes the q/k rings)
+    w1 = ld(cw, 4ch); w2 = ld(cw, 4ch + 1); w3 = ld(cw, 4ch + 2); w4 = ld(cw, 4ch + 3)
+    v1 = ld(cw, 4cv); v2 = ld(cw, 4cv + 1); v3 = ld(cw, 4cv + 2); v4 = ld(cw, 4cv + 3)
+    a1 = 0.0f0; a2 = 0.0f0; a3 = 0.0f0; b1 = 0.0f0; b2 = 0.0f0; b3 = 0.0f0; rg = reinterpret(LP{Float32}, Int64(0))
     s = ntuple(_ -> 0.0f0, Val(8))
     isc = 1.0f0 / sqrt(Float32(DK))
     for p in Int32(0):P-Int32(1)
         r = ld(A.posr, p)
         if r != rc                                         # the request's state
-            rc >= Int32(0) && (for j in 1:8; st!(Sp, s[j], so + j - 1); end)
+            if rc >= Int32(0)
+                for j in 1:8; st!(Sp, s[j], so + j - 1); end
+                own && (st!(rg, a1, 3ch); st!(rg, a2, 3ch + 1); st!(rg, a3, 3ch + 2))
+                vl && (st!(rg, b1, 3cv); st!(rg, b2, 3cv + 1); st!(rg, b3, 3cv + 2))
+            end
+            rg = reinterpret(LP{Float32}, slp(A, r, 1)) + ro
+            a1 = ld(rg, 3ch); a2 = ld(rg, 3ch + 1); a3 = ld(rg, 3ch + 2)
+            vl && (b1 = ld(rg, 3cv); b2 = ld(rg, 3cv + 1); b3 = ld(rg, 3cv + 2))
             Sp = reinterpret(LP{Float32}, slp(A, r, 0)) + 4 * (Int64(ri) * VHD * DK * DK); rc = r
             s = let Sp = Sp; ntuple(j -> ld(Sp, so + j - 1), Val(8)) end
         end
-        ub = Int64(p) * QKVD; ri_p = rinv(A, p)
-        qv = t < Int32(DK) ? ld(A.u, ub + DK * kh + t) : 0.0f0
-        kv = t < Int32(DK) ? ld(A.u, ub + 512 + DK * kh + t) : 0.0f0
-        vv = ld(A.u, ub + 1024 + k)
+        ri_p = rinv(A, p)
+        xc = psum(A, Int64(0), nsq, rqkv, P, p, ch) * ri_p
+        cq = silu(w1 * a1 + w2 * a2 + w3 * a3 + w4 * xc); a1, a2, a3 = a2, a3, xc
+        if vl
+            xv = psum(A, Int64(0), nsq, rqkv, P, p, cv) * ri_p
+            st!(vsh, silu(v1 * b1 + v2 * b2 + v3 * b3 + v4 * xv), t >> Int32(4)); b1, b2, b3 = b2, b3, xv
+        end
+        if ld(A.pk, p) == Int32(1)                         # (a verify forward's first position: the backup ring too)
+            rb = reinterpret(LP{Float32}, slp(A, r, 5)) + ro
+            own && (st!(rb, a1, 3ch); st!(rb, a2, 3ch + 1); st!(rb, a3, 3ch + 2))
+            vl && (st!(rb, b1, 3cv); st!(rb, b2, 3cv + 1); st!(rb, b3, 3cv + 2))
+        end
+        qv = t < Int32(DK) ? cq : 0.0f0; kv = t < Int32(DK) ? 0.0f0 : cq
         xa = psum(A, oa, nsa, Int32(64), P, p, lv); xb = psum(A, ob4, nsa, Int32(64), P, p, lv)
         z = psum(A, oz, nsz, Int32(DK * VHD), P, p, k)
         nq2, nk2 = wgsum2(qv * qv, kv * kv, red)
-        if t < Int32(DK)
-            st!(qs, qv / max(sqrt(nq2), EPS), t); st!(ks, kv / max(sqrt(nk2), EPS), t)
-        end
+        t < Int32(DK) ? st!(qs, qv / max(sqrt(nq2), EPS), t) : st!(ks, kv / max(sqrt(nk2), EPS), t - Int32(DK))
         sync_workgroup()
+        vv = ld(vsh, t >> Int32(4))
         x = xa * ri_p + dtb; sp = x > 20.0f0 ? x : log1p(exp(x))
         a = exp(ssa * sp); bt = 1.0f0 / (1.0f0 + exp(-xb * ri_p))
         # S = a S + e kᵀ with e = bt (v - a S k): the decay folded into the one update
@@ -772,6 +770,8 @@ function rec_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
         end
     end
     for j in 1:8; st!(Sp, s[j], so + j - 1); end
+    own && (st!(rg, a1, 3ch); st!(rg, a2, 3ch + 1); st!(rg, a3, 3ch + 2))
+    vl && (st!(rg, b1, 3cv); st!(rg, b2, 3cv + 1); st!(rg, b3, 3cv + 2))
     # the head's last slice: 1 / rms over its 128 rows
     fence_rel(); sync_workgroup()
     if t == Int32(0)
@@ -1285,7 +1285,7 @@ end
 # ---- one forward of P positions (setpos_ph! set them): GEMMs for a prefill (isgemm), GEMVs at decode (P <= DW);
 # amax: one past the largest position; head: the head takes positions pfirst .. P - 1 (into tokens of step k).
 # A layer is a short program of steps run by one loop, so each phase is in the kernel once (compile time).
-const S_MAT, S_CONV, S_REC, S_APREP, S_ATTN, S_ACOMB, S_XWR, S_ACT, S_HMAX, S_HRED, S_XSIG, S_TOK, S_MPRE1, S_ZERO, S_MPRE2, S_DTOK = Int32.(1:16)
+const S_MAT, S_REC, S_APREP, S_ATTN, S_ACOMB, S_XWR, S_ACT, S_HMAX, S_HRED, S_XSIG, S_TOK, S_MPRE1, S_ZERO, S_MPRE2, S_DTOK = Int32.(1:15)
 # step i of layer l (64: the head): (kind, first matrix slot, matrices, zero the sums of squares first)
 @inline function lstep(l::Int32, i::Int32)
     if l == Int32(64)
@@ -1304,9 +1304,8 @@ const S_MAT, S_CONV, S_REC, S_APREP, S_ATTN, S_ACOMB, S_XWR, S_ACT, S_HMAX, S_HR
         i -= Int32(6)
     elseif isrec(l)
         i == Int32(0) && return S_MAT, Int32(0), Int32(4), false   # qkv z alpha beta
-        i == Int32(1) && return S_CONV, Int32(0), Int32(0), false
-        i == Int32(2) && return S_REC, Int32(0), Int32(0), false
-        i -= Int32(3)
+        i == Int32(1) && return S_REC, Int32(0), Int32(0), false
+        i -= Int32(2)
         @goto tail
     end
     i == Int32(0) && return S_MAT, Int32(0), Int32(3), false       # q k v
@@ -1323,7 +1322,7 @@ const S_MAT, S_CONV, S_REC, S_APREP, S_ATTN, S_ACOMB, S_XWR, S_ACT, S_HMAX, S_HR
     return S_XWR, Int32(7), Int32(0), false
 end
 @inline nsteps(l::Int32, gen::Bool, mhead::Bool) = l == Int32(64) ? (gen ? Int32(5) : Int32(2)) :
-    l == Int32(MTPL) ? (mhead ? Int32(21) : Int32(16)) : isrec(l) ? Int32(9) : Int32(10)
+    l == Int32(MTPL) ? (mhead ? Int32(21) : Int32(16)) : isrec(l) ? Int32(8) : Int32(10)
 # head: the trunk's head over positions pfirst .. P - 1; mtp: the MTP layer after it, its head (mhead) over
 # positions mpf ..; pre: a prefill forward; spec: a verify forward (pairs of positions)
 function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, xf::Int32, head::Bool, pfirst::Int32, mtp::Bool, mhead::Bool, mpf::Int32, pre::Bool, T)
@@ -1338,8 +1337,6 @@ function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, xf::Int32, he
         pf = l == Int32(MTPL) ? mpf : pfirst; nq = P - pf
         if kind == S_MAT
             mat_ph!(A, hd ? Int32(64) : l, j0, nm, seq, P, T, zs, hd ? pf : Int32(0)); seq += Int32(1)
-        elseif kind == S_CONV
-            conv_ph!(A, l, seq, P); seq += Int32(1)
         elseif kind == S_REC
             rec_ph!(A, l, seq, P); seq += Int32(1)
         elseif kind == S_APREP
