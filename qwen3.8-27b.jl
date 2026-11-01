@@ -594,13 +594,14 @@ function allreduce_add!(E::Engine, n; set = false)
         set || @roc groupsize = 256 gridsize = cld(n, 256) k_add!(D.x, D.tb, Int32(n))
     end
 end
-function forward!(E::Engine, st::Vector{DState}, toks::Vector{Int}, pos0::Int; logits = true)
+function forward!(E::Engine, st::Vector{DState}, toks::Vector{Int}, pos0::Int; logits = true, chk = nothing)
     P = length(toks); n = NE * P
     for D in E.dies
         AMDGPU.device!(D.dev); copyto!(D.tok, 1, Int32.(toks), 1, P)
         @roc groupsize = 256 gridsize = (20, P) k_embed!(D.y, D.emb.W, D.tok, Int32(VPD * D.d), Int32(VPD))
     end
     allreduce_add!(E, n; set = true)
+    chk === nothing || chk(-1, :embed)
     for l in 0:NL-1
         for (D, S) in zip(E.dies, st)
             AMDGPU.device!(D.dev); W = D.L[l+1]
@@ -620,6 +621,7 @@ function forward!(E::Engine, st::Vector{DState}, toks::Vector{Int}, pos0::Int; l
             gemv!(D.y, D.gb, W.out, D.o, P)
         end
         allreduce_add!(E, n)
+        chk === nothing || chk(l, :mixer)
         for D in E.dies
             AMDGPU.device!(D.dev); W = D.L[l+1]
             @roc groupsize = 256 gridsize = P k_rms!(D.h, D.x, W.pn, Int32(NE))
@@ -628,6 +630,7 @@ function forward!(E::Engine, st::Vector{DState}, toks::Vector{Int}, pos0::Int; l
             gemv!(D.y, D.gb, W.down, D.b1, P)
         end
         allreduce_add!(E, n)
+        chk === nothing || chk(l, :ffn)
     end
     logits || return nothing
     Lg = Matrix{Float32}(undef, NV, P); hb = Vector{Float32}(undef, VPD * P)
@@ -656,6 +659,28 @@ function load_engine(path; maxctx = 4096)
     onall(d -> (dies[d+1] = load_die(g, devs[d+1], d, Ls[d+1]; maxctx)))
     @printf("weights resident on %d dies (%.0f s)\n", ND, time() - t0)
     Engine(dies), g
+end
+# the first stage (layer, mixer / ffn) whose buffers hold a non-finite value, die by die: forward with a check after
+# every all-reduce
+function probe(io, E::Engine, toks::Vector{Int})
+    st = newstate(E, CH); P = length(toks); bad = Ref(false)
+    function chk(l, stage)
+        bad[] && return
+        for D in E.dies
+            AMDGPU.device!(D.dev)
+            for f in (:x, :h, :y, :b1, :b2, :b3, :b4, :u, :o, :qh, :gh)
+                v = Array(getfield(D, f))
+                if !all(isfinite, v)
+                    k = findfirst(!isfinite, v)
+                    println(io, "layer $l $stage: die $(D.d) $f[$k] = $(v[k]) (max finite $(maximum(abs, filter(isfinite, v); init = 0f0)))")
+                    bad[] = true
+                end
+            end
+        end
+        bad[] || l < 0 || l % 8 == 0 && println(io, "layer $l $stage ok, |x| max $(maximum(abs, Array(E.dies[1].x)[1:NE*P]))")
+    end
+    forward!(E, st, toks, 0; logits = false, chk)
+    bad[] || println(io, "all finite")
 end
 newstate(E::Engine, maxctx) = [(AMDGPU.device!(D.dev); DState(maxctx)) for D in E.dies]
 
