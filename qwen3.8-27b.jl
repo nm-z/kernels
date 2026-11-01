@@ -257,6 +257,13 @@ const RED = 4                                              # wavefronts a 256-th
     sync_workgroup()
     @inbounds red[1] + red[2] + red[3] + red[4]
 end
+@inline function wgsum2(a, b, red)                         # two sums at once (red: 8 shared floats)
+    sa = AMDGPU.Device.wfred(+, a); sb = AMDGPU.Device.wfred(+, b); t = Int32(workitemIdx().x) - Int32(1)
+    sync_workgroup()
+    t & Int32(63) == Int32(0) && @inbounds(begin red[(t>>6)+1] = sa; red[(t>>6)+5] = sb end)
+    sync_workgroup()
+    @inbounds (red[1] + red[2] + red[3] + red[4], red[5] + red[6] + red[7] + red[8])
+end
 @inline function wgmax(v, red)
     s = AMDGPU.Device.wfred(max, v); t = Int32(workitemIdx().x) - Int32(1)
     sync_workgroup()
@@ -278,7 +285,8 @@ end
 const LP{T} = Core.LLVMPtr{T,1}
 @inline memtime() = ccall("llvm.amdgcn.s.memrealtime", llvmcall, UInt64, ())
 @inline dcinv() = ccall("llvm.amdgcn.s.dcache.inv", llvmcall, Cvoid, ())
-@inline ssleep() = ccall("llvm.amdgcn.s.sleep", llvmcall, Cvoid, (Int32,), Int32(2))
+const SLP = 2                                              # s_sleep units (64 clocks) between a waiter's polls
+@inline ssleep() = ccall("llvm.amdgcn.s.sleep", llvmcall, Cvoid, (Int32,), Int32(SLP))
 @inline atadd(p::LP{UInt32}, v::UInt32) = Base.llvmcall("%r = atomicrmw add ptr addrspace(1) %0, i32 %1 syncscope(\"agent\") acq_rel, align 4\nret i32 %r", UInt32, Tuple{LP{UInt32},UInt32}, p, v)
 @inline ldacq(p::LP{UInt32}) = Base.llvmcall("%r = load atomic i32, ptr addrspace(1) %0 syncscope(\"agent\") acquire, align 4\nret i32 %r", UInt32, Tuple{LP{UInt32}}, p)
 @inline stmono(p::LP{UInt32}, v::UInt32) = Base.llvmcall("store atomic i32 %1, ptr addrspace(1) %0 syncscope(\"agent\") monotonic, align 4\nret void", Cvoid, Tuple{LP{UInt32},UInt32}, p, v)
@@ -330,9 +338,20 @@ const NR = 2                                               # requests at once
 const NMAT = 8                                             # matrix (and vector) slots a layer in the table
 const TABF = 65 * NMAT * 5                                 # where the f32-vector offsets start in the table
 const TOUT = Int64(270_000_000)                            # 10 s of the 27 MHz clock: a wait longer than this aborts
-@inline mat(A::KA, l, j) = (e = (Int64(l) * NMAT + j) * 5; (unsafe_load(A.tab, e + 1), Int32(unsafe_load(A.tab, e + 2)), Int32(unsafe_load(A.tab, e + 3)), Int32(unsafe_load(A.tab, e + 4)), unsafe_load(A.tab, e + 5)))
-@inline invf(A::KA, i) = reinterpret(Float64, unsafe_load(A.tab, TABF + 65NMAT + i + 1))   # rope inverse frequency i
-@inline fvec(A::KA, l, j) = reinterpret(LP{Float32}, unsafe_load(A.tab, TABF + Int64(l) * NMAT + j + 1))
+# table entry i (0-based) as an invariant load: the table is written before the kernel, so with a uniform i these are
+# scalar loads the compiler can issue together (plain loads were vector loads, each waited for before the next)
+@inline ldt(p::LP{Int64}, i::Int64) = Base.llvmcall(("""
+    define i64 @ldt(ptr addrspace(1) %p, i64 %i) #0 {
+        %q = getelementptr inbounds i64, ptr addrspace(1) %p, i64 %i
+        %v = load i64, ptr addrspace(1) %q, align 8, !invariant.load !0
+        ret i64 %v
+    }
+    attributes #0 = { alwaysinline }
+    !0 = !{}
+    """, "ldt"), Int64, Tuple{LP{Int64},Int64}, p, i)
+@inline mat(A::KA, l, j) = (e = (Int64(l) * NMAT + j) * 5; (ldt(A.tab, e), Int32(ldt(A.tab, e + 1)), Int32(ldt(A.tab, e + 2)), Int32(ldt(A.tab, e + 3)), ldt(A.tab, e + 4)))
+@inline invf(A::KA, i) = reinterpret(Float64, ldt(A.tab, Int64(TABF + 65NMAT + i)))   # rope inverse frequency i
+@inline fvec(A::KA, l, j) = reinterpret(LP{Float32}, ldt(A.tab, Int64(TABF + Int64(l) * NMAT + j)))
 @inline ld(p, i) = unsafe_load(p, i + 1)                   # 0-based
 @inline st!(p, v, i) = unsafe_store!(p, v, i + 1)
 @inline ld(a::AbstractArray, i) = @inbounds a[i+1]           # shared-memory arrays
@@ -375,9 +394,14 @@ end
     end
     o
 end
-@inline function psum(A::KA, o::Int64, ns, rows, P, p, r)  # Σ over the K slices of output row r at position p
-    s = 0.0f0; b = A.part + 4o
-    for q in Int32(0):ns-Int32(1); s += ld(b, (Int64(q) * P + p) * rows + r); end
+# Σ over the K slices of output row r at position p: the loads in groups of 8 independent ones (a plain loop waits
+# for each load before the next add)
+@inline function psum(A::KA, o::Int64, ns, rows, P, p, r)
+    s = 0.0f0; b = A.part + 4o; st = Int64(P) * rows; e = Int64(p) * rows + r
+    for q in Int32(0):Int32(16):ns-Int32(1)
+        v = let q = q; ntuple(j -> ld(b, Int64(min(q + Int32(j - 1), ns - Int32(1))) * st + e), Val(16)) end
+        for j in 1:16; s += q + Int32(j - 1) < ns ? v[j] : 0.0f0; end
+    end
     s
 end
 # the items (64 rows, one K slice) of the matrices js of layer l, over every wavefront of the die
@@ -536,62 +560,98 @@ function conv_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
     end
     done!(A, seq, t0, did)
 end
-# the gated delta rule, one workgroup a local value head (thread t: row t ÷ 2, columns 64 (t mod 2) ..); output
-# rmsnorm(S q / sqrt(128)) ssm_norm silu(z) into xt (the out-projection's x) with its 16- and 32-sums
+# the gated delta rule: a value head's 128 state rows in RSPL slices of 16, one workgroup a slice (workgroup
+# RSPL lv + q); a row's 128 columns over 16 lanes, 8 each, so a wavefront's state loads are one contiguous 2 KB run.
+# Every load a position needs is issued before its first reduction. A slice writes its rows of
+# S q / sqrt(128) ssm_norm silu(z) (all but the head's rmsnorm) into xt, their 16-sum into x16 and their raw sum of
+# squares into x16's unused groups (96 + 8 lv + q); the head's last slice to finish (a counter a head, bar words
+# 4 ..) scales the head's 128 outputs and sums by 1 / rms.
+const RSPL = 8
+@inline function xor16(v)                                  # sum over a row's 16 lanes
+    v += AMDGPU.Device.shfl_xor(v, Cint(1)); v += AMDGPU.Device.shfl_xor(v, Cint(2))
+    v += AMDGPU.Device.shfl_xor(v, Cint(4)); v + AMDGPU.Device.shfl_xor(v, Cint(8))
+end
 function rec_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
     qs = @ROCStaticLocalArray(Float32, DK, false); ks = @ROCStaticLocalArray(Float32, DK, false)
-    ob = @ROCStaticLocalArray(Float32, DK, false); red = @ROCStaticLocalArray(Float32, RED, false)
-    lv = wgid(); lv < Int32(VHD) || return
+    red = @ROCStaticLocalArray(Float32, 2RED, false); fl = @ROCStaticLocalArray(Int32, 1, false)
+    w = wgid(); w < Int32(VHD * RSPL) || return
     t0 = memtime()
-    kh = lv & Int32(3); t = tid(); i = t >> Int32(1); jh = t & Int32(1)
-    ri = ridx(l); so = (Int64(lv) * DK + i) * DK + 64jh; rc = Int32(-1); Sp = reinterpret(LP{Float32}, Int64(0))
+    lv = w ÷ Int32(RSPL); q = w - lv * Int32(RSPL)
+    kh = lv & Int32(3); t = tid(); i = Int32(16) * q + (t >> Int32(4)); c0 = (t & Int32(15)) * Int32(8); k = DK * lv + i
+    ri = ridx(l); so = (Int64(lv) * DK + i) * DK + c0; rc = Int32(-1); Sp = reinterpret(LP{Float32}, Int64(0))
     _, _, nbz, _, _ = mat(A, l, Int32(1)); nsz = nsx(nbz, P); oz = pof(A, l, 0, 2, P)
     _, _, nba, _, _ = mat(A, l, Int32(2)); nsa = nsx(nba, P); oa = pof(A, l, 0, 3, P); ob4 = pof(A, l, 0, 4, P)
-    dtb = fvec(A, l, 3); ssa = fvec(A, l, 4); sn = fvec(A, l, 5)
-    s = ntuple(_ -> 0.0f0, Val(64))
+    dtb = ld(fvec(A, l, 3), lv); ssa = ld(fvec(A, l, 4), lv); sni = ld(fvec(A, l, 5), i)
+    s = ntuple(_ -> 0.0f0, Val(8))
     isc = 1.0f0 / sqrt(Float32(DK))
     for p in Int32(0):P-Int32(1)
         r = ld(A.posr, p)
         if r != rc                                         # the request's state
-            rc >= Int32(0) && (for j in 1:64; st!(Sp, s[j], so + j - 1); end)
+            rc >= Int32(0) && (for j in 1:8; st!(Sp, s[j], so + j - 1); end)
             Sp = reinterpret(LP{Float32}, slp(A, r, 0)) + 4 * (Int64(ri) * VHD * DK * DK); rc = r
-            s = let Sp = Sp; ntuple(j -> ld(Sp, so + j - 1), Val(64)) end
+            s = let Sp = Sp; ntuple(j -> ld(Sp, so + j - 1), Val(8)) end
         end
-        ub = Int64(p) * QKVD
+        ub = Int64(p) * QKVD; ri_p = rinv(A, p)
         qv = t < Int32(DK) ? ld(A.u, ub + DK * kh + t) : 0.0f0
         kv = t < Int32(DK) ? ld(A.u, ub + 512 + DK * kh + t) : 0.0f0
-        nq = sqrt(wgsum(qv * qv, red)); nk = sqrt(wgsum(kv * kv, red))
+        vv = ld(A.u, ub + 1024 + k)
+        xa = psum(A, oa, nsa, Int32(64), P, p, lv); xb = psum(A, ob4, nsa, Int32(64), P, p, lv)
+        z = psum(A, oz, nsz, Int32(DK * VHD), P, p, k)
+        nq2, nk2 = wgsum2(qv * qv, kv * kv, red)
         if t < Int32(DK)
-            st!(qs, qv / max(nq, EPS), t); st!(ks, kv / max(nk, EPS), t)
+            st!(qs, qv / max(sqrt(nq2), EPS), t); st!(ks, kv / max(sqrt(nk2), EPS), t)
         end
         sync_workgroup()
-        x = psum(A, oa, nsa, Int32(64), P, p, lv) * rinv(A, p) + ld(dtb, lv); sp = x > 20.0f0 ? x : log1p(exp(x))
-        a = exp(ld(ssa, lv) * sp); bt = 1.0f0 / (1.0f0 + exp(-psum(A, ob4, nsa, Int32(64), P, p, lv) * rinv(A, p)))
-        # S = a S + e kᵀ with e = bt (v - a S k): the decay folded into the one update (one copy of S live)
+        x = xa * ri_p + dtb; sp = x > 20.0f0 ? x : log1p(exp(x))
+        a = exp(ssa * sp); bt = 1.0f0 / (1.0f0 + exp(-xb * ri_p))
+        # S = a S + e kᵀ with e = bt (v - a S k): the decay folded into the one update
+        kk = ntuple(j -> ld(ks, c0 + Int32(j - 1)), Val(8))
         e = 0.0f0
-        for j in 1:64; e = fma(s[j], ld(ks, Int32(64) * jh + Int32(j - 1)), e); end
-        e += AMDGPU.Device.shfl_xor(e, Cint(1))
-        e = bt * (ld(A.u, ub + 1024 + DK * lv + i) - a * e)
-        kb = opv(Int32(64) * jh)                           # (opaque: k is read again from shared memory, not kept in 64 registers)
-        s = let s = s, e = e, a = a, kb = kb; ntuple(j -> fma(e, ld(ks, kb + Int32(j - 1)), a * s[j]), Val(64)) end
+        for j in 1:8; e = fma(s[j], kk[j], e); end
+        e = bt * (vv - a * xor16(e))
+        s = let s = s, e = e, a = a, kk = kk; ntuple(j -> fma(e, kk[j], a * s[j]), Val(8)) end
         o = 0.0f0
-        for j in 1:64; o = fma(s[j], ld(qs, kb + Int32(j - 1)), o); end
-        o = (o + AMDGPU.Device.shfl_xor(o, Cint(1))) * isc
-        r = 1.0f0 / sqrt(wgsum(jh == Int32(0) ? o * o : 0.0f0, red) / Float32(DK) + EPS)
-        if jh == Int32(0)
-            z = psum(A, oz, nsz, Int32(DK * VHD), P, p, DK * lv + i) * rinv(A, p)
-            v = o * r * ld(sn, i) * silu(z); k = DK * lv + i
-            st!(A.xt, v, Int64(k) * P + p); st!(ob, v, i)
-        end
+        for j in 1:8; o = fma(s[j], ld(qs, c0 + Int32(j - 1)), o); end
+        o = xor16(o) * isc; g = o * sni * silu(z * ri_p)
+        (t & Int32(15)) == Int32(0) && st!(A.xt, g, Int64(k) * P + p)
+        # the slice's 16 rows: their sum (x16) and raw sum of squares; lanes 0, 16, 32, 48 hold a row each
+        so2 = o * o; sg = g
+        so2 += AMDGPU.Device.shfl_xor(so2, Cint(16)); so2 += AMDGPU.Device.shfl_xor(so2, Cint(32))
+        sg += AMDGPU.Device.shfl_xor(sg, Cint(16)); sg += AMDGPU.Device.shfl_xor(sg, Cint(32))
         sync_workgroup()
-        if t < Int32(4)
-            a2 = 0.0f0; b2 = 0.0f0
-            for e2 in Int32(0):Int32(15); a2 += ld(ob, Int32(32) * t + e2); b2 += ld(ob, Int32(32) * t + Int32(16) + e2); end
-            st!(A.x32, a2 + b2, Int64(4lv + t) * P + p); st!(A.x16, a2, Int64(8lv + 2t) * P + p); st!(A.x16, b2, Int64(8lv + 2t + 1) * P + p)
-        end
+        (t & Int32(63)) == Int32(0) && (st!(red, so2, t >> Int32(6)); st!(red, sg, Int32(4) + (t >> Int32(6))))
         sync_workgroup()
+        if t == Int32(0)
+            st!(A.x16, ld(red, 4) + ld(red, 5) + ld(red, 6) + ld(red, 7), Int64(8lv + q) * P + p)
+            st!(A.x16, ld(red, 0) + ld(red, 1) + ld(red, 2) + ld(red, 3), Int64(96 + 8lv + q) * P + p)
+        end
     end
-    for j in 1:64; st!(Sp, s[j], so + j - 1); end
+    for j in 1:8; st!(Sp, s[j], so + j - 1); end
+    # the head's last slice: 1 / rms over its 128 rows
+    fence_rel(); sync_workgroup()
+    if t == Int32(0)
+        c = A.bar + 16 + 4Int64(lv)
+        last = atadd(c, UInt32(1)) == UInt32(RSPL - 1)
+        last && stmono(c, UInt32(0))
+        st!(fl, last ? Int32(1) : Int32(0), 0)
+    end
+    sync_workgroup()
+    if ld(fl, 0) == Int32(1)
+        fence_acq()
+        rr(p) = (s2 = 0.0f0; for j in Int32(0):Int32(RSPL - 1); s2 += ld(A.x16, Int64(96 + 8lv + j) * P + p); end; 1.0f0 / sqrt(s2 / Float32(DK) + EPS))
+        j = t
+        while j < P * Int32(DK)
+            p = j >> Int32(7); kj = Int64(DK * lv + (j & Int32(127))) * P + p
+            st!(A.xt, ld(A.xt, kj) * rr(p), kj); j += Int32(256)
+        end
+        j = t
+        while j < P * Int32(4)
+            p = j >> Int32(2); m = j & Int32(3); f = rr(p)
+            g0 = Int64(8lv + 2m) * P + p; g1 = Int64(8lv + 2m + 1) * P + p
+            a0 = ld(A.x16, g0) * f; a1 = ld(A.x16, g1) * f
+            st!(A.x16, a0, g0); st!(A.x16, a1, g1); st!(A.x32, a0 + a1, Int64(4lv + m) * P + p); j += Int32(256)
+        end
+    end
     done!(A, seq, t0, true)
 end
 # ---- TurboQuant KV, 3.5 bits a coordinate: a key or value vector is rotated (random signs, then the orthonormal
@@ -1195,7 +1255,7 @@ function KDie(D::Die, npos)
     AMDGPU.device!(D.dev); z(n) = AMDGPU.zeros(Float32, n); zi(n) = AMDGPU.zeros(Int32, n)
     KDie(ktable(D), z(NE * npos), z(NE * npos), z(NE ÷ 16 * npos), z(NE ÷ 32 * npos), z(max(VPD * 10, 2 * 4352 * npos, VPD * NSCORE)),
         z(2 * NWG * NR), z(QKVD * npos), z(1536 * npos), z(1536 * npos), z(6 * (HD + 2) * max(npos, NWG)),
-        zi(npos), AMDGPU.zeros(UInt32, 4), AMDGPU.zeros(Int64, npos), zi(npos), zi(npos), zi(NR), AMDGPU.zeros(Int64, 4NR), zi(4NR))
+        zi(npos), AMDGPU.zeros(UInt32, 64), AMDGPU.zeros(Int64, npos), zi(npos), zi(npos), zi(NR), AMDGPU.zeros(Int64, 4NR), zi(4NR))
 end
 # page-locked host memory every die maps: the exchange words (2 slots x dies x npos x NE), the argmax exchange
 # (2 slots x dies x NR), the counters, the generated tokens
@@ -1226,8 +1286,14 @@ function clockhz(D::Die)
         t0 = time_ns(); @roc k_spin!(o, UInt64(n)); AMDGPU.synchronize()
         (time_ns() - t0) / 1e9, Array(o)[1]
     end
-    t1, n1 = t(2_000_000); t2, n2 = t(20_000_000)
-    (n2 - n1) / (t2 - t1)
+    # the median of 5 (one pair read 59 MHz on a loaded host)
+    function rate()
+        t1, n1 = t(2_000_000); t2, n2 = t(20_000_000)
+        (n2 - n1) / (t2 - t1)
+    end
+    hz = sort([rate() for _ in 1:5])[3]
+    20e6 < hz < 35e6 || @warn "memtime rate $(hz / 1e6) MHz, outside 20..35"
+    hz
 end
 # npos: the positions a prefill forward takes, the most that fit (host exchange memory is the tighter bound here)
 function PEngine(dies; maxgen = 8192, npos = 4096)
@@ -1237,7 +1303,7 @@ function PEngine(dies; maxgen = 8192, npos = 4096)
     k = @roc launch = false maxthreads = 256 waves_per_eu = KWPE[] k_req!(A)
     nb = Ref{Cint}(0); AMDGPU.HIP.hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(nb, k.fun, 256, 0)
     nwg = Int(nb[]) * 56
-    0 < nwg <= NWG || error("persistent kernel: $(nb[]) workgroups a CU")
+    VHD * RSPL <= nwg <= NWG || error("persistent kernel: $(nb[]) workgroups a CU")
     PEngine(dies, K, hx, nwg, npos, maxgen, Ref(0), clockhz(dies[1]))
 end
 function kargs(K, hx::HostX, d, maxctx, acct, inp, nreq, mode, nwg, lg, npos, rid)
@@ -1268,7 +1334,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
     for d in 1:ND
         AMDGPU.device!(dies[d].dev); K = PE.K[d]
         a = AMDGPU.zeros(UInt64, 3 + 2nphase); ah = zeros(UInt64, 3 + 2nphase); ah[1] = typemax(UInt64); ah[4:2:end] .= typemax(UInt64); up!(a, ah); push!(accts, a)
-        up!(K.bar, UInt32[0, 0, 0, NLRUN[]]); up!(K.rq, rq)
+        up!(K.bar, [UInt32[0, 0, 0, NLRUN[]]; zeros(UInt32, 28)]); up!(K.rq, rq)
         for r in 1:nr; fill!(sts[r][d].S, 0.0f0); fill!(sts[r][d].ring, 0.0f0); end   # a request starts from zero state
         up!(K.sl, Int64[addr(getfield(sts[r][d], f)) for r in 1:nr for f in (:S, :ring, :kc, :vc)])
         ib = dev(inp); push!(ibs, ib)
