@@ -14,6 +14,8 @@
 # The converter preserves GSQ assignments; BF16->FP16 block scales incur the errors in its model card.
 # Weights are allocated once; one cooperative persistent dispatch executes a request.
 # The BF16 input embedding stays registered in host memory, with direct GPU reads.
+# Draft matrices are cached in four bits to fit alongside the resident target.
+# Draft approximation affects acceptance only; target verification decides every token.
 using Mmap, Printf, Downloads, SHA, TOML, Libdl
 # Register the SDK before HIP initializes. Wrapping its documented configure/init
 # callbacks retains the client finalizer, so traces are flushed while HIP is alive
@@ -101,7 +103,8 @@ const SOURCE_DIGEST=let source=read(@__FILE__,String)
     bytes2hex(sha256(clip(r"(?m)^# Device primitives",r"(?m)^struct DMat")*
                     clip(r"(?m)^function k_norm!",r"(?m)^# Tokenizer follows")*
                     clip(r"(?m)^struct PMat",r"(?m)^mutable struct Engine")*
-                    clip(r"(?m)^function request_kernel",r"(?m)^function request!")*
+                    clip(r"(?m)^function buffers",r"(?m)^const DRAFT_FILE")*
+                    match(r"opt_level=\d+",source).match*
                     match(r"(?m)^bf32\(.*$",source).match))
 end
 
@@ -209,6 +212,10 @@ end
         o = row * (K ÷ Int32(32) * Int32(34)) + (k ÷ Int32(32)) * Int32(34)
         q = @inbounds W[o+Int32(3)+(k&Int32(31))]
         return half(W, o) * Float32(reinterpret(Int8, q))
+    elseif T == 144
+        o=row*(K÷Int32(32)*Int32(18))+(k÷Int32(32))*Int32(18)
+        q=@inbounds W[o+Int32(3)+((k&Int32(31))>>Int32(1))]
+        return half(W,o)*Float32(Int32((q>>(Int32(4)*(k&Int32(1))))&0x0f)-Int32(8))
     elseif T == 30
         return bf32(u16(W, Int32(2)*(row*K+k)))
     elseif T == 1
@@ -246,8 +253,15 @@ function free_upload!()
         AMDGPU.HIP.hipHostFree(UPLOAD_PTR[]); UPLOAD_PTR[]=C_NULL
     end
 end
-function DMat(g, name)
+draft_quantized(name,t)=t.typ==8 && !(name in ("selector_predecessor.weight","selector_successor.weight"))
+function DMat(g, name;draft=false)
     t = g.tensors[name]
+    if draft && draft_quantized(name,t)
+        packed=Mmap.mmap(packdraft(g,name)); W=ROCArray{UInt8}(undef,length(packed))
+        GC.@preserve packed upload!(W,pointer(packed),length(packed))
+        releasepages(packed,0,length(packed))
+        return DMat(W,144,t.dims[1],prod(t.dims[2:end]))
+    end
     if t.typ==42
         # The source repeats each group-of-128 scale in two 64-value blocks.
         # Remove the identical copy, preserving every weight bit and scale bit.
@@ -300,6 +314,32 @@ function prepare(g)
     for (name,t) in sort!(collect(g.tensors);by=x->last(x).off)
         t.typ==42 && packedweight(g,name)
     end
+end
+function packdraft(g,name)
+    t=g.tensors[name]; nb=t.nbytes÷34
+    p=joinpath(homedir(),".cache","qwen36","draft-"*g.identity,name*".q4")
+    isfile(p) && filesize(p)==18nb && return p
+    mkpath(dirname(p)); tmp=p*".part"
+    open(tmp,"w+") do io
+        truncate(io,18nb); packed=Mmap.mmap(io,Vector{UInt8},(18nb,))
+        GC.@preserve g packed begin
+            src=pointer(g.map)+t.off; dst=pointer(packed)
+            for b in 0:nb-1
+                a=src+34b; d=dst+18b; mx=Int32(0)
+                for j in 0:31; mx=max(mx,abs(Int32(unsafe_load(Ptr{Int8}(a+2+j))))); end
+                old=Float32(unsafe_load(Ptr{Float16}(a)))
+                scale=Float16(old*Float32(mx)/7.0f0); unsafe_store!(Ptr{Float16}(d),scale)
+                factor=scale==0 ? 0.0f0 : old/Float32(scale)
+                for j in 0:15
+                    lo=clamp(round(Int32,Float32(unsafe_load(Ptr{Int8}(a+2+2j)))*factor),-8,7)+8
+                    hi=clamp(round(Int32,Float32(unsafe_load(Ptr{Int8}(a+3+2j)))*factor),-8,7)+8
+                    unsafe_store!(d+2+j,UInt8(lo|(hi<<4)))
+                end
+            end
+        end
+        Mmap.sync!(packed); releasepages(packed,0,length(packed)); releasepages(g,t)
+    end
+    mv(tmp,p;force=true); phase("packed draft $name"); p
 end
 function k_norm!(y, x, w, n::Int32, eps::Float32)
     ti = tid0(); s = @ROCStaticLocalArray(Float32, 256)
@@ -823,15 +863,15 @@ pbuf(a)=PBuf{eltype(a),length(a)}(UInt(pointer(a)))
 @inline av(::Type{T},p::UInt64,n::Integer) where T =
     AMDGPU.ROCDeviceArray{T,1,1}((Int(n),),Core.LLVMPtr{T,1}(p))
 @inline fv(p::UInt64,n::Integer=16384)=av(Float32,p,n)
-# gfx1101, code-object ABI 500: the cooperative launch's synchronization
-# object has its generation counter at byte 32 and resident group count at 40.
-# Use the ROCm generation protocol with active acquire polling; sleeping every
-# poll adds a scheduler delay at each of the transformer's grid barriers.
+# A resident cooperative grid uses one block per WGP. Launch checks occupancy
+# before submitting it. The device-owned generation counter avoids HIP's separate
+# cooperative queue, which ROCm 7.2's counter interceptor destroys twice at exit.
 @inline function p_sync()
     Base.llvmcall(("""
+    @qwen36_grid_barrier = linkonce_odr addrspace(1) global i32 0, align 4
     declare void @llvm.amdgcn.s.barrier()
     declare i32 @llvm.amdgcn.workitem.id.x()
-    declare ptr addrspace(4) @llvm.amdgcn.implicitarg.ptr()
+    declare i64 @__ockl_get_num_groups(i32)
     define void @entry() alwaysinline convergent {
     start:
       fence syncscope("workgroup") release
@@ -842,13 +882,9 @@ pbuf(a)=PBuf{eltype(a),length(a)}(UInt(pointer(a)))
     arrive:
       fence syncscope("workgroup") acquire
       fence syncscope("agent") release
-      %args = call ptr addrspace(4) @llvm.amdgcn.implicitarg.ptr()
-      %slot = getelementptr i8, ptr addrspace(4) %args, i64 88
-      %address = load i64, ptr addrspace(4) %slot, align 8
-      %sync = inttoptr i64 %address to ptr addrspace(1)
-      %counter = getelementptr i8, ptr addrspace(1) %sync, i64 32
-      %groupsptr = getelementptr i8, ptr addrspace(1) %sync, i64 40
-      %groups = load i32, ptr addrspace(1) %groupsptr, align 8
+      %counter = getelementptr i8, ptr addrspace(1) @qwen36_grid_barrier, i64 0
+      %ng = call i64 @__ockl_get_num_groups(i32 0)
+      %groups = trunc i64 %ng to i32
       %old = atomicrmw add ptr addrspace(1) %counter, i32 1 syncscope("agent-one-as") monotonic, align 4
       %arrivals = and i32 %old, 65535
       %lastindex = add i32 %groups, -1
@@ -929,6 +965,7 @@ end
 end
 @inline function p_mul!(y,m,x,ids,n::Int32,P::Val,mode::Int32=Int32(0))
     if m.typ==142; p_mul_t!(y,m,x,ids,mode,n,P,Val(142))
+    elseif m.typ==144; p_mul_t!(y,m,x,ids,mode,n,P,Val(144))
     elseif m.typ==8; p_mul_t!(y,m,x,ids,mode,n,P,Val(8))
     elseif m.typ==30; p_mul_t!(y,m,x,ids,mode,n,P,Val(30))
     else; p_mul_t!(y,m,x,ids,mode,n,P,Val(0))
@@ -1362,12 +1399,13 @@ const DRAFT_URL="https://huggingface.co/aminya/Qwen3.6-35B-A3B-DFlash2-GGUF/reso
 const MTP_URL="https://huggingface.co/tomngdev/MTP-Qwen3.6-35B-A3B-GGUF/resolve/180800540ccfee763ff15f4150dfa446237d203b/mtp-Q8_0.gguf"
 function Engine(g,ctx;compileonly=false,mode=0,draftpath=joinpath(dirname(DEFAULT_MODEL),"draft",mode==2 ? DRAFT_FILE : "mtp-Q8_0.gguf"))
     AMDGPU.functional() || error("AMDGPU is not functional")
-    c=Config(g); tk=Tok(g); keep=Any[]; states=Any[]
+    c=Config(g); tk=Tok(g); keep=Any[]; states=Any[]; target=g
     retain(v)=(push!(keep,v);v)
     function mat(g,n)
         t=g.tensors[n]
-        m=compileonly ? DMat(AMDGPU.zeros(UInt8,1),t.typ==42 ? 142 : t.typ,t.dims[1],prod(t.dims[2:end])) : DMat(g,n)
-        m.typ in (0,8,30,142) || error("$n: unexpected matrix type $(m.typ)")
+        typ=t.typ==42 ? 142 : g!==target && draft_quantized(n,t) ? 144 : t.typ
+        m=compileonly ? DMat(AMDGPU.zeros(UInt8,1),typ,t.dims[1],prod(t.dims[2:end])) : DMat(g,n;draft=g!==target)
+        m.typ in (0,8,30,142,144) || error("$n: unexpected matrix type $(m.typ)")
         retain(m); PMat(m)
     end
     vec(g,n)=UInt(pointer(retain(compileonly ? z(1) : ROCArray(tensor_f32(g,n)))))
@@ -1459,7 +1497,12 @@ function request_kernel(E,np,nt;compile=false)
         E.kernel=AMDGPU.Runtime.HIPKernel{typeof(k_request!),tt}(k_request!,fun)
         phase("compiled request")
     end
-    compile || E.kernel(args...;groupsize=256,gridsize=E.groups,cooperative=true)
+    if !compile
+        resident=Ref{Cint}()
+        AMDGPU.HIP.hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(resident,E.kernel.fun,256,0)
+        resident[]>=1 || error("the cooperative grid cannot be resident")
+        E.kernel(args...;groupsize=256,gridsize=E.groups)
+    end
     E.kernel
 end
 function request!(E,ids,nt)
@@ -1594,7 +1637,16 @@ function main(args)
         end
         return
     end
-    "--prepare" in flags && return prepare(gguf(path))
+    if "--prepare" in flags
+        prepare(gguf(path))
+        if mode!=0
+            dg=gguf(draftpath)
+            for (name,t) in sort!(collect(dg.tensors);by=x->last(x).off)
+                draft_quantized(name,t) && (mode==2 || startswith(name,"blk.40.")) && packdraft(dg,name)
+            end
+        end
+        return
+    end
     isfile(path) || error("missing model; run with --download")
     isfile(path*".aria2") && error("model download is still running")
     nt=parse(Int,get(opts,"--tokens","32")); ctx=parse(Int,get(opts,"--ctx","2048"))

@@ -1089,9 +1089,9 @@ struct DState
 end
 DState(maxctx) = DState(AMDGPU.zeros(Float32, 48 * VHD * DK * DK), AMDGPU.zeros(Float32, 48 * QKVD * 3),
     AMDGPU.zeros(UInt8, 16 * maxctx * KVROW), AMDGPU.zeros(UInt8, 16 * maxctx * KVROW), maxctx)
-function load_die(g::GGUF, dev, d, L)
-    AMDGPU.device!(dev)
-    Die(dev, d, L, DMat(g, "token_embd.weight", VPD * d, VPD), DMat(g, "output.weight", VPD * d, VPD), dev(f32(g, "output_norm.weight")))
+function load_die(g::GGUF, hd, d, L)
+    AMDGPU.device!(hd)
+    Die(hd, d, L, DMat(g, "token_embd.weight", VPD * d, VPD), DMat(g, "output.weight", VPD * d, VPD), dev(f32(g, "output_norm.weight")))
 end
 # the layers are read in file order, each one for all four dies at once (one pass over the file: the GGUF is on a
 # spinning disk and sentry's RAM can't cache all of it)
