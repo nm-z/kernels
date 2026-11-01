@@ -685,7 +685,7 @@ function hmax_ph!(A::KA, pos0::Int32, seq::Int32, P::Int32, pfirst::Int32)
     for p in pfirst:P-Int32(1)
         v = -Inf32; ix = Int32(0); r = gtid()
         while r < Int32(VPD)
-            lg = psum(A, Int64(0), ns, rows, P, p, r) * rinv(A, p)
+            lg = psum(A, Int64(0), ns, rows, P - pfirst, p - pfirst, r) * rinv(A, p)
             A.mode == Int32(1) && st!(A.lg, lg, Int64(pos0 + p) * VPD + r)
             lg > v && (v = lg; ix = r); did = true; r += nthr(A)
         end
@@ -774,7 +774,7 @@ end
 # one workgroup: rows 64 G .. 64 G + 63 times positions p0 .. p0 + 63 (< P) over all of K, into part[p rows + r].
 # 32 columns at a time: the rows dequantized into Ws[k][row], x into Xs[k][p]; thread t computes rows
 # 4 (t >> 4) .. + 3 by positions 4 (t & 15) .. + 3
-@noinline function gemm_tile!(part::LP{Float32}, W::LP{UInt8}, D::LP{UInt16}, typ::Int32, nb::Int32, rows::Int32, G::Int32, p0::Int32, P::Int32, xt::LP{Float32}, Ws, Xs)
+@noinline function gemm_tile!(part::LP{Float32}, W::LP{UInt8}, D::LP{UInt16}, typ::Int32, nb::Int32, rows::Int32, G::Int32, p0::Int32, P::Int32, pf::Int32, xt::LP{Float32}, Ws, Xs)
     t = tid(); ar = t >> Int32(4); bq = t & Int32(15); lr = t >> Int32(2); q = t & Int32(3); kk = t >> Int32(3); pb = (t & Int32(7)) * Int32(8)
     acc = ntuple(_ -> 0.0f0, Val(16))
     for b in Int32(0):nb-Int32(1), s in Int32(0):Int32(7)
@@ -793,7 +793,7 @@ end
     end
     for r in 0:3, c in 0:3
         p = p0 + Int32(4) * bq + Int32(c)
-        p < P && st!(part, acc[4r+c+1], Int64(p) * rows + Int32(64) * G + Int32(4) * ar + Int32(r))
+        p < P && st!(part, acc[4r+c+1], Int64(p - pf) * rows + Int32(64) * G + Int32(4) * ar + Int32(r))
     end
 end
 # the (64 rows, 64 positions) tiles of the matrices js of layer l, positions pf .. P - 1, over the workgroups
@@ -805,10 +805,10 @@ function gemm_ph!(A::KA, l::Int32, js::NTuple{N,Int32}, seq::Int32, P::Int32, Ws
         g = w + max(Int32(0), cld(base - w, A.nwg)) * A.nwg
         while g < base + n
             i = g - base; G = i ÷ npt; pt = i - G * npt
-            gemm_tile!(A.part + 4o, reinterpret(LP{UInt8}, woff), reinterpret(LP{UInt16}, doff), typ, nb, rows, G, pf + Int32(64) * pt, P, A.xt, Ws, Xs)
+            gemm_tile!(A.part + 4o, reinterpret(LP{UInt8}, woff), reinterpret(LP{UInt16}, doff), typ, nb, rows, G, pf + Int32(64) * pt, P, pf, A.xt, Ws, Xs)
             did = true; g += A.nwg
         end
-        base += n; o += Int64(P) * rows
+        base += n; o += Int64(P - pf) * rows                # positions pf .. P - 1 are stored from 0
     end
     done!(A, seq, t0, did)
 end
@@ -1057,6 +1057,7 @@ end
 # wall) seconds, and the prefill and decode seconds (die 0's clock).
 function request!(PE::PEngine, st::Vector{DState}, inp::Vector{Int}, ngen::Int, mode::Int; lgs = nothing)
     dies = PE.dies; npos = mode == 1 ? min(PE.npos, NSCORE) : PE.npos
+    length(inp) + ngen <= minimum(s.maxctx for s in st) <= PE.maxctx || error("request of $(length(inp) + ngen) positions: the state holds $(minimum(s.maxctx for s in st)), the kernel buffers $(PE.maxctx)")
     nphase = (cld(length(inp), npos) + ngen + 2) * 1100; rid = (PE.rid[] += 1)
     unsafe_store!(Ptr{UInt64}(PE.hx.p + PE.hx.out), 0, 1); unsafe_store!(Ptr{UInt64}(PE.hx.p + PE.hx.out), 0, 2)   # the counters
     accts = ROCVector{UInt64}[]
