@@ -174,12 +174,8 @@ function account(f, E::Engine)
     TR[] = nothing
     r, res
 end
-function print_account(io, res)
-    W = sum(r[4] for r in res); I = sum(r[1] for r in res); X = sum(r[2] for r in res); Z = sum(r[3] for r in res)
-    @printf(io, "idle time %.1f%% (instruction %.1f%%, transfer %.1f%%) over %d dies, %.3f s a die\n", 100Z / W, 100I / W, 100X / W, length(res), W / length(res))
-    for (d, r) in enumerate(res)
-        @printf(io, "  die %d: instruction %.1f%%, transfer %.1f%%, idle %.1f%%\n", d - 1, 100r[1] / r[4], 100r[2] / r[4], 100r[3] / r[4])
-    end
+function print_account(io, res)                           # idle share of the request, all dies
+    @printf(io, "idle time %.1f%%\n", 100sum(r[3] for r in res) / sum(r[4] for r in res))
 end
 const KS = 512
 const NCH = Dict(GQ5_K => 11, GQ6_K => 13)                 # 16-byte chunks a block
