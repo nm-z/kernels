@@ -255,7 +255,8 @@ const EPS, THETA = 1.0f-6, 1.0e7
 const ND, VPD = 4, 62080                                   # dies, vocabulary rows a die
 const QKVD, VHD = 2560, 12                                 # DeltaNet qkv channels and value heads a die
 const CH = 256                                             # attention keys a workgroup
-isrec(l) = (l + 1) % 4 != 0
+const MTPL = 65                                            # the MTP layer's slot in the table
+isrec(l) = l != MTPL && (l + 1) % 4 != 0
 ridx(l) = 3 * (l ÷ 4) + l % 4                              # index among the DeltaNet layers
 aidx(l) = l ÷ 4                                            # index among the attention layers
 @inline silu(x) = x / (1.0f0 + exp(-x))
@@ -343,11 +344,15 @@ struct KA
     npos::Int32                                            # positions a prefill forward (the most that fit)
     ssq::LP{Int64}                                         # sum of squares of x a position (fixed point, 2^-16)
     rid::Int32                                             # request number
+    pk::LP{Int32}                                          # a position whose DeltaNet state and conv ring also go to the backup slots
+    nem::LP{Int32}; drf::LP{Int32}; msel::LP{Int32}        # a request's tokens out, its draft, the draft's source (0, 1)
+    spec::Int32                                            # decode with MTP drafts
 end
 const NR = 2                                               # requests at once
-@inline slp(A::KA, r, j) = ld(A.sl, 4Int64(r) + j)
+const DW = 4                                               # the widest decode forward (with MTP: 2 positions a request)
+@inline slp(A::KA, r, j) = ld(A.sl, 6Int64(r) + j)      # (S, ring, kc, vc, S backup, ring backup)
 const NMAT = 8                                             # matrix (and vector) slots a layer in the table
-const TABF = 65 * NMAT * 5                                 # where the f32-vector offsets start in the table
+const TABF = 66 * NMAT * 5                                 # where the f32-vector offsets start in the table
 const TOUT = Int64(270_000_000)                            # 10 s of the 27 MHz clock: a wait longer than this aborts
 # table entry i (0-based) as an invariant load: the table is written before the kernel, so with a uniform i these are
 # scalar loads the compiler can issue together (plain loads were vector loads, each waited for before the next)
@@ -361,7 +366,7 @@ const TOUT = Int64(270_000_000)                            # 10 s of the 27 MHz 
     !0 = !{}
     """, "ldt"), Int64, Tuple{LP{Int64},Int64}, p, i)
 @inline mat(A::KA, l, j) = (e = (Int64(l) * NMAT + j) * 5; (ldt(A.tab, e), Int32(ldt(A.tab, e + 1)), Int32(ldt(A.tab, e + 2)), Int32(ldt(A.tab, e + 3)), ldt(A.tab, e + 4)))
-@inline invf(A::KA, i) = reinterpret(Float64, ldt(A.tab, Int64(TABF + 65NMAT + i)))   # rope inverse frequency i
+@inline invf(A::KA, i) = reinterpret(Float64, ldt(A.tab, Int64(TABF + 66NMAT + i)))   # rope inverse frequency i
 @inline fvec(A::KA, l, j) = reinterpret(LP{Float32}, ldt(A.tab, Int64(TABF + Int64(l) * NMAT + j)))
 @inline ld(p, i) = unsafe_load(p, i + 1)                   # 0-based
 @inline st!(p, v, i) = unsafe_store!(p, v, i + 1)
@@ -397,7 +402,8 @@ end
 
 # ---- phases (every workgroup calls each one; the work is spread over workgroups or wavefronts) ----
 @inline nsl(nb) = (nb + Int32(1)) >> Int32(1)              # K slices (KS = 512, two blocks) of a GEMV
-@inline nsx(nb, P) = P > Int32(NR) ? Int32(1) : nsl(nb)    # slices of a matrix phase's output (a GEMM: one)
+@inline isgemm(P) = P > Int32(DW) || P == Int32(3)
+@inline nsx(nb, P) = isgemm(P) ? Int32(1) : nsl(nb)       # slices of a matrix phase's output (a GEMM: one)
 @inline gtid() = Int32(256) * wgid() + tid()
 @inline nthr(A::KA) = Int32(256) * A.nwg
 # partial sums of matrix slot js[m]: floats after the ones of js[1 .. m - 1]
@@ -466,7 +472,7 @@ end
 end
 # The exchange: an all-reduce over the four dies of this die's share (the K-slice sums of matrix (l, j), or with
 # j < 0 its embedding rows of tok[p]), through page-locked host memory. A die reads host memory at about 4.5 GB/s
-# with 2 us a round trip (writes are posted). At decode width (P <= NR) the round trips are the cost: each die writes
+# with 2 us a round trip (writes are posted). At decode width (P <= DW) the round trips are the cost: each die writes
 # its share once (hxd) and reads the other three. A prefill's bytes are the cost: a reduce-scatter then an
 # all-gather, 3/4 fewer bytes read (decode 31.5 tok/s with the one-round form, 29.2 with the two-round; a 512-token
 # prefill 1.5x faster with the two-round): die d owns quarter d of the elements (QTR of them);
@@ -481,7 +487,7 @@ end
 const QTR = NE ÷ ND
 @inline hxr(A::KA, slot, q, s) = reinterpret(LP{UInt64}, A.hx + 8 * (((Int64(slot) * ND + q) * ND + s) * A.npos * QTR))
 @inline hxg(A::KA, slot, r, s) = reinterpret(LP{UInt64}, A.hx + 8 * ((((Int64(2) + slot) * ND + r) * ND + s) * A.npos * QTR))
-@inline hxd(A::KA, slot, s) = reinterpret(LP{UInt64}, A.hx + 8 * ((Int64(slot) * ND + s) * NR * NE))   # (inside hxr's space)
+@inline hxd(A::KA, slot, s) = reinterpret(LP{UInt64}, A.hx + 8 * ((Int64(slot) * ND + s) * DW * NE))   # (inside hxr's space)
 @inline ld64a_sys(p::LP{UInt64}) = Base.llvmcall("%r = load atomic i64, ptr addrspace(1) %0 monotonic, align 8\nret i64 %r", UInt64, Tuple{LP{UInt64}}, p)
 @inline st64_sys(p::LP{UInt64}, v::UInt64) = Base.llvmcall("store atomic i64 %1, ptr addrspace(1) %0 monotonic, align 8\nret void", Cvoid, Tuple{LP{UInt64},UInt64}, p, v)
 @inline xword(v::Float32, tag::UInt64) = UInt64(reinterpret(UInt32, v)) | tag
@@ -510,7 +516,7 @@ function xwr_ph!(A::KA, l::Int32, j::Int32, w::LP{Float32}, set::Bool, xs::Int32
         r >= Int32(0) && r < Int32(VPD) ? embval(W, r, k) : 0.0f0
     end
     ta = UInt64(0)
-    if P <= Int32(NR)
+    if P <= Int32(DW)
         # decode width: one round trip. Every die writes its whole share (hxd), reads the other three and sums the
         # four in die order (its own recomputed, not read back)
         i = gtid(); did = i < Int32(NE) * P
@@ -625,6 +631,9 @@ function conv_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
             x = psum(A, Int64(0), ns, rows, P, p, c) * rinv(A, p)
             st!(A.u, silu(w1 * r1 + w2 * r2 + w3 * r3 + w4 * x), Int64(p) * QKVD + c)
             r1, r2, r3 = r2, r3, x
+            if ld(A.pk, p) == Int32(1)
+                rb = reinterpret(LP{Float32}, slp(A, r, 5)) + ro; st!(rb, r1, 3c); st!(rb, r2, 3c + 1); st!(rb, r3, 3c + 2)
+            end
         end
         st!(ring, r1, 3c); st!(ring, r2, 3c + 1); st!(ring, r3, 3c + 2)
     end
@@ -684,6 +693,10 @@ function rec_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
         for j in 1:8; o = fma(s[j], ld(qs, c0 + Int32(j - 1)), o); end
         o = xor16(o) * isc; g = o * sni * silu(z * ri_p)
         (t & Int32(15)) == Int32(0) && st!(A.xt, g, Int64(k) * P + p)
+        if ld(A.pk, p) == Int32(1)
+            Sb = reinterpret(LP{Float32}, slp(A, r, 4)) + 4 * (Int64(ri) * VHD * DK * DK)
+            for j in 1:8; st!(Sb, s[j], so + j - 1); end
+        end
         # the slice's 16 rows: their sum (x16) and raw sum of squares; lanes 0, 16, 32, 48 hold a row each
         so2 = o * o; sg = g
         so2 += AMDGPU.Device.shfl_xor(so2, Cint(16)); so2 += AMDGPU.Device.shfl_xor(so2, Cint(32))
@@ -969,7 +982,7 @@ function hmax_ph!(A::KA, seq::Int32, P::Int32, pfirst::Int32)
     for p in pfirst:P-Int32(1)
         v = -Inf32; ix = Int32(0); r = gtid()
         while r < Int32(VPD)
-            np, pp = P > Int32(NR) ? (P - pfirst, p - pfirst) : (P, p)   # a GEMM stored positions pfirst .. from 0
+            np, pp = isgemm(P) ? (P - pfirst, p - pfirst) : (P, p)   # a GEMM stored positions pfirst .. from 0
             lg = psum(A, Int64(0), ns, rows, np, pp, r) * rinv(A, p)
             gen || st!(A.lg, lg, Int64(ld(A.posa, p)) * VPD + r)
             lg > v && (v = lg; ix = r); did = true; r += nthr(A)
@@ -986,52 +999,143 @@ function hmax_ph!(A::KA, seq::Int32, P::Int32, pfirst::Int32)
             for w in Int32(1):Int32(3)
                 (ld(bv, w) > v || (ld(bv, w) == v && ld(bi, w) < ix)) && (v = ld(bv, w); ix = ld(bi, w))
             end
-            o = 2 * (Int64(wgid()) * NR + (p - pfirst))
+            o = 2 * (Int64(wgid()) * DW + (p - pfirst))
             st!(A.red, v, o); st!(A.red, reinterpret(Float32, ix), o + 1)
         end
     end
     done!(A, seq, t0, did)
 end
-@inline hxa(A::KA, slot, d, q) = A.hx + 8 * (4 * ND * ND * Int64(A.npos) * QTR) + 4 * (((Int64(slot) * ND + d) * NR + q) * 2)
+@inline hxa(A::KA, slot, d, q) = A.hx + 8 * (4 * ND * ND * Int64(A.npos) * QTR) + 4 * (((Int64(slot) * ND + d) * DW + q) * 2)
 function hred_ph!(A::KA, slot::Int32, seq::Int32, nq::Int32)
     (wgid() == Int32(0) && tid() < nq) || return
     t0 = memtime(); v = -Inf32; ix = Int32(0); q = tid()
     for w in Int32(0):A.nwg-Int32(1)
-        o = 2 * (Int64(w) * NR + q); v2 = ld(A.red, o); i2 = reinterpret(Int32, ld(A.red, o + 1))
+        o = 2 * (Int64(w) * DW + q); v2 = ld(A.red, o); i2 = reinterpret(Int32, ld(A.red, o + 1))
         (v2 > v || (v2 == v && i2 < ix)) && (v = v2; ix = i2)
     end
     hb = hxa(A, slot, A.d, q); st!(hb, v, 0); st!(hb, reinterpret(Float32, ix + Int32(VPD) * A.d), 1)
     done!(A, seq, t0, true)
 end
-function tok_ph!(A::KA, slot::Int32, seq::Int32, nq::Int32, pfirst::Int32, k::Int32)
+function tok_ph!(A::KA, slot::Int32, seq::Int32, nq::Int32, pfirst::Int32)
     (wgid() == Int32(0) && tid() < nq) || return
     fence_acq_sys(); t0 = memtime(); v = -Inf32; ix = Int32(0); q = tid()
     for d in Int32(0):Int32(ND - 1)
         hb = hxa(A, slot, d, q); v2 = ld(hb, 0); i2 = reinterpret(Int32, ld(hb, 1))
         (v2 > v || (v2 == v && i2 < ix)) && (v = v2; ix = i2)
     end
-    r = ld(A.posr, pfirst + q); st!(A.tks, ix, r)
-    A.d == Int32(0) && st!(A.out, ix, ld(A.rq, 4r + Int32(3)) + k)
+    r = ld(A.posr, pfirst + q); st!(A.tks, ix, r); n = ld(A.nem, r)
+    A.d == Int32(0) && st!(A.out, ix, ld(A.rq, 4r + Int32(3)) + n)
+    st!(A.nem, n + Int32(1), r)
     done!(A, seq, t0, true)
 end
 # the forward's positions: prefill, positions a0 .. a0 + P - 1 of request r; decode (r < 0), the next position of
-# every request still generating at step k
-function setpos_ph!(A::KA, r::Int32, a0::Int32, P::Int32, k::Int32)
+# every request still generating, and with MTP the position after it (its draft)
+function setpos_ph!(A::KA, r::Int32, a0::Int32, P::Int32)
     i = gtid()
     if r >= Int32(0)
         while i < P
-            st!(A.posr, r, i); st!(A.posa, a0 + i, i); st!(A.tok, ld(A.inp, ld(A.rq, 4r) + a0 + i), i); i += nthr(A)
+            st!(A.posr, r, i); st!(A.posa, a0 + i, i); st!(A.tok, ld(A.inp, ld(A.rq, 4r) + a0 + i), i); st!(A.pk, Int32(0), i); i += nthr(A)
         end
     elseif i == Int32(0)
         n = Int32(0)
         for q in Int32(0):A.nreq-Int32(1)
-            if ld(A.rq, 4q + Int32(2)) > k
-                st!(A.posr, q, n); st!(A.posa, ld(A.rq, 4q + Int32(1)) + k - Int32(1), n); st!(A.tok, ld(A.tks, q), n); n += Int32(1)
+            m = ld(A.nem, q)
+            if m < ld(A.rq, 4q + Int32(2))
+                c = ld(A.rq, 4q + Int32(1)) + m - Int32(1)
+                st!(A.posr, q, n); st!(A.posa, c, n); st!(A.tok, ld(A.tks, q), n); st!(A.pk, A.spec, n); n += Int32(1)
+                if A.spec != Int32(0)
+                    st!(A.posr, q, n); st!(A.posa, c + Int32(1), n); st!(A.tok, ld(A.drf, q), n); st!(A.pk, Int32(0), n); n += Int32(1)
+                end
             end
         end
     end
 end
 
+# ---- MTP (the GGUF's nextn layer, blk.64; layer slot MTPL in the table): drafting one token a step ----
+# Its input at position i is rmsnorm(emb(token i + 1)) enorm ++ rmsnorm(h_i) hnorm (h: the trunk's output after the
+# output norm), projected by eh_proj (10240 -> 5120), then one gated-attention layer with its own KV cache (attention
+# slot 16) and FFN, shared_head_norm and the shared head: the argmax is the draft for position i + 2.
+# h_i, normalized and weighted (hnorm), into part (5120 floats a position); in a prefill, the MTP's input tokens
+# (the next token of each position) into tok. One workgroup a position.
+function mpre1_ph!(A::KA, seq::Int32, P::Int32, pre::Bool)
+    red = @ROCStaticLocalArray(Float32, RED, false)
+    t0 = memtime(); did = false; t = tid(); hw = fvec(A, MTPL, 5)
+    p = wgid()
+    while p < P
+        ri = rinv(A, p); s = 0.0f0; k = t
+        while k < Int32(NE); h = ld(A.xt, Int64(k) * P + p) * ri; s = fma(h, h, s); k += Int32(256); end
+        rh = 1.0f0 / sqrt(wgsum(s, red) / Float32(NE) + EPS); k = t
+        while k < Int32(NE); st!(A.part, ld(A.xt, Int64(k) * P + p) * ri * rh * ld(hw, k), Int64(p) * NE + k); k += Int32(256); end
+        if pre && t == Int32(0)                            # a prefill: the next token (the last position's: tks)
+            r = ld(A.posr, p); a1 = ld(A.posa, p) + Int32(1)
+            st!(A.tok, a1 < ld(A.rq, 4r + Int32(1)) ? ld(A.inp, ld(A.rq, 4r) + a1) : ld(A.tks, r), p)
+        end
+        did = true; p += A.nwg
+    end
+    done!(A, seq, t0, did)
+end
+zero_ph!(A::KA, P::Int32) = zero_ssq!(A, P)
+# eh_proj's input on this die: elements 2560 d .. of the concatenation (x is emb(token) after the exchange), with
+# the 16- and 32-sums (a wavefront holds 64 consecutive elements of one position)
+function mpre2_ph!(A::KA, seq::Int32, P::Int32)
+    t0 = memtime(); ew = fvec(A, MTPL, 4); KL = Int32(2 * NE ÷ ND)
+    i = gtid(); did = i < KL * P
+    while i < KL * P
+        p = i ÷ KL; k = i - p * KL; g = Int32(KL) * A.d + k
+        v = g < Int32(NE) ? ld(A.x, Int64(p) * NE + g) * ld(ew, g) * rinv(A, p) : ld(A.part, Int64(p) * NE + g - Int32(NE))
+        st!(A.xt, v, Int64(k) * P + p)
+        a = v
+        for sh in (Cint(1), Cint(2), Cint(4), Cint(8)); a += AMDGPU.Device.shfl_xor(a, sh); end
+        c = a + AMDGPU.Device.shfl_xor(a, Cint(16))
+        k & Int32(15) == Int32(0) && st!(A.x16, a, Int64(k >> Int32(4)) * P + p)
+        k & Int32(31) == Int32(0) && st!(A.x32, c, Int64(k >> Int32(5)) * P + p)
+        i += nthr(A)
+    end
+    done!(A, seq, t0, did)
+end
+# a verify forward's tokens (spec decode: positions 2j, 2j + 1 of each request: its last token, then the draft): the
+# argmax at the last token's position is the next token; the draft is accepted if it equals it, and then the argmax
+# at the draft's position is one more. Rejected: the DeltaNet state and conv ring after the first position (kept in
+# the backup slots) become the request's state. The MTP's input tokens for both positions go to tok.
+function stok_ph!(A::KA, slot::Int32, seq::Int32, nq::Int32)
+    (wgid() == Int32(0) && tid() < (nq >> Int32(1))) || return
+    fence_acq_sys(); t0 = memtime(); j = tid()
+    g = ntuple(Val(2)) do e
+        v = -Inf32; ix = Int32(0)
+        for d in Int32(0):Int32(ND - 1)
+            hb = hxa(A, slot, d, Int32(2) * j + Int32(e - 1)); v2 = ld(hb, 0); i2 = reinterpret(Int32, ld(hb, 1))
+            (v2 > v || (v2 == v && i2 < ix)) && (v = v2; ix = i2)
+        end
+        ix
+    end
+    p = Int32(2) * j; r = ld(A.posr, p); acc = ld(A.tok, p + Int32(1)) == g[1]
+    n = ld(A.nem, r); ng = ld(A.rq, 4r + Int32(2)); two = acc && n + Int32(1) < ng
+    if A.d == Int32(0)
+        st!(A.out, g[1], ld(A.rq, 4r + Int32(3)) + n)
+        two && st!(A.out, g[2], ld(A.rq, 4r + Int32(3)) + n + Int32(1))
+    end
+    st!(A.nem, n + (two ? Int32(2) : Int32(1)), r); st!(A.tks, acc ? g[2] : g[1], r); st!(A.msel, acc ? Int32(1) : Int32(0), r)
+    if !acc
+        for f in (0, 1)
+            a = ld(A.sl, 6Int64(r) + f); st!(A.sl, ld(A.sl, 6Int64(r) + f + 4), 6Int64(r) + f); st!(A.sl, a, 6Int64(r) + f + 4)
+        end
+    end
+    acc && atadd(A.bar + 64, UInt32(1)); atadd(A.bar + 68, UInt32(1))   # (accepted, drafted: the acceptance rate)
+    st!(A.tok, g[1], p); st!(A.tok, g[2], p + Int32(1))
+    done!(A, seq, t0, true)
+end
+# the MTP head's argmax: a request's draft (in a verify forward, from the position after its last accepted token)
+function dtok_ph!(A::KA, slot::Int32, seq::Int32, nq::Int32, pfirst::Int32, pre::Bool)
+    (wgid() == Int32(0) && tid() < nq) || return
+    fence_acq_sys(); t0 = memtime(); v = -Inf32; ix = Int32(0); q = tid()
+    for d in Int32(0):Int32(ND - 1)
+        hb = hxa(A, slot, d, q); v2 = ld(hb, 0); i2 = reinterpret(Int32, ld(hb, 1))
+        (v2 > v || (v2 == v && i2 < ix)) && (v = v2; ix = i2)
+    end
+    p = pfirst + q; r = ld(A.posr, p)
+    (pre || (p & Int32(1)) == ld(A.msel, r)) && st!(A.drf, ix, r)
+    done!(A, seq, t0, true)
+end
 # ---- the prefill GEMM: all the forward's positions against each weight tile ----
 @inline ld32p(W::LP{UInt8}, off) = unsafe_load(reinterpret(LP{UInt32}, W + off))
 @inline function lds4(xs, i)                              # shared floats i .. i + 3 (i a multiple of 4)
@@ -1112,31 +1216,43 @@ function gemm_ph!(A::KA, l::Int32, j0::Int32, nm::Int32, seq::Int32, P::Int32, W
 end
 # matrices j0 .. j0 + nm - 1 of layer l (consecutive table slots)
 @inline mat_ph!(A::KA, l, j0, nm, seq, P, T, zs::Bool = false, pf::Int32 = Int32(0)) =
-    P > Int32(NR) ? gemm_ph!(A, Int32(l), Int32(j0), Int32(nm), seq, P, T[1], T[2], zs, pf) :   # prefill; decode (a position a request): GEMV
-    P == Int32(1) ? gemv_ph!(A, Int32(l), Int32(j0), Int32(nm), seq, Val(1), zs) : gemv_ph!(A, Int32(l), Int32(j0), Int32(nm), seq, Val(2), zs)   # (all P positions)
+    isgemm(P) ? gemm_ph!(A, Int32(l), Int32(j0), Int32(nm), seq, P, T[1], T[2], zs, pf) :   # prefill; decode: GEMV over all P positions
+    P == Int32(1) ? gemv_ph!(A, Int32(l), Int32(j0), Int32(nm), seq, Val(1), zs) :
+    P == Int32(2) ? gemv_ph!(A, Int32(l), Int32(j0), Int32(nm), seq, Val(2), zs) : gemv_ph!(A, Int32(l), Int32(j0), Int32(nm), seq, Val(4), zs)
 
-# ---- one forward of P positions (setpos_ph! set them): P > NR (prefill) with GEMMs, P <= NR (decode) with GEMVs;
+# ---- one forward of P positions (setpos_ph! set them): GEMMs for a prefill (isgemm), GEMVs at decode (P <= DW);
 # amax: one past the largest position; head: the head takes positions pfirst .. P - 1 (into tokens of step k).
 # A layer is a short program of steps run by one loop, so each phase is in the kernel once (compile time).
-const S_MAT, S_CONV, S_REC, S_APREP, S_ATTN, S_ACOMB, S_XWR, S_ACT, S_HMAX, S_HRED, S_XSIG, S_TOK = Int32.(1:12)
+const S_MAT, S_CONV, S_REC, S_APREP, S_ATTN, S_ACOMB, S_XWR, S_ACT, S_HMAX, S_HRED, S_XSIG, S_TOK, S_MPRE1, S_ZERO, S_MPRE2, S_DTOK = Int32.(1:16)
 # step i of layer l (64: the head): (kind, first matrix slot, matrices, zero the sums of squares first)
 @inline function lstep(l::Int32, i::Int32)
     if l == Int32(64)
         i == Int32(0) && return S_MAT, Int32(1), Int32(1), false
         return (i == Int32(1) ? S_HMAX : i == Int32(2) ? S_HRED : i == Int32(3) ? S_XSIG : S_TOK), Int32(0), Int32(0), false
     end
-    if isrec(l)
+    if l == Int32(MTPL)                                    # the MTP layer (its head: steps 16 ..)
+        i == Int32(0) && return S_MPRE1, Int32(0), Int32(0), false
+        i == Int32(1) && return S_ZERO, Int32(0), Int32(0), false
+        i == Int32(2) && return S_XWR, Int32(-1), Int32(0), false # emb(next token)
+        i == Int32(3) && return S_MPRE2, Int32(0), Int32(0), false
+        i == Int32(4) && return S_MAT, Int32(3), Int32(1), true    # eh_proj
+        i == Int32(5) && return S_XWR, Int32(3), Int32(0), false
+        i == Int32(16) && return S_MAT, Int32(1), Int32(1), false  # the shared head (layer 64's slot 1)
+        i >= Int32(17) && return (i == Int32(17) ? S_HMAX : i == Int32(18) ? S_HRED : i == Int32(19) ? S_XSIG : S_DTOK), Int32(0), Int32(0), false
+        i -= Int32(6)
+    elseif isrec(l)
         i == Int32(0) && return S_MAT, Int32(0), Int32(4), false   # qkv z alpha beta
         i == Int32(1) && return S_CONV, Int32(0), Int32(0), false
         i == Int32(2) && return S_REC, Int32(0), Int32(0), false
         i -= Int32(3)
-    else
-        i == Int32(0) && return S_MAT, Int32(0), Int32(3), false   # q k v
-        i == Int32(1) && return S_APREP, Int32(0), Int32(0), false
-        i == Int32(2) && return S_ATTN, Int32(0), Int32(0), false
-        i == Int32(3) && return S_ACOMB, Int32(0), Int32(0), false
-        i -= Int32(4)
+        @goto tail
     end
+    i == Int32(0) && return S_MAT, Int32(0), Int32(3), false       # q k v
+    i == Int32(1) && return S_APREP, Int32(0), Int32(0), false
+    i == Int32(2) && return S_ATTN, Int32(0), Int32(0), false
+    i == Int32(3) && return S_ACOMB, Int32(0), Int32(0), false
+    i -= Int32(4)
+    @label tail
     i == Int32(0) && return S_MAT, Int32(4), Int32(1), true         # out
     i == Int32(1) && return S_XWR, Int32(4), Int32(0), false
     i == Int32(2) && return S_MAT, Int32(5), Int32(2), false        # gate up
@@ -1144,16 +1260,21 @@ const S_MAT, S_CONV, S_REC, S_APREP, S_ATTN, S_ACOMB, S_XWR, S_ACT, S_HMAX, S_HR
     i == Int32(4) && return S_MAT, Int32(7), Int32(1), true         # down
     return S_XWR, Int32(7), Int32(0), false
 end
-@inline nsteps(l::Int32, gen::Bool) = l == Int32(64) ? (gen ? Int32(5) : Int32(2)) : isrec(l) ? Int32(9) : Int32(10)
-function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, head::Bool, pfirst::Int32, k::Int32, T)
+@inline nsteps(l::Int32, gen::Bool, mhead::Bool) = l == Int32(64) ? (gen ? Int32(5) : Int32(2)) :
+    l == Int32(MTPL) ? (mhead ? Int32(21) : Int32(16)) : isrec(l) ? Int32(9) : Int32(10)
+# head: the trunk's head over positions pfirst .. P - 1; mtp: the MTP layer after it, its head (mhead) over
+# positions mpf ..; pre: a prefill forward; spec: a verify forward (pairs of positions)
+function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, head::Bool, pfirst::Int32, mtp::Bool, mhead::Bool, mpf::Int32, pre::Bool, T)
     xwr_ph!(A, Int32(0), Int32(-1), fvec(A, 0, 0), true, xs, seq, P); seq += Int32(2); xs += Int32(1); gbar!(A)
     nlr = Int32(ldacq(A.bar + 12)); nl = nlr == Int32(0) ? Int32(NL) : nlr   # bar[3]: layers to run (0: all), for debugging
-    gen = A.mode == Int32(0); nq = P - pfirst
+    gen = A.mode == Int32(0); spec = !pre && A.spec != Int32(0)
     l = Int32(0); i = Int32(0)
-    while l < nl || (head && l == Int32(64))
+    while l <= Int32(MTPL)
         kind, j0, nm, zs = lstep(l, i)
+        hd = l == Int32(64) || (l == Int32(MTPL) && j0 == Int32(1))   # a head step
+        pf = l == Int32(MTPL) ? mpf : pfirst; nq = P - pf
         if kind == S_MAT
-            mat_ph!(A, l, j0, nm, seq, P, T, zs, l == Int32(64) ? pfirst : Int32(0)); seq += Int32(1)
+            mat_ph!(A, hd ? Int32(64) : l, j0, nm, seq, P, T, zs, hd ? pf : Int32(0)); seq += Int32(1)
         elseif kind == S_CONV
             conv_ph!(A, l, seq, P); seq += Int32(1)
         elseif kind == S_REC
@@ -1165,36 +1286,50 @@ function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, head::Bool, p
         elseif kind == S_ACOMB
             acomb_ph!(A, amax, seq, P); seq += Int32(1)
         elseif kind == S_XWR
-            wn = j0 == Int32(4) ? fvec(A, l, 1) : l < nl - Int32(1) ? fvec(A, l + Int32(1), 0) : fvec(A, 64, 0)
-            xwr_ph!(A, l, j0, wn, false, xs, seq, P); seq += Int32(2); xs += Int32(1)
+            wn = if l == Int32(MTPL)
+                j0 == Int32(-1) ? fvec(A, l, 4) : j0 == Int32(3) ? fvec(A, l, 0) : j0 == Int32(4) ? fvec(A, l, 1) : fvec(A, l, 6)
+            else
+                j0 == Int32(4) ? fvec(A, l, 1) : l < nl - Int32(1) ? fvec(A, l + Int32(1), 0) : fvec(A, 64, 0)
+            end
+            xwr_ph!(A, l, j0, wn, j0 == Int32(-1) || j0 == Int32(3), xs, seq, P); seq += Int32(2); xs += Int32(1)
         elseif kind == S_ACT
             act_ph!(A, l, seq, P); seq += Int32(1)
         elseif kind == S_HMAX
-            hmax_ph!(A, seq, P, pfirst); seq += Int32(1)
+            hmax_ph!(A, seq, P, pf); seq += Int32(1)
         elseif kind == S_HRED
             hred_ph!(A, xs & Int32(1), seq, nq); seq += Int32(1)
         elseif kind == S_XSIG
             xsig!(A, xs)
+        elseif kind == S_TOK
+            spec ? stok_ph!(A, xs & Int32(1), seq, nq) : tok_ph!(A, xs & Int32(1), seq, nq, pf); seq += Int32(1); xs += Int32(1)
+        elseif kind == S_MPRE1
+            mpre1_ph!(A, seq, P, pre); seq += Int32(1)
+        elseif kind == S_ZERO
+            zero_ssq!(A, P)
+        elseif kind == S_MPRE2
+            mpre2_ph!(A, seq, P); seq += Int32(1)
         else
-            tok_ph!(A, xs & Int32(1), seq, nq, pfirst, k); seq += Int32(1); xs += Int32(1)
+            dtok_ph!(A, xs & Int32(1), seq, nq, pf, pre); seq += Int32(1); xs += Int32(1)
         end
         gbar!(A)
         i += Int32(1)
-        if i == nsteps(l, gen)
-            i = Int32(0); l = l == nl - Int32(1) ? Int32(64) : l + Int32(1)
+        if i == nsteps(l, gen, mhead)
+            i = Int32(0)
+            l = l < nl - Int32(1) ? l + Int32(1) : l < Int32(64) ? (head ? Int32(64) : mtp ? Int32(MTPL) : Int32(MTPL + 1)) :
+                l == Int32(64) ? (mtp ? Int32(MTPL) : Int32(MTPL + 1)) : Int32(MTPL + 1)
         end
     end
     seq, xs
 end
 # the requests (up to NR), one dispatch: each request's prefill (or scoring) in forwards of as many positions as fit
-# (npos), then the decode steps of all of them together, a position a request a forward. One call of fwd! (one copy
-# of the forward in the kernel): each loop turn picks the next forward.
+# (npos), then the decode steps of all of them together: a position a request a forward, or with MTP (spec) two
+# (the last token and the draft) and the MTP layer after. One call of fwd! (one copy of the forward in the kernel):
+# each loop turn picks the next forward.
 function k_req!(A::KA)
     T = (@ROCStaticLocalArray(Float32, 32 * 64, false), @ROCStaticLocalArray(Float32, 32 * 64, false))   # the GEMM tiles
     tid() == Int32(0) && umin64(A.acct, memtime())
-    seq = Int32(0); xs = Int32(0); kmax = Int32(0)
-    for q in Int32(0):A.nreq-Int32(1); kmax = max(kmax, ld(A.rq, 4q + Int32(2))); end
-    r = Int32(0); a = Int32(0); k = Int32(1); prefill = true
+    seq = Int32(0); xs = Int32(0); spec = A.spec != Int32(0) && A.mode == Int32(0)
+    r = Int32(0); a = Int32(0); prefill = true
     while true
         if prefill && r >= A.nreq                          # every prefill done
             tid() == Int32(0) && umax64(A.acct + 16, memtime())
@@ -1204,21 +1339,22 @@ function k_req!(A::KA)
             ninp = ld(A.rq, 4r + Int32(1)); ngen = ld(A.rq, 4r + Int32(2))
             P = min(A.npos, ninp - a); amax = a + P
             head = A.mode == Int32(1) || (a + P == ninp && ngen > Int32(0)); pfirst = A.mode == Int32(1) ? Int32(0) : P - Int32(1)
-            zero_ssq!(A, P); setpos_ph!(A, r, a, P, Int32(0)); gbar!(A)
-            seq, xs = fwd!(A, P, amax, seq, xs, head, pfirst, Int32(0), T)
+            mtp = spec && ngen > Int32(0)
+            zero_ssq!(A, P); setpos_ph!(A, r, a, P); gbar!(A)
+            seq, xs = fwd!(A, P, amax, seq, xs, head, pfirst, mtp, head, P - Int32(1), true, T)
             a += P
             a >= ninp && (r += Int32(1); a = Int32(0))
         else
-            k < kmax || break
-            P = Int32(0); amax = Int32(0)
+            P = Int32(0); amax = Int32(0); w = spec ? Int32(2) : Int32(1)
             for q in Int32(0):A.nreq-Int32(1)
-                if ld(A.rq, 4q + Int32(2)) > k
-                    P += Int32(1); amax = max(amax, ld(A.rq, 4q + Int32(1)) + k)
+                n = ld(A.nem, q)
+                if n < ld(A.rq, 4q + Int32(2))
+                    P += w; amax = max(amax, ld(A.rq, 4q + Int32(1)) + n - Int32(1) + w)
                 end
             end
-            zero_ssq!(A, P); setpos_ph!(A, Int32(-1), Int32(0), P, k); gbar!(A)
-            seq, xs = fwd!(A, P, amax, seq, xs, true, Int32(0), k, T)
-            k += Int32(1)
+            P == Int32(0) && break
+            zero_ssq!(A, P); setpos_ph!(A, Int32(-1), Int32(0), P); gbar!(A)
+            seq, xs = fwd!(A, P, amax, seq, xs, true, Int32(0), spec, spec, Int32(0), false, T)
         end
     end
     tid() == Int32(0) && umax64(A.acct + 8, memtime())
@@ -1237,12 +1373,12 @@ struct DLayer
 end
 f32(g, name) = (t = g.t[name]; copy(reinterpret(Float32, view(g.map, t.off+1:t.off+4prod(t.dims)))))
 const NOV = Float32[]
-function load_layer(g::GGUF, l, d)
+function load_layer(g::GGUF, l, d; att = !isrec(l))
     p = "blk.$l."; all20 = [(0, 20)]
     gate = DMat(g, p * "ffn_gate.weight", [(4352d, 4352)], all20); up = DMat(g, p * "ffn_up.weight", [(4352d, 4352)], all20)
     down = DMat(g, p * "ffn_down.weight", [(0, NE)], [(17d, 17)])
     an = dev(f32(g, p * "attn_norm.weight")); pn = dev(f32(g, p * "post_attention_norm.weight"))
-    if isrec(l)
+    if !att
         vh = [16j + 4d for j in 0:2]                       # the first value head of each 4-head run
         heads = [16j + 4d + i for j in 0:2 for i in 0:3]
         qkv = DMat(g, p * "attn_qkv.weight", [(512d, 512); (2048 + 512d, 512); [(4096 + 128h, 512) for h in vh]], all20)
@@ -1262,16 +1398,22 @@ end
 struct Die
     dev::HIPDevice; d::Int
     L::Vector{DLayer}; emb::DMat; head::DMat; onrm::ROCVector{Float32}
+    mtp::DLayer; eh::DMat; mv::ROCVector{Float32}           # the MTP layer, its eh_proj; enorm, hnorm, shared_head_norm
 end
 # a request's state on a die: DeltaNet states and conv rings, the attention cache (TurboQuant rows) up to maxctx
 struct DState
     S::ROCVector{Float32}; ring::ROCVector{Float32}; kc::ROCVector{UInt8}; vc::ROCVector{UInt8}; maxctx::Int
+    S2::ROCVector{Float32}; ring2::ROCVector{Float32}       # the backups (a verify forward's state after its first position)
 end
 DState(maxctx) = DState(AMDGPU.zeros(Float32, 48 * VHD * DK * DK), AMDGPU.zeros(Float32, 48 * QKVD * 3),
-    AMDGPU.zeros(UInt8, 16 * maxctx * KVROW), AMDGPU.zeros(UInt8, 16 * maxctx * KVROW), maxctx)
+    AMDGPU.zeros(UInt8, 17 * maxctx * KVROW), AMDGPU.zeros(UInt8, 17 * maxctx * KVROW), maxctx,
+    AMDGPU.zeros(Float32, 48 * VHD * DK * DK), AMDGPU.zeros(Float32, 48 * QKVD * 3))
 function load_die(g::GGUF, hd, d, L)
     AMDGPU.device!(hd)
-    Die(hd, d, L, DMat(g, "token_embd.weight", VPD * d, VPD), DMat(g, "output.weight", VPD * d, VPD), dev(f32(g, "output_norm.weight")))
+    m = load_layer(g, 64, d; att = true); p = "blk.64.nextn."
+    eh = DMat(g, p * "eh_proj.weight", [(0, NE)], [(10d, 10)])             # K: elements 2560 d .. of emb ++ h
+    mv = dev([f32(g, p * "enorm.weight"); f32(g, p * "hnorm.weight"); f32(g, p * "shared_head_norm.weight")])
+    Die(hd, d, L, DMat(g, "token_embd.weight", VPD * d, VPD), DMat(g, "output.weight", VPD * d, VPD), dev(f32(g, "output_norm.weight")), m, eh, mv)
 end
 # the layers are read in file order, each one for all four dies at once (one pass over the file: the GGUF is on a
 # spinning disk and sentry's RAM can't cache all of it)
@@ -1291,14 +1433,14 @@ function load_engine(path)
     dies, g
 end
 newstate(dies, maxctx) = [(AMDGPU.device!(D.dev); DState(maxctx)) for D in dies]
-freestate!(st) = foreach(s -> foreach(AMDGPU.unsafe_free!, (s.S, s.ring, s.kc, s.vc)), st)
+freestate!(st) = foreach(s -> foreach(AMDGPU.unsafe_free!, (s.S, s.ring, s.kc, s.vc, s.S2, s.ring2)), st)
 
 # ---- the persistent kernel's host side ----
 addr(a) = reinterpret(Int64, UInt64(pointer(a)))
 # a die's table: every matrix's address and shape, every vector's address (the weights stay where they are)
 function ktable(D::Die)
-    tab = zeros(Int64, TABF + 65 * NMAT + NROT ÷ 2)
-    tab[TABF+65NMAT+1:end] = reinterpret(Int64, [THETA^(-2i / NROT) for i in 0:NROT÷2-1])   # the rope inverse frequencies
+    tab = zeros(Int64, TABF + 66 * NMAT + NROT ÷ 2)
+    tab[TABF+66NMAT+1:end] = reinterpret(Int64, [THETA^(-2i / NROT) for i in 0:NROT÷2-1])   # the rope inverse frequencies
     m!(l, j, m) = (e = (l * NMAT + j) * 5; tab[e+1:e+5] = [addr(m.W), m.rows, m.K ÷ 256, m.typ, m.typ == GQ6_K ? addr(m.D) : 0])
     v!(l, j, a) = (tab[TABF+l*NMAT+j+1] = addr(a))
     for l in 0:NL-1
@@ -1309,6 +1451,10 @@ function ktable(D::Die)
         W.rec && (v!(l, 4, W.w3); v!(l, 5, W.w4))
     end
     m!(64, 0, D.emb); m!(64, 1, D.head); v!(64, 0, D.onrm)
+    M = D.mtp; m!(MTPL, 0, M.m1); m!(MTPL, 1, M.m2); m!(MTPL, 2, M.m3); m!(MTPL, 3, D.eh)
+    m!(MTPL, 4, M.out); m!(MTPL, 5, M.gate); m!(MTPL, 6, M.up); m!(MTPL, 7, M.down)
+    v!(MTPL, 0, M.an); v!(MTPL, 1, M.pn); v!(MTPL, 2, M.w1); v!(MTPL, 3, M.w2)
+    for (j, o) in ((4, 0), (5, NE), (6, 2NE)); tab[TABF+MTPL*NMAT+j+1] = addr(D.mv) + 4o; end
     dev(tab)
 end
 const NWG = 256                                             # most workgroups a die
@@ -1320,22 +1466,23 @@ struct KDie
     part::ROCVector{Float32}; red::ROCVector{Float32}; u::ROCVector{Float32}; qh::ROCVector{Float32}; gh::ROCVector{Float32}
     ap::ROCVector{Float32}; tok::ROCVector{Int32}; bar::ROCVector{UInt32}; ssq::ROCVector{Int64}
     posr::ROCVector{Int32}; posa::ROCVector{Int32}; tks::ROCVector{Int32}; sl::ROCVector{Int64}; rq::ROCVector{Int32}
+    pk::ROCVector{Int32}; nem::ROCVector{Int32}; drf::ROCVector{Int32}; msel::ROCVector{Int32}
 end
 function KDie(D::Die, npos)
     AMDGPU.device!(D.dev); z(n) = AMDGPU.zeros(Float32, n); zi(n) = AMDGPU.zeros(Int32, n)
     KDie(ktable(D), z(NE * npos), z(NE * npos), z(NE ÷ 16 * npos), z(NE ÷ 32 * npos), z(max(VPD * 10, 2 * 4352 * npos, VPD * NSCORE)),
-        z(2 * NWG * NR), z(QKVD * npos), z(1536 * npos), z(1536 * npos), z(6 * (HD + 2) * max(npos, NWG)),
-        zi(npos), AMDGPU.zeros(UInt32, 64), AMDGPU.zeros(Int64, npos), zi(npos), zi(npos), zi(NR), AMDGPU.zeros(Int64, 4NR), zi(4NR))
+        z(2 * NWG * DW), z(QKVD * npos), z(1536 * npos), z(1536 * npos), z(6 * (HD + 2) * max(npos, NWG)),
+        zi(npos), AMDGPU.zeros(UInt32, 64), AMDGPU.zeros(Int64, npos), zi(npos), zi(npos), zi(NR), AMDGPU.zeros(Int64, 6NR), zi(4NR), zi(npos), zi(NR), zi(NR), zi(NR))
 end
 # page-locked host memory every die maps. p: what only the dies touch, the exchange words (2 phases x 2 slots x dies x
-# dies x npos x QTR) and the argmax exchange (2 slots x dies x NR); c: what the host reads or writes too, the counters
+# dies x npos x QTR) and the argmax exchange (2 slots x dies x DW); c: what the host reads or writes too, the counters
 # (at out) and the generated tokens (at tok). Both coherent (four dies read it at 14 GB/s together); in non-coherent
 # memory a die's L2 keeps the lines, so a poll does not see the other dies' writes (1 of 2560 words within 1 s).
 struct HostX
     p::Ptr{UInt8}; c::Ptr{UInt8}; nbytes::Int; out::Int; tok::Int
 end
 function HostX(npos, maxgen)
-    n = 8 * 4 * ND * ND * npos * QTR + 4 * 2 * ND * NR * 2; out = 0; tok = 64; r = Ref{Ptr{Cvoid}}(C_NULL); rc = Ref{Ptr{Cvoid}}(C_NULL)
+    n = 8 * 4 * ND * ND * npos * QTR + 4 * 2 * ND * DW * 2; out = 0; tok = 64; r = Ref{Ptr{Cvoid}}(C_NULL); rc = Ref{Ptr{Cvoid}}(C_NULL)
     H = AMDGPU.HIP
     H.hipHostMalloc(r, n, H.hipHostMallocPortable | H.hipHostMallocMapped | H.hipHostMallocCoherent)
     H.hipHostMalloc(rc, tok + 4maxgen, H.hipHostMallocPortable | H.hipHostMallocMapped | H.hipHostMallocCoherent)
@@ -1386,7 +1533,8 @@ function kargs(K, hx::HostX, d, maxctx, acct, inp, nreq, mode, nwg, lg, npos, ri
        lp(Float32, k.u), lp(Float32, k.qh), lp(Float32, k.gh), lp(Float32, k.ap), lg === nothing ? lp(Float32, k.x) : lp(Float32, lg),
        lp(Int64, k.sl), Int32(maxctx), lp(Float32, hx.p), lp(UInt32, hx.c + hx.out), Int32(d - 1), lp(UInt32, k.bar), lp(UInt64, acct),
        lp(Int32, inp), lp(Int32, k.rq), Int32(nreq), lp(Int32, hx.c + hx.tok), Int32(mode), Int32(nwg), lp(Int32, k.tok),
-       lp(Int32, k.posr), lp(Int32, k.posa), lp(Int32, k.tks), Int32(npos), lp(Int64, k.ssq), Int32(rid))
+       lp(Int32, k.posr), lp(Int32, k.posa), lp(Int32, k.tks), Int32(npos), lp(Int64, k.ssq), Int32(rid),
+       lp(Int32, k.pk), lp(Int32, k.nem), lp(Int32, k.drf), lp(Int32, k.msel), Int32(mode == 0 && SPEC[] ? 1 : 0))
 end
 # up to NR requests at once on the four dies, one dispatch a die. reqs: (input ids, tokens to generate) each, with
 # its state sts[r] (one DState a die). mode 0: greedy; mode 1: score one request\x27s input (the logits of every
@@ -1411,7 +1559,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
         a = AMDGPU.zeros(UInt64, 3 + 2nphase); ah = zeros(UInt64, 3 + 2nphase); ah[1] = typemax(UInt64); ah[4:2:end] .= typemax(UInt64); up!(a, ah); push!(accts, a)
         up!(K.bar, [UInt32[0, 0, 0, NLRUN[]]; zeros(UInt32, 60)]); up!(K.rq, rq)
         for r in 1:nr; fill!(sts[r][d].S, 0.0f0); fill!(sts[r][d].ring, 0.0f0); end   # a request starts from zero state
-        up!(K.sl, Int64[addr(getfield(sts[r][d], f)) for r in 1:nr for f in (:S, :ring, :kc, :vc)])
+        up!(K.sl, Int64[addr(getfield(sts[r][d], f)) for r in 1:nr for f in (:S, :ring, :kc, :vc, :S2, :ring2)]); up!(K.nem, zeros(Int32, NR))
         ib = dev(inp); push!(ibs, ib)
         A = kargs(PE.K, PE.hx, d, mc, a, ib, nr, mode, PE.nwg, lgs === nothing ? nothing : lgs[d], npos, rid)
         @roc groupsize = 256 gridsize = PE.nwg maxthreads = 256 waves_per_eu = KWPE[] k_req!(A)
@@ -1430,6 +1578,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
         AMDGPU.unsafe_free!(accts[d]); AMDGPU.unsafe_free!(ibs[d])
     end
     ab = [(AMDGPU.device!(D.dev); Array(K.bar)[3]) for (D, K) in zip(dies, PE.K)]
+    AMDGPU.device!(dies[1].dev); bh = Array(PE.K[1].bar); ACC[] = (Int(bh[17]), Int(bh[18]))
     any(!=(0), ab) && (error("persistent kernel aborted (a wait passed 10 s): $ab"))
     toks = [[Int(unsafe_load(Ptr{Int32}(PE.hx.c + PE.hx.tok), ooff[r] + i)) for i in 1:reqs[r][2]] for r in 1:nr]
     toks, res, tpre, tdec
@@ -1439,6 +1588,12 @@ if !isdefined(Main, :KWPE)
 end
 if !isdefined(Main, :LASTACCT)
     const LASTACCT = Ref{Vector{UInt64}}(UInt64[])        # die 0's phase times of the last request, for profiling
+end
+if !isdefined(Main, :SPEC)
+    const SPEC = Ref(true)                                 # decode with MTP drafts (spec 0 | 1)
+end
+if !isdefined(Main, :ACC)
+    const ACC = Ref((0, 0))                                # the last request's accepted and drafted counts
 end
 if !isdefined(Main, :NLRUN)
     const NLRUN = Ref(0)                                   # layers the persistent kernel runs (0: all), for debugging
@@ -1536,6 +1691,8 @@ function handle(c, line)
     elseif a[1] == "kl"
         n = parse(Int, a[2]); ids = Int.(reinterpret(Int32, read(replace(a[3], ".logits.f16" => ".ids"))))
         kl(c, PK[], ids, a[3], n)
+    elseif a[1] == "spec"                                # spec 0 | 1: MTP drafting off or on
+        SPEC[] = a[2] == "1"; println(c, "spec ", SPEC[])
     elseif a[1] == "reload"
         Base.include(Main, s.file); Base.invokelatest(pinit); println(c, "reloaded ", s.file)
     elseif a[1] == "eval"

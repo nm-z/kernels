@@ -12,7 +12,7 @@ function plabels()
     end
     append!(L, ["head", "hmax", "hred", "tok"])
 end
-function phases(io = stdout; skip = 1, nmax = typemax(Int))
+function phases(io = stdout; skip = 1, nmax = 10^9)
     ah = LASTACCT[]; hz = PK[].hz; L = plabels(); n = length(L)
     ns = (length(ah) - 3) ÷ 2; nf = 0
     tot = Dict{String,Float64}(); gap = Dict{String,Float64}(); fw = Float64[]
