@@ -119,6 +119,68 @@ end
 # = d sc (Σqx - 32 Σx), so a weight element costs a byte extract and a convert before its P multiply-adds. Each
 # slice writes partial sums part[slice][p][row]; the consumer adds the slices (k_gemv_sum! here).
 # ---------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------
+# Time accounting of a request, die by die: every kernel (instruction time) and every copy (transfer time) is
+# bracketed by timing events on its die's stream; idle time is the rest of the request's wall time on that die. A
+# copy overlapping a kernel counts as instruction time.
+# ---------------------------------------------------------------------------------------------
+if !isdefined(Main, :TR)
+    const TR = Ref{Any}(nothing)                           # nothing, or device => [(kind, start, stop)]
+end
+function trace_op(kind, f)
+    tr = TR[]
+    tr === nothing && return f()
+    v = get!(tr, AMDGPU.device(), Any[]); e0, e1 = pooled(2length(v) + 1), pooled(2length(v) + 2)
+    AMDGPU.HIP.record(e0); r = f(); AMDGPU.HIP.record(e1)
+    push!(v, (kind, e0, e1))
+    r
+end
+# timing events made ahead of time (making one costs the host more than recording it), per device, reused
+if !isdefined(Main, :EVP)
+    const EVP = Dict{Any,Vector{Any}}()
+end
+function pooled(i)
+    p = get!(EVP, AMDGPU.device(), Any[])
+    while length(p) < i; push!(p, AMDGPU.HIP.HIPEvent(AMDGPU.stream(); do_record = false, timing = true)); end
+    p[i]
+end
+macro k(ex) :(trace_op(:inst, () -> $(esc(ex)))) end
+macro x(ex) :(trace_op(:xfer, () -> $(esc(ex)))) end
+function union_len(iv)                                     # total length of a set of intervals
+    isempty(iv) && return 0.0
+    sort!(iv); tot = 0.0; (a, b) = iv[1]
+    for (c, d) in iv[2:end]
+        c > b ? (tot += b - a; (a, b) = (c, d)) : (b = max(b, d))
+    end
+    tot + b - a
+end
+# run f() with the accounting on; per die (instruction, transfer, idle) seconds and the request's wall time
+function account(f, E::Engine)
+    TR[] = Dict{Any,Any}(); st = Dict{Any,Any}()
+    for D in E.dies
+        AMDGPU.device!(D.dev); AMDGPU.synchronize(); st[D.dev] = AMDGPU.HIP.HIPEvent(AMDGPU.stream(); timing = true)
+    end
+    r = try f() finally end
+    res = NTuple{4,Float64}[]
+    for D in E.dies
+        AMDGPU.device!(D.dev); en = AMDGPU.HIP.HIPEvent(AMDGPU.stream(); timing = true); AMDGPU.HIP.synchronize(en)
+        t0 = st[D.dev]; wall = AMDGPU.HIP.elapsed(t0, en)
+        ops = get(TR[], D.dev, Any[])
+        iv(k) = [(AMDGPU.HIP.elapsed(t0, a), AMDGPU.HIP.elapsed(t0, b)) for (kk, a, b) in ops if kk == k]
+        ins = iv(:inst); xf = iv(:xfer)
+        ti = union_len(copy(ins)); tall = union_len(vcat(ins, xf))
+        push!(res, (ti, tall - ti, wall - tall, wall))
+    end
+    TR[] = nothing
+    r, res
+end
+function print_account(io, res)
+    W = sum(r[4] for r in res); I = sum(r[1] for r in res); X = sum(r[2] for r in res); Z = sum(r[3] for r in res)
+    @printf(io, "idle time %.1f%% (instruction %.1f%%, transfer %.1f%%) over %d dies, %.3f s a die\n", 100Z / W, 100I / W, 100X / W, length(res), W / length(res))
+    for (d, r) in enumerate(res)
+        @printf(io, "  die %d: instruction %.1f%%, transfer %.1f%%, idle %.1f%%\n", d - 1, 100r[1] / r[4], 100r[2] / r[4], 100r[3] / r[4])
+    end
+end
 const KS = 512
 const NCH = Dict(GQ5_K => 11, GQ6_K => 13)                 # 16-byte chunks a block
 const GSZ = Dict(GQ5_K => 32, GQ6_K => 16)                 # elements a scale group
@@ -309,15 +371,15 @@ GBuf(npart::Int, K::Int, P) = GBuf(AMDGPU.zeros(Float32, npart), AMDGPU.zeros(Fl
 function gemv!(y, gb::GBuf, m::DMat, x, P::Int; ldx = m.K, ldy = m.rows)
     (m.K % 256 == 0 && length(gb.part) >= nslices(m) * P * m.rows && length(gb.xt) >= m.K * P) || error("gemv!: K = $(m.K), scratch")
     nb = Int32(m.K ÷ 256); g = (cld(m.rows ÷ 64, 4), nslices(m))
-    @roc groupsize = 256 gridsize = cld(m.K * P, 256) k_xprep!(gb.xt, gb.xsm, x, Int32(m.K), Int32(ldx), Val(P), Val(GSZ[m.typ]))
+    @k @roc groupsize = 256 gridsize = cld(m.K * P, 256) k_xprep!(gb.xt, gb.xsm, x, Int32(m.K), Int32(ldx), Val(P), Val(GSZ[m.typ]))
     if m.typ == GQ5_K
-        @roc groupsize = 256 maxthreads = 256 gridsize = g k_gemv_q5k!(gb.part, m.W, gb.xt, gb.xsm, nb, Int32(m.rows), Val(P))
+        @k @roc groupsize = 256 maxthreads = 256 gridsize = g k_gemv_q5k!(gb.part, m.W, gb.xt, gb.xsm, nb, Int32(m.rows), Val(P))
     elseif m.typ == GQ6_K
-        @roc groupsize = 256 maxthreads = 256 gridsize = g k_gemv_q6k!(gb.part, m.W, m.D, gb.xt, gb.xsm, nb, Int32(m.rows), Val(P))
+        @k @roc groupsize = 256 maxthreads = 256 gridsize = g k_gemv_q6k!(gb.part, m.W, m.D, gb.xt, gb.xsm, nb, Int32(m.rows), Val(P))
     else
         error("gemv!: type $(m.typ)")
     end
-    @roc groupsize = 256 gridsize = cld(m.rows * P, 256) k_gemv_sum!(y, gb.part, Int32(nslices(m)), Int32(m.rows), Int32(ldy), Int32(P))
+    @k @roc groupsize = 256 gridsize = cld(m.rows * P, 256) k_gemv_sum!(y, gb.part, Int32(nslices(m)), Int32(m.rows), Int32(ldy), Int32(P))
     y
 end
 
@@ -586,37 +648,37 @@ end
 function allreduce_add!(E::Engine, n; set = false)
     s = zeros(Float32, n); hb = Vector{Float32}(undef, n)
     for D in E.dies
-        AMDGPU.device!(D.dev); copyto!(hb, 1, D.y, 1, n); s .+= hb
+        AMDGPU.device!(D.dev); @x(copyto!(hb, 1, D.y, 1, n)); s .+= hb
     end
     for D in E.dies
-        AMDGPU.device!(D.dev); copyto!(D.tb, 1, s, 1, n)
-        set && copyto!(D.x, 1, s, 1, n)
-        set || @roc groupsize = 256 gridsize = cld(n, 256) k_add!(D.x, D.tb, Int32(n))
+        AMDGPU.device!(D.dev); @x copyto!(D.tb, 1, s, 1, n)
+        set && @x(copyto!(D.x, 1, s, 1, n))
+        set || @k @roc groupsize = 256 gridsize = cld(n, 256) k_add!(D.x, D.tb, Int32(n))
     end
 end
 function forward!(E::Engine, st::Vector{DState}, toks::Vector{Int}, pos0::Int; logits = true, chk = nothing)
     P = length(toks); n = NE * P
     for D in E.dies
-        AMDGPU.device!(D.dev); copyto!(D.tok, 1, Int32.(toks), 1, P)
-        @roc groupsize = 256 gridsize = (20, P) k_embed!(D.y, D.emb.W, D.tok, Int32(VPD * D.d), Int32(VPD))
+        AMDGPU.device!(D.dev); @x copyto!(D.tok, 1, Int32.(toks), 1, P)
+        @k @roc groupsize = 256 gridsize = (20, P) k_embed!(D.y, D.emb.W, D.tok, Int32(VPD * D.d), Int32(VPD))
     end
     allreduce_add!(E, n; set = true)
     chk === nothing || chk(-1, :embed)
     for l in 0:NL-1
         for (D, S) in zip(E.dies, st)
             AMDGPU.device!(D.dev); W = D.L[l+1]
-            @roc groupsize = 256 gridsize = P k_rms!(D.h, D.x, W.an, Int32(NE))
+            @k @roc groupsize = 256 gridsize = P k_rms!(D.h, D.x, W.an, Int32(NE))
             if W.rec
                 ri = ridx(l)
                 gemv!(D.b1, D.gb, W.m1, D.h, P); gemv!(D.b2, D.gb, W.m2, D.h, P); gemv!(D.b3, D.gb, W.m3, D.h, P); gemv!(D.b4, D.gb, W.m4, D.h, P)
-                @roc groupsize = 256 gridsize = cld(QKVD, 256) k_dnconv!(D.u, D.b1, view(S.ring, 3QKVD*ri+1:3QKVD*(ri+1)), W.w1, Int32(P), Int32(QKVD))
-                @roc groupsize = 256 gridsize = VHD k_dnrec!(D.o, view(S.S, VHD*DK*DK*ri+1:VHD*DK*DK*(ri+1)), D.u, D.b2, D.b3, D.b4, W.w2, W.w3, W.w4, Int32(P))
+                @k @roc groupsize = 256 gridsize = cld(QKVD, 256) k_dnconv!(D.u, D.b1, view(S.ring, 3QKVD*ri+1:3QKVD*(ri+1)), W.w1, Int32(P), Int32(QKVD))
+                @k @roc groupsize = 256 gridsize = VHD k_dnrec!(D.o, view(S.S, VHD*DK*DK*ri+1:VHD*DK*DK*(ri+1)), D.u, D.b2, D.b3, D.b4, W.w2, W.w3, W.w4, Int32(P))
             else
                 ai = aidx(l); koff = Int32(ai * S.maxctx * HD); nch = cld(pos0 + P, CH)
                 gemv!(D.b1, D.gb, W.m1, D.h, P); gemv!(D.b2, D.gb, W.m2, D.h, P); gemv!(D.b3, D.gb, W.m3, D.h, P)
-                @roc groupsize = 256 gridsize = (7, P) k_attn_prep!(D.qh, D.gh, S.kc, S.vc, D.b1, D.b2, D.b3, W.w1, W.w2, Int32(pos0), koff)
-                @roc groupsize = 256 gridsize = (6P, nch) k_attn!(D.ap, D.qh, S.kc, S.vc, koff, Int32(pos0), Int32(nch))
-                @roc groupsize = 256 gridsize = 6P k_attn_comb!(D.o, D.ap, D.gh, Int32(nch))
+                @k @roc groupsize = 256 gridsize = (7, P) k_attn_prep!(D.qh, D.gh, S.kc, S.vc, D.b1, D.b2, D.b3, W.w1, W.w2, Int32(pos0), koff)
+                @k @roc groupsize = 256 gridsize = (6P, nch) k_attn!(D.ap, D.qh, S.kc, S.vc, koff, Int32(pos0), Int32(nch))
+                @k @roc groupsize = 256 gridsize = 6P k_attn_comb!(D.o, D.ap, D.gh, Int32(nch))
             end
             gemv!(D.y, D.gb, W.out, D.o, P)
         end
@@ -624,9 +686,9 @@ function forward!(E::Engine, st::Vector{DState}, toks::Vector{Int}, pos0::Int; l
         chk === nothing || chk(l, :mixer)
         for D in E.dies
             AMDGPU.device!(D.dev); W = D.L[l+1]
-            @roc groupsize = 256 gridsize = P k_rms!(D.h, D.x, W.pn, Int32(NE))
+            @k @roc groupsize = 256 gridsize = P k_rms!(D.h, D.x, W.pn, Int32(NE))
             gemv!(D.b1, D.gb, W.gate, D.h, P); gemv!(D.b2, D.gb, W.up, D.h, P)
-            @roc groupsize = 256 gridsize = cld(4352P, 256) k_silu_mul!(D.b1, D.b2, Int32(4352P))
+            @k @roc groupsize = 256 gridsize = cld(4352P, 256) k_silu_mul!(D.b1, D.b2, Int32(4352P))
             gemv!(D.y, D.gb, W.down, D.b1, P)
         end
         allreduce_add!(E, n)
@@ -636,9 +698,9 @@ function forward!(E::Engine, st::Vector{DState}, toks::Vector{Int}, pos0::Int; l
     Lg = Matrix{Float32}(undef, NV, P); hb = Vector{Float32}(undef, VPD * P)
     for D in E.dies
         AMDGPU.device!(D.dev)
-        @roc groupsize = 256 gridsize = P k_rms!(D.h, D.x, D.onrm, Int32(NE))
+        @k @roc groupsize = 256 gridsize = P k_rms!(D.h, D.x, D.onrm, Int32(NE))
         gemv!(D.logits, D.gb, D.head, D.h, P)
-        copyto!(hb, 1, D.logits, 1, VPD * P)
+        @x copyto!(hb, 1, D.logits, 1, VPD * P)
         for p in 1:P; Lg[VPD*D.d+1:VPD*(D.d+1), p] = view(hb, (p-1)*VPD+1:p*VPD); end
     end
     Lg
@@ -695,6 +757,12 @@ detok(vocab, ids) = String(UInt8[get(BDEC, ch, UInt8('?')) for i in ids for ch i
 
 # ---- greedy generation from token ids: prefill PMAX at a time, then one token a forward ----
 function gen(io, E::Engine, vocab, ids::Vector{Int}, n::Int)
+    gen1(devnull, E, vocab, ids, n)                        # warm: compile every kernel, fill the event pools
+    account(() -> gen1(devnull, E, vocab, ids, n), E)
+    _, res = account(() -> gen1(io, E, vocab, ids, n), E)
+    print_account(io, res)
+end
+function gen1(io, E::Engine, vocab, ids::Vector{Int}, n::Int)
     st = newstate(E, cld(length(ids) + n, CH) * CH)
     t0 = time(); Lg = nothing
     for p0 in 0:PMAX:length(ids)-1
