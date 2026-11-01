@@ -492,6 +492,19 @@ const QTR = NE ÷ ND
 @inline ld64a_sys(p::LP{UInt64}) = Base.llvmcall("%r = load atomic i64, ptr addrspace(1) %0 monotonic, align 8\nret i64 %r", UInt64, Tuple{LP{UInt64}}, p)
 @inline st64_sys(p::LP{UInt64}, v::UInt64) = Base.llvmcall("store atomic i64 %1, ptr addrspace(1) %0 monotonic, align 8\nret void", Cvoid, Tuple{LP{UInt64},UInt64}, p, v)
 @inline xword(v::Float32, tag::UInt64) = UInt64(reinterpret(UInt32, v)) | tag
+@inline c24(v::Float32) = (reinterpret(UInt32, v) + UInt32(0x80)) >> 8          # a float rounded to its top 24 bits
+@inline r24(v::Float32) = reinterpret(Float32, c24(v) << 8)
+@inline xpair(a::Float32, b::Float32, t16::UInt64) = t16 | UInt64(c24(a)) << 24 | UInt64(c24(b))
+@inline function xwait2(A::KA, q::LP{UInt64}, u::UInt64, t16::UInt64)  # the pair at q with this tag (u: its first read)
+    if u & 0xffff000000000000 != t16
+        tw = memtime()
+        while u & 0xffff000000000000 != t16
+            (memtime() - tw > TOUT || aborted(A)) && (atadd(A.bar + 8, UInt32(1)); break)
+            u = ld64a_sys(q)
+        end
+    end
+    (reinterpret(Float32, UInt32((u >> 24) & 0xffffff) << 8), reinterpret(Float32, UInt32(u & 0xffffff) << 8))
+end
 @inline function xwait(A::KA, q::LP{UInt64}, u::UInt64, tag::UInt64)   # the word at q with this tag (u: its first read)
     if u & 0xffffffff00000000 != tag
         tw = memtime()
@@ -518,22 +531,26 @@ function xwr_ph!(A::KA, l::Int32, j::Int32, w::LP{Float32}, set::Bool, xs::Int32
     end
     ta = UInt64(0)
     if P <= Int32(DW)
-        # decode width: one round trip. Every die writes its whole share (hxd), reads the other three and sums the
-        # four in die order (its own recomputed, not read back)
-        i = gtid(); did = i < Int32(NE) * P
-        while i < Int32(NE) * P
-            p = i ÷ Int32(NE); k = i - p * Int32(NE)
-            st64_sys(hxd(A, slot, d) + 8Int64(i), xword(share(p, k), tag)); i += nthr(A)
+        # decode width: one round trip. Every die writes its whole share (hxd), two elements a word (each a float
+        # rounded to 24 bits, with a 16-bit tag: the exchange number, the region zeroed before each request), reads
+        # the other three and sums the four in die order (its own share recomputed, rounded the same way, so x stays
+        # bit-identical on every die). The host reads are the cost: 8-byte words of one element read 45 us at two
+        # positions.
+        t16 = UInt64(1 + xs % Int32(65535)) << 48; H = Int32(NE ÷ 2)
+        i = gtid(); did = i < H * P
+        while i < H * P
+            p = i ÷ H; k = Int32(2) * (i - p * H)
+            st64_sys(hxd(A, slot, d) + 8Int64(i), xpair(share(p, k), share(p, k + Int32(1)), t16)); i += nthr(A)
         end
         done!(A, seq, t0, did)
         i = gtid()
-        while i < Int32(NE) * P
-            p = i ÷ Int32(NE); k = i - p * Int32(NE); o = 8Int64(i)      # (not i itself in the closures: it is reassigned)
+        while i < H * P
+            p = i ÷ H; k = Int32(2) * (i - p * H); o = 8Int64(i)        # (not i itself in the closures: it is reassigned)
             u3 = ntuple(e -> ld64a_sys(hxd(A, slot, (d + Int32(e)) & Int32(ND - 1)) + o), Val(ND - 1))
-            mine = share(p, k)
-            sh = ntuple(e -> xwait(A, hxd(A, slot, (d + Int32(e)) & Int32(ND - 1)) + o, u3[e], tag), Val(ND - 1))
+            m0 = r24(share(p, k)); m1 = r24(share(p, k + Int32(1)))
+            sh = ntuple(e -> xwait2(A, hxd(A, slot, (d + Int32(e)) & Int32(ND - 1)) + o, u3[e], t16), Val(ND - 1))
             ta == UInt64(0) && (ta = memtime())
-            xput!(A, w, set, p, k, dsum(mine, sh, d), P)
+            xput2!(A, w, set, p, k, dsum(m0, ntuple(e -> sh[e][1], Val(ND - 1)), d), dsum(m1, ntuple(e -> sh[e][2], Val(ND - 1)), d), P)
             i += nthr(A)
         end
     else
@@ -604,6 +621,20 @@ end
 @inline function dsum(mine::Float32, sh::NTuple{3,Float32}, d::Int32)
     v(s) = s == d ? mine : sh[(s - d) & Int32(ND - 1)]
     ((v(Int32(0)) + v(Int32(1))) + v(Int32(2))) + v(Int32(3))
+end
+# xput! for elements k, k + 1 of a lane (a wavefront holds 128 consecutive elements of one position)
+@inline function xput2!(A::KA, w::LP{Float32}, set::Bool, p, k, u0::Float32, u1::Float32, P)
+    ox = Int64(p) * NE + k
+    v0 = (set ? 0.0f0 : ld(A.x, ox)) + u0; v1 = (set ? 0.0f0 : ld(A.x, ox + 1)) + u1
+    st!(A.x, v0, ox); st!(A.x, v1, ox + 1)
+    x0 = v0 * ld(w, k); x1 = v1 * ld(w, k + Int32(1)); st!(A.xt, x0, Int64(k) * P + p); st!(A.xt, x1, Int64(k + Int32(1)) * P + p)
+    sq = AMDGPU.Device.wfred(+, v0 * v0 + v1 * v1)
+    tid() & Int32(63) == Int32(0) && atadd64(A.ssq + 8p, round(Int64, sq * 65536.0f0))
+    a = x0 + x1
+    for sh in (Cint(1), Cint(2), Cint(4)); a += AMDGPU.Device.shfl_xor(a, sh); end
+    c = a + AMDGPU.Device.shfl_xor(a, Cint(8))
+    k & Int32(15) == Int32(0) && st!(A.x16, a, Int64(k >> Int32(4)) * P + p)
+    k & Int32(31) == Int32(0) && st!(A.x32, c, Int64(k >> Int32(5)) * P + p)
 end
 # x[p][k] (+)= u, and the next norm's input: x w into xt, its 16- and 32-sums, the position's sum of squares (a
 # wavefront's lanes hold 64 consecutive k of one position)
@@ -1585,6 +1616,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
     rq = Int32.(vcat([[ioff[r], length(reqs[r][1]), reqs[r][2], ooff[r]] for r in 1:nr]...))
     nphase = (sum(cld(length(i), npos) for (i, _) in reqs) + maximum(last, reqs) + 2) * 1100; rid = (PE.rid[] += 1)
     for i in 1:8; unsafe_store!(Ptr{UInt64}(PE.hx.c + PE.hx.out), 0, i); end   # the counters
+    Libc.memset(PE.hx.p, 0, 8 * 2 * ND * DW * NE)         # the decode exchange words (their tags restart)
     accts = ROCVector{UInt64}[]; ibs = ROCVector{Int32}[]
     for d in 1:ND
         AMDGPU.device!(dies[d].dev); K = PE.K[d]
