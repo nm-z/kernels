@@ -12,7 +12,7 @@ function plabels()
     end
     append!(L, ["head", "hmax", "hred", "tok"])
 end
-function phases(io = stdout; skip = 1)
+function phases(io = stdout; skip = 1, nmax = typemax(Int))
     ah = LASTACCT[]; hz = PK[].hz; L = plabels(); n = length(L)
     ns = (length(ah) - 3) ÷ 2; nf = 0
     tot = Dict{String,Float64}(); gap = Dict{String,Float64}(); fw = Float64[]
@@ -29,7 +29,7 @@ function phases(io = stdout; skip = 1)
             end
             push!(fw, (pe - b0) / hz)
         end
-        nf += 1; s0 += n
+        nf += 1; s0 += n; nf >= skip + nmax && break
     end
     m = length(fw); m == 0 && return println(io, "no decode forwards")
     @printf(io, "%d forwards, %.2f ms each (median %.2f)\n", m, 1e3sum(fw) / m, 1e3sort(fw)[cld(m, 2)])

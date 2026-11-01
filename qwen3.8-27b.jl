@@ -402,6 +402,7 @@ end
 # for each load before the next add)
 @inline function psum(A::KA, o::Int64, ns, rows, P, p, r)
     s = 0.0f0; b = A.part + 4o; st = Int64(P) * rows; e = Int64(p) * rows + r
+    ns == Int32(1) && return ld(b, e)                      # a GEMM's (prefill) one complete slot
     for q in Int32(0):Int32(16):ns-Int32(1)
         v = let q = q; ntuple(j -> ld(b, Int64(min(q + Int32(j - 1), ns - Int32(1))) * st + e), Val(16)) end
         for j in 1:16; s += q + Int32(j - 1) < ns ? v[j] : 0.0f0; end
@@ -460,31 +461,30 @@ end
 #   1. every die writes its share of each other quarter to that quarter's owner (hxr: owner, source);
 #   2. the owner reads the three, sums the four in die order, and writes the total to each other die (hxg: reader,
 #      owner); each die reads the other three quarters' totals.
-# A word is 4 bytes: the float with its lowest mantissa bit set (so a written word is never 0), and each word has
-# one reader, which zeroes it after reading: a nonzero word is a fresh one. Every die adds the same totals, so x stays
-# bit-identical on the four dies. Then x (+)= the total, and the next norm's input is prepared: x w into xt with its
-# 16- and 32-sums, and the sum of squares a position (the consumers apply 1 / rms). Phase seq is the computing and
-# writing; seq + 1 is the rest, from when the first share arrived (the wait before it is idle).
+# A word is 8 bytes: the float and a tag (request number, exchange number), so a reader polls the data itself (one
+# round trip, nothing to clear). Every die adds the same totals, so x stays bit-identical on the four dies. Then
+# x (+)= the total, and the next norm's input is prepared: x w into xt with its 16- and 32-sums, and the sum of squares
+# a position (the consumers apply 1 / rms). Phase seq is the computing and writing; seq + 1 is the rest, from when
+# the first share arrived (the wait before it is idle).
 const QTR = NE ÷ ND
-@inline xmark(v::Float32) = reinterpret(UInt32, v) | UInt32(1)
-@inline hxr(A::KA, slot, q, s) = reinterpret(LP{UInt32}, A.hx + 4 * (((Int64(slot) * ND + q) * ND + s) * A.npos * QTR))
-@inline hxg(A::KA, slot, r, s) = reinterpret(LP{UInt32}, A.hx + 4 * ((((Int64(2) + slot) * ND + r) * ND + s) * A.npos * QTR))
-@inline ld32a_sys(p::LP{UInt32}) = Base.llvmcall("%r = load atomic i32, ptr addrspace(1) %0 monotonic, align 4\nret i32 %r", UInt32, Tuple{LP{UInt32}}, p)
-@inline st32_sys(p::LP{UInt32}, v::UInt32) = Base.llvmcall("store atomic i32 %1, ptr addrspace(1) %0 monotonic, align 4\nret void", Cvoid, Tuple{LP{UInt32},UInt32}, p, v)
-@inline function xwait(A::KA, q::LP{UInt32}, u::UInt32)    # the word at q (u: its first read), fresh; q zeroed
-    if u == UInt32(0)
+@inline hxr(A::KA, slot, q, s) = reinterpret(LP{UInt64}, A.hx + 8 * (((Int64(slot) * ND + q) * ND + s) * A.npos * QTR))
+@inline hxg(A::KA, slot, r, s) = reinterpret(LP{UInt64}, A.hx + 8 * ((((Int64(2) + slot) * ND + r) * ND + s) * A.npos * QTR))
+@inline ld64a_sys(p::LP{UInt64}) = Base.llvmcall("%r = load atomic i64, ptr addrspace(1) %0 monotonic, align 8\nret i64 %r", UInt64, Tuple{LP{UInt64}}, p)
+@inline st64_sys(p::LP{UInt64}, v::UInt64) = Base.llvmcall("store atomic i64 %1, ptr addrspace(1) %0 monotonic, align 8\nret void", Cvoid, Tuple{LP{UInt64},UInt64}, p, v)
+@inline xword(v::Float32, tag::UInt64) = UInt64(reinterpret(UInt32, v)) | tag
+@inline function xwait(A::KA, q::LP{UInt64}, u::UInt64, tag::UInt64)   # the word at q with this tag (u: its first read)
+    if u & 0xffffffff00000000 != tag
         tw = memtime()
-        while u == UInt32(0)
+        while u & 0xffffffff00000000 != tag
             (memtime() - tw > TOUT || aborted(A)) && (atadd(A.bar + 8, UInt32(1)); break)
-            u = ld32a_sys(q)
+            u = ld64a_sys(q)
         end
     end
-    st32_sys(q, UInt32(0))
-    u
+    reinterpret(Float32, UInt32(u & 0xffffffff))
 end
-@inline xf(u::UInt32) = reinterpret(Float32, u)
 function xwr_ph!(A::KA, l::Int32, j::Int32, w::LP{Float32}, set::Bool, xs::Int32, seq::Int32, P::Int32)
     t0 = memtime(); slot = xs & Int32(1); d = A.d
+    tag = UInt64(A.rid & Int32(255)) << 56 | UInt64((xs + Int32(1)) & Int32(0xffffff)) << 32
     rows, ns, W = if j >= Int32(0)                       # (one assignment each: the closure below captures them)
         _, r_, nb, _, _ = mat(A, l, j); (r_, nsx(nb, P), reinterpret(LP{UInt8}, Int64(0)))
     else
@@ -502,7 +502,7 @@ function xwr_ph!(A::KA, l::Int32, j::Int32, w::LP{Float32}, set::Bool, xs::Int32
         p = i ÷ Int32(QTR); kk = i - p * Int32(QTR); o = Int64(p) * QTR + kk
         for e in Int32(1):Int32(ND - 1)
             q = (d + e) & Int32(ND - 1)
-            st32_sys(hxr(A, slot, q, d) + 4o, xmark(share(p, q * Int32(QTR) + kk)))
+            st64_sys(hxr(A, slot, q, d) + 8o, xword(share(p, q * Int32(QTR) + kk), tag))
         end
         i += nthr(A)
     end
@@ -511,22 +511,22 @@ function xwr_ph!(A::KA, l::Int32, j::Int32, w::LP{Float32}, set::Bool, xs::Int32
     ta = UInt64(0); i = gtid()
     while i < Int32(QTR) * P
         p = i ÷ Int32(QTR); kk = i - p * Int32(QTR); o = Int64(p) * QTR + kk
-        u3 = ntuple(e -> ld32a_sys(hxr(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 4o), Val(ND - 1))
-        mine = xmark(share(p, d * Int32(QTR) + kk))
-        sh = ntuple(e -> xwait(A, hxr(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 4o, u3[e]), Val(ND - 1))
+        u3 = ntuple(e -> ld64a_sys(hxr(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 8o), Val(ND - 1))
+        mine = share(p, d * Int32(QTR) + kk)
+        sh = ntuple(e -> xwait(A, hxr(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 8o, u3[e], tag), Val(ND - 1))
         ta == UInt64(0) && (ta = memtime())
-        # the four shares in die order: source s's word is sh[(s - d) mod 4] (mine for s = d)
+        # the four shares in die order: source s's is sh[(s - d) mod 4] (mine for s = d)
         sw(s) = s == d ? mine : sh[(s - d) & Int32(ND - 1)]
-        tot = xmark(((xf(sw(Int32(0))) + xf(sw(Int32(1)))) + xf(sw(Int32(2)))) + xf(sw(Int32(3))))
+        tot = ((sw(Int32(0)) + sw(Int32(1))) + sw(Int32(2))) + sw(Int32(3))
         for e in Int32(1):Int32(ND - 1)
-            st32_sys(hxg(A, slot, (d + e) & Int32(ND - 1), d) + 4o, tot)
+            st64_sys(hxg(A, slot, (d + e) & Int32(ND - 1), d) + 8o, xword(tot, tag))
         end
-        g3 = ntuple(e -> ld32a_sys(hxg(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 4o), Val(ND - 1))
-        tq = ntuple(e -> xwait(A, hxg(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 4o, g3[e]), Val(ND - 1))
+        g3 = ntuple(e -> ld64a_sys(hxg(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 8o), Val(ND - 1))
+        tq = ntuple(e -> xwait(A, hxg(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 8o, g3[e], tag), Val(ND - 1))
         for e in Int32(0):Int32(ND - 1)                     # quarter (d + e) mod 4
             k = ((d + e) & Int32(ND - 1)) * Int32(QTR) + kk; u = e == Int32(0) ? tot : tq[e]
             ox = Int64(p) * NE + k
-            v = (set ? 0.0f0 : ld(A.x, ox)) + xf(u)
+            v = (set ? 0.0f0 : ld(A.x, ox)) + u
             st!(A.x, v, ox); xw = v * ld(w, k); st!(A.xt, xw, Int64(k) * P + p)
             sq = AMDGPU.Device.wfred(+, v * v)            # a wavefront holds 64 elements of one position
             tid() & Int32(63) == Int32(0) && atadd64(A.ssq + 8p, round(Int64, sq * 65536.0f0))
@@ -950,7 +950,7 @@ function hmax_ph!(A::KA, seq::Int32, P::Int32, pfirst::Int32)
     end
     done!(A, seq, t0, did)
 end
-@inline hxa(A::KA, slot, d, q) = A.hx + 4 * (4 * ND * ND * Int64(A.npos) * QTR) + 4 * (((Int64(slot) * ND + d) * NR + q) * 2)
+@inline hxa(A::KA, slot, d, q) = A.hx + 8 * (4 * ND * ND * Int64(A.npos) * QTR) + 4 * (((Int64(slot) * ND + d) * NR + q) * 2)
 function hred_ph!(A::KA, slot::Int32, seq::Int32, nq::Int32)
     (wgid() == Int32(0) && tid() < nq) || return
     t0 = memtime(); v = -Inf32; ix = Int32(0); q = tid()
@@ -1279,8 +1279,6 @@ struct KDie
     ap::ROCVector{Float32}; tok::ROCVector{Int32}; bar::ROCVector{UInt32}; ssq::ROCVector{Int64}
     posr::ROCVector{Int32}; posa::ROCVector{Int32}; tks::ROCVector{Int32}; sl::ROCVector{Int64}; rq::ROCVector{Int32}
 end
-# every exchange word back to zero (after an aborted request some were written and never read)
-xzero!(PE) = Libc.memset(PE.hx.p, 0, PE.hx.out)
 function KDie(D::Die, npos)
     AMDGPU.device!(D.dev); z(n) = AMDGPU.zeros(Float32, n); zi(n) = AMDGPU.zeros(Int32, n)
     KDie(ktable(D), z(NE * npos), z(NE * npos), z(NE ÷ 16 * npos), z(NE ÷ 32 * npos), z(max(VPD * 10, 2 * 4352 * npos, VPD * NSCORE)),
@@ -1293,9 +1291,8 @@ struct HostX
     p::Ptr{UInt8}; nbytes::Int; out::Int; tok::Int
 end
 function HostX(npos, maxgen)
-    out = 4 * 4 * ND * ND * npos * QTR + 4 * 2 * ND * NR * 2; tok = out + 64; n = tok + 4maxgen; r = Ref{Ptr{Cvoid}}(C_NULL)
+    out = 8 * 4 * ND * ND * npos * QTR + 4 * 2 * ND * NR * 2; tok = out + 64; n = tok + 4maxgen; r = Ref{Ptr{Cvoid}}(C_NULL)
     AMDGPU.HIP.hipHostMalloc(r, n, AMDGPU.HIP.hipHostMallocPortable | AMDGPU.HIP.hipHostMallocMapped | AMDGPU.HIP.hipHostMallocCoherent)
-    Libc.memset(Ptr{UInt8}(r[]), 0, n)                    # a fresh exchange word is a nonzero one
     HostX(Ptr{UInt8}(r[]), n, out, tok)
 end
 lp(T, p::Ptr) = reinterpret(LP{T}, p)
@@ -1327,7 +1324,7 @@ function clockhz(D::Die)
     hz
 end
 # npos: the positions a prefill forward takes, the most that fit (host exchange memory is the tighter bound here)
-function PEngine(dies; maxgen = 8192, npos = 2048)
+function PEngine(dies; maxgen = 8192, npos = 1024)
     K = [KDie(D, npos) for D in dies]; hx = HostX(npos, maxgen)
     AMDGPU.device!(dies[1].dev)
     A = kargs(K, hx, 1, 0, AMDGPU.zeros(UInt64, 4), AMDGPU.zeros(Int32, 1), 0, 0, 1, nothing, npos, 0)
@@ -1354,6 +1351,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
     1 <= nr <= NR || error("$nr requests: at most $NR at once")
     mc = minimum(s[1].maxctx for s in sts)
     for (inp, ngen) in reqs
+        isempty(inp) && error("a request with no input tokens")
         length(inp) + ngen <= mc || error("request of $(length(inp) + ngen) positions: the state holds $mc")
     end
     sum(last, reqs) <= PE.maxgen || error("$(sum(last, reqs)) tokens: the output holds $(PE.maxgen)")
@@ -1386,7 +1384,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
         AMDGPU.unsafe_free!(accts[d]); AMDGPU.unsafe_free!(ibs[d])
     end
     ab = [(AMDGPU.device!(D.dev); Array(K.bar)[3]) for (D, K) in zip(dies, PE.K)]
-    any(!=(0), ab) && (xzero!(PE); error("persistent kernel aborted (a wait passed 10 s): $ab"))
+    any(!=(0), ab) && (error("persistent kernel aborted (a wait passed 10 s): $ab"))
     toks = [[Int(unsafe_load(Ptr{Int32}(PE.hx.p + PE.hx.tok), ooff[r] + i)) for i in 1:reqs[r][2]] for r in 1:nr]
     toks, res, tpre, tdec
 end
