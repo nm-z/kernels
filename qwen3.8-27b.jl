@@ -456,8 +456,10 @@ end
 end
 # The exchange: an all-reduce over the four dies of this die's share (the K-slice sums of matrix (l, j), or with
 # j < 0 its embedding rows of tok[p]), through page-locked host memory. A die reads host memory at about 4.5 GB/s
-# with 2 us a round trip (writes are posted), so it is a reduce-scatter then an all-gather: die d owns quarter d of
-# the elements (QTR of them);
+# with 2 us a round trip (writes are posted). At decode width (P <= NR) the round trips are the cost: each die writes
+# its share once (hxd) and reads the other three. A prefill's bytes are the cost: a reduce-scatter then an
+# all-gather, 3/4 fewer bytes read (decode 31.5 tok/s with the one-round form, 29.2 with the two-round; a 512-token
+# prefill 1.5x faster with the two-round): die d owns quarter d of the elements (QTR of them);
 #   1. every die writes its share of each other quarter to that quarter's owner (hxr: owner, source);
 #   2. the owner reads the three, sums the four in die order, and writes the total to each other die (hxg: reader,
 #      owner); each die reads the other three quarters' totals.
@@ -469,6 +471,7 @@ end
 const QTR = NE ÷ ND
 @inline hxr(A::KA, slot, q, s) = reinterpret(LP{UInt64}, A.hx + 8 * (((Int64(slot) * ND + q) * ND + s) * A.npos * QTR))
 @inline hxg(A::KA, slot, r, s) = reinterpret(LP{UInt64}, A.hx + 8 * ((((Int64(2) + slot) * ND + r) * ND + s) * A.npos * QTR))
+@inline hxd(A::KA, slot, s) = reinterpret(LP{UInt64}, A.hx + 8 * ((Int64(slot) * ND + s) * NR * NE))   # (inside hxr's space)
 @inline ld64a_sys(p::LP{UInt64}) = Base.llvmcall("%r = load atomic i64, ptr addrspace(1) %0 monotonic, align 8\nret i64 %r", UInt64, Tuple{LP{UInt64}}, p)
 @inline st64_sys(p::LP{UInt64}, v::UInt64) = Base.llvmcall("store atomic i64 %1, ptr addrspace(1) %0 monotonic, align 8\nret void", Cvoid, Tuple{LP{UInt64},UInt64}, p, v)
 @inline xword(v::Float32, tag::UInt64) = UInt64(reinterpret(UInt32, v)) | tag
@@ -496,49 +499,78 @@ function xwr_ph!(A::KA, l::Int32, j::Int32, w::LP{Float32}, set::Bool, xs::Int32
         r = ld(A.tok, p) - Int32(VPD) * d
         r >= Int32(0) && r < Int32(VPD) ? embval(W, r, k) : 0.0f0
     end
-    # 1. this die's share of the other quarters, to their owners
-    i = gtid(); did = i < Int32(QTR) * P
-    while i < Int32(QTR) * P
-        p = i ÷ Int32(QTR); kk = i - p * Int32(QTR); o = Int64(p) * QTR + kk
-        for e in Int32(1):Int32(ND - 1)
-            q = (d + e) & Int32(ND - 1)
-            st64_sys(hxr(A, slot, q, d) + 8o, xword(share(p, q * Int32(QTR) + kk), tag))
+    ta = UInt64(0)
+    if P <= Int32(NR)
+        # decode width: one round trip. Every die writes its whole share (hxd), reads the other three and sums the
+        # four in die order (its own recomputed, not read back)
+        i = gtid(); did = i < Int32(NE) * P
+        while i < Int32(NE) * P
+            p = i ÷ Int32(NE); k = i - p * Int32(NE)
+            st64_sys(hxd(A, slot, d) + 8Int64(i), xword(share(p, k), tag)); i += nthr(A)
         end
-        i += nthr(A)
-    end
-    done!(A, seq, t0, did)
-    # 2. this die's quarter: the four shares summed and sent out; then the other quarters' totals
-    ta = UInt64(0); i = gtid()
-    while i < Int32(QTR) * P
-        p = i ÷ Int32(QTR); kk = i - p * Int32(QTR); o = Int64(p) * QTR + kk
-        u3 = ntuple(e -> ld64a_sys(hxr(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 8o), Val(ND - 1))
-        mine = share(p, d * Int32(QTR) + kk)
-        sh = ntuple(e -> xwait(A, hxr(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 8o, u3[e], tag), Val(ND - 1))
-        ta == UInt64(0) && (ta = memtime())
-        # the four shares in die order: source s's is sh[(s - d) mod 4] (mine for s = d)
-        sw(s) = s == d ? mine : sh[(s - d) & Int32(ND - 1)]
-        tot = ((sw(Int32(0)) + sw(Int32(1))) + sw(Int32(2))) + sw(Int32(3))
-        for e in Int32(1):Int32(ND - 1)
-            st64_sys(hxg(A, slot, (d + e) & Int32(ND - 1), d) + 8o, xword(tot, tag))
+        done!(A, seq, t0, did)
+        i = gtid()
+        while i < Int32(NE) * P
+            p = i ÷ Int32(NE); k = i - p * Int32(NE); o = 8Int64(i)      # (not i itself in the closures: it is reassigned)
+            u3 = ntuple(e -> ld64a_sys(hxd(A, slot, (d + Int32(e)) & Int32(ND - 1)) + o), Val(ND - 1))
+            mine = share(p, k)
+            sh = ntuple(e -> xwait(A, hxd(A, slot, (d + Int32(e)) & Int32(ND - 1)) + o, u3[e], tag), Val(ND - 1))
+            ta == UInt64(0) && (ta = memtime())
+            xput!(A, w, set, p, k, dsum(mine, sh, d), P)
+            i += nthr(A)
         end
-        g3 = ntuple(e -> ld64a_sys(hxg(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 8o), Val(ND - 1))
-        tq = ntuple(e -> xwait(A, hxg(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 8o, g3[e], tag), Val(ND - 1))
-        for e in Int32(0):Int32(ND - 1)                     # quarter (d + e) mod 4
-            k = ((d + e) & Int32(ND - 1)) * Int32(QTR) + kk; u = e == Int32(0) ? tot : tq[e]
-            ox = Int64(p) * NE + k
-            v = (set ? 0.0f0 : ld(A.x, ox)) + u
-            st!(A.x, v, ox); xw = v * ld(w, k); st!(A.xt, xw, Int64(k) * P + p)
-            sq = AMDGPU.Device.wfred(+, v * v)            # a wavefront holds 64 elements of one position
-            tid() & Int32(63) == Int32(0) && atadd64(A.ssq + 8p, round(Int64, sq * 65536.0f0))
-            a = xw
-            for sh2 in (Cint(1), Cint(2), Cint(4), Cint(8)); a += AMDGPU.Device.shfl_xor(a, sh2); end
-            c = a + AMDGPU.Device.shfl_xor(a, Cint(16))
-            k & Int32(15) == Int32(0) && st!(A.x16, a, Int64(k >> Int32(4)) * P + p)
-            k & Int32(31) == Int32(0) && st!(A.x32, c, Int64(k >> Int32(5)) * P + p)
+    else
+        # prefill: bytes matter more than round trips. 1. this die's share of the other quarters, to their owners
+        i = gtid(); did = i < Int32(QTR) * P
+        while i < Int32(QTR) * P
+            p = i ÷ Int32(QTR); kk = i - p * Int32(QTR); o = Int64(p) * QTR + kk
+            for e in Int32(1):Int32(ND - 1)
+                q = (d + e) & Int32(ND - 1)
+                st64_sys(hxr(A, slot, q, d) + 8o, xword(share(p, q * Int32(QTR) + kk), tag))
+            end
+            i += nthr(A)
         end
-        i += nthr(A)
+        done!(A, seq, t0, did)
+        # 2. this die's quarter: the four shares summed and sent out; then the other quarters' totals
+        i = gtid()
+        while i < Int32(QTR) * P
+            p = i ÷ Int32(QTR); kk = i - p * Int32(QTR); o = Int64(p) * QTR + kk
+            u3 = ntuple(e -> ld64a_sys(hxr(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 8o), Val(ND - 1))
+            mine = share(p, d * Int32(QTR) + kk)
+            sh = ntuple(e -> xwait(A, hxr(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 8o, u3[e], tag), Val(ND - 1))
+            ta == UInt64(0) && (ta = memtime())
+            tot = dsum(mine, sh, d)
+            for e in Int32(1):Int32(ND - 1)
+                st64_sys(hxg(A, slot, (d + e) & Int32(ND - 1), d) + 8o, xword(tot, tag))
+            end
+            g3 = ntuple(e -> ld64a_sys(hxg(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 8o), Val(ND - 1))
+            tq = ntuple(e -> xwait(A, hxg(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 8o, g3[e], tag), Val(ND - 1))
+            for e in Int32(0):Int32(ND - 1)                 # quarter (d + e) mod 4
+                xput!(A, w, set, p, ((d + e) & Int32(ND - 1)) * Int32(QTR) + kk, e == Int32(0) ? tot : tq[e], P)
+            end
+            i += nthr(A)
+        end
     end
     did && tid() == Int32(0) && (pa = A.acct + 8 * (3 + 2Int64(seq + Int32(1))); umin64(pa, ta); umax64(pa + 8, memtime()))
+end
+# the four shares in die order: die s's is sh[(s - d) mod 4], this die's own mine
+@inline function dsum(mine::Float32, sh::NTuple{3,Float32}, d::Int32)
+    v(s) = s == d ? mine : sh[(s - d) & Int32(ND - 1)]
+    ((v(Int32(0)) + v(Int32(1))) + v(Int32(2))) + v(Int32(3))
+end
+# x[p][k] (+)= u, and the next norm's input: x w into xt, its 16- and 32-sums, the position's sum of squares (a
+# wavefront's lanes hold 64 consecutive k of one position)
+@inline function xput!(A::KA, w::LP{Float32}, set::Bool, p, k, u::Float32, P)
+    ox = Int64(p) * NE + k
+    v = (set ? 0.0f0 : ld(A.x, ox)) + u
+    st!(A.x, v, ox); xw = v * ld(w, k); st!(A.xt, xw, Int64(k) * P + p)
+    sq = AMDGPU.Device.wfred(+, v * v)
+    tid() & Int32(63) == Int32(0) && atadd64(A.ssq + 8p, round(Int64, sq * 65536.0f0))
+    a = xw
+    for sh in (Cint(1), Cint(2), Cint(4), Cint(8)); a += AMDGPU.Device.shfl_xor(a, sh); end
+    c = a + AMDGPU.Device.shfl_xor(a, Cint(16))
+    k & Int32(15) == Int32(0) && st!(A.x16, a, Int64(k >> Int32(4)) * P + p)
+    k & Int32(31) == Int32(0) && st!(A.x32, c, Int64(k >> Int32(5)) * P + p)
 end
 # raise this die's exchange counter and wait for the other dies' (workgroup 0; the rest wait at the next barrier):
 # the argmax exchange
