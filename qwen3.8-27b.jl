@@ -1328,13 +1328,28 @@ end
     l == Int32(MTPL) ? (mhead ? Int32(21) : Int32(16)) : isrec(l) ? Int32(8) : Int32(10)
 # head: the trunk's head over positions pfirst .. P - 1; mtp: the MTP layer after it, its head (mhead) over
 # positions mpf ..; pre: a prefill forward; spec: a verify forward (pairs of positions)
-function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, xf::Int32, head::Bool, pfirst::Int32, mtp::Bool, mhead::Bool, mpf::Int32, pre::Bool, T)
+# A cancel (host word 13 set by the host): die 0 answers with the check to stop at (word 12), the one after this. Every
+# die runs the same checks in the same order, with an exchange between two checks, and a die gets past that exchange
+# only after die 0's writes of it, which follow die 0's answer: so all four dies stop at the same check. Workgroup 0
+# posts this die's decision for check nc (bar word 19); after the next barrier every workgroup reads it (stopped).
+@inline function cancelq!(A::KA, nc::Int32)
+    if wgid() == Int32(0) && tid() == Int32(0)
+        # (the fence: the answer is out before this workgroup reaches the barrier, so before any exchange write after it)
+        (A.d == Int32(0) && ldacq_sys(A.hf + 48) == UInt32(0) && ldacq_sys(A.hf + 52) != UInt32(0)) && (strel_sys(A.hf + 48, UInt32(nc + Int32(1))); fence_rel_sys())
+        sa = ldacq_sys(A.hf + 48); stmono(A.bar + 76, sa != UInt32(0) && UInt32(nc) >= sa ? UInt32(1) : UInt32(0))
+    end
+end
+@inline stopped(A::KA) = ldmono(A.bar + 76) != UInt32(0)
+# (a prefill forward also checks at each trunk layer: it runs for seconds; nc counts the checks)
+function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, xf::Int32, head::Bool, pfirst::Int32, mtp::Bool, mhead::Bool, mpf::Int32, pre::Bool, T, nc::Int32)
     bx = P > Int32(DW)                                     # (the exchanges' counted path, prefill)
     xwr_ph!(A, Int32(0), Int32(-1), fvec(A, 0, 0), true, xs, xf, seq, P); seq += Int32(2); xs += Int32(1); xf += bx ? Int32(1) : Int32(0); gbar!(A)
     nlr = Int32(ldacq(A.bar + 12)); nl = nlr == Int32(0) ? Int32(NL) : nlr   # bar[3]: layers to run (0: all), for debugging
     gen = A.mode == Int32(0); spec = !pre && A.spec != Int32(0)
     l = Int32(0); i = Int32(0)
     while l <= Int32(MTPL)
+        chk = pre && i == Int32(0) && l < Int32(64)
+        chk && (cancelq!(A, nc); nc += Int32(1))
         kind, j0, nm, zs = lstep(l, i)
         hd = l == Int32(64) || (l == Int32(MTPL) && j0 == Int32(1))   # a head step
         pf = l == Int32(MTPL) ? mpf : pfirst; nq = P - pf
@@ -1375,6 +1390,7 @@ function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, xf::Int32, he
             dtok_ph!(A, xs & Int32(1), seq, nq, pf, pre); seq += Int32(1); xs += Int32(1)
         end
         gbar!(A)
+        (chk && stopped(A)) && return seq, xs, xf, nc, true
         i += Int32(1)
         if i == nsteps(l, gen, mhead)
             i = Int32(0)
@@ -1382,7 +1398,7 @@ function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, xf::Int32, he
                 l == Int32(64) ? (mtp ? Int32(MTPL) : Int32(MTPL + 1)) : Int32(MTPL + 1)
         end
     end
-    seq, xs, xf
+    seq, xs, xf, nc, false
 end
 # the requests (up to NR), one dispatch: each request's prefill (or scoring) in forwards of as many positions as fit
 # (npos), then the decode steps of all of them together: a position a request a forward, or with MTP (spec) two
@@ -1392,18 +1408,10 @@ function k_req!(A::KA)
     T = (@ROCStaticLocalArray(Float32, 32 * 64, false), @ROCStaticLocalArray(Float32, 32 * 64, false))   # the GEMM tiles
     tid() == Int32(0) && umin64(A.acct, memtime())
     seq = Int32(0); xs = Int32(0); xf = Int32(0); spec = A.spec != Int32(0) && A.mode == Int32(0)
-    r = Int32(0); a = Int32(0); prefill = true; pdone = Int32(0); nf = Int32(0)
+    r = Int32(0); a = Int32(0); prefill = true; pdone = Int32(0); nc = Int32(0); stop = false
     while true
-        # a cancel (host word 13 set): die 0 answers with the forward to stop at (word 12), the one after this. A die
-        # reaches that forward only after die 0's exchange writes of this one, which follow its answer, so all four
-        # stop at the same forward. Workgroup 0 reads it; a barrier gives every workgroup the same answer (bar word 19).
-        if wgid() == Int32(0) && tid() == Int32(0)
-            (A.d == Int32(0) && ldacq_sys(A.hf + 48) == UInt32(0) && ldacq_sys(A.hf + 52) != UInt32(0)) && strel_sys(A.hf + 48, UInt32(nf + Int32(1)))
-            sa = ldacq_sys(A.hf + 48); stmono(A.bar + 76, sa != UInt32(0) && UInt32(nf) >= sa ? UInt32(1) : UInt32(0))
-        end
-        gbar!(A)
-        ldmono(A.bar + 76) != UInt32(0) && break
-        nf += Int32(1)
+        cancelq!(A, nc); nc += Int32(1); gbar!(A)          # a cancel check each forward
+        stopped(A) && break
         if prefill && r >= A.nreq                          # every prefill done
             tid() == Int32(0) && umax64(A.acct + 16, memtime())
             prefill = false
@@ -1414,7 +1422,8 @@ function k_req!(A::KA)
             head = A.mode == Int32(1) || (a + P == ninp && ngen > Int32(0)); pfirst = A.mode == Int32(1) ? Int32(0) : P - Int32(1)
             mtp = spec && ngen > Int32(0)
             zero_ssq!(A, P); setpos_ph!(A, r, a, P); gbar!(A)
-            seq, xs, xf = fwd!(A, P, amax, seq, xs, xf, head, pfirst, mtp, head, P - Int32(1), true, T)
+            seq, xs, xf, nc, stop = fwd!(A, P, amax, seq, xs, xf, head, pfirst, mtp, head, P - Int32(1), true, T, nc)
+            stop && break
             # the prompt positions run so far, for the host's progress lines (die 0; host counter word 14)
             pdone += P; (A.d == Int32(0) && wgid() == Int32(0) && tid() == Int32(0)) && strel_sys(A.hf + 56, UInt32(pdone))
             a += P
@@ -1429,7 +1438,7 @@ function k_req!(A::KA)
             end
             P == Int32(0) && break
             zero_ssq!(A, P); setpos_ph!(A, Int32(-1), Int32(0), P); gbar!(A)
-            seq, xs, xf = fwd!(A, P, amax, seq, xs, xf, true, Int32(0), spec, spec, Int32(0), false, T)
+            seq, xs, xf, nc, stop = fwd!(A, P, amax, seq, xs, xf, true, Int32(0), spec, spec, Int32(0), false, T, nc)
         end
     end
     tid() == Int32(0) && umax64(A.acct + 8, memtime())
@@ -1616,7 +1625,8 @@ end
 # its state sts[r] (one DState a die). mode 0: greedy; mode 1: score one request\x27s input (the logits of every
 # position into lg, a die\x27s vocabulary rows). Returns each request\x27s tokens, each die\x27s (instruction, idle, wall)
 # seconds, and the prefill and decode seconds (die 0\x27s clock).
-function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing, stops = (-1, -1))
+# (ctl: zero the progress and cancel words 12 .. 15 too; chat zeroes them itself, before it can see an EOF)
+function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing, stops = (-1, -1), ctl = true)
     dies = PE.dies; npos = mode == 1 ? min(PE.npos, NSCORE) : PE.npos; nr = length(reqs)
     1 <= nr <= NR || error("$nr requests: at most $NR at once")
     mc = minimum(s[1].maxctx for s in sts)
@@ -1628,7 +1638,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing, stops = (-1,
     inp = Int32.(vcat(first.(reqs)...)); ioff = cumsum([0; length.(first.(reqs))]); ooff = cumsum([0; last.(reqs)])
     rq = Int32.(vcat([[ioff[r], length(reqs[r][1]), reqs[r][2], ooff[r]] for r in 1:nr]...))
     nphase = (sum(cld(length(i), npos) for (i, _) in reqs) + maximum(last, reqs) + 2) * 1100; rid = (PE.rid[] += 1)
-    for i in 1:8; unsafe_store!(Ptr{UInt64}(PE.hx.c + PE.hx.out), 0, i); end   # the counters
+    for i in 1:(ctl ? 8 : 6); unsafe_store!(Ptr{UInt64}(PE.hx.c + PE.hx.out), 0, i); end   # the counters
     Libc.memset(PE.hx.p, 0, 8 * 2 * ND * DW * NE)         # the decode exchange words (their tags restart)
     DPMLOCK[] && dpm!(dies, "high")                       # the clocks up for the request (the dies can't tell it's coming)
     accts = ROCVector{UInt64}[]; ibs = ROCVector{Int32}[]
@@ -1751,7 +1761,8 @@ function pinit()
 end
 function serve(path, sock)
     dies, g = load_engine(path)
-    SRV[] = (dies = dies, g = g, vocab = g.kv["tokenizer.ggml.tokens"], file = abspath(@__FILE__))
+    dpm!(dies, "auto")                                    # (a previous engine killed mid-request left them forced high)
+    SRV[] =(dies = dies, g = g, vocab = g.kv["tokenizer.ggml.tokens"], file = abspath(@__FILE__))
     SLOTS[] = [newstate(dies, MAXCTX) for _ in 1:NR]
     pinit()
     lk = ReentrantLock()
@@ -1794,28 +1805,41 @@ function chat(c, nnew, ids, stops)
     PE = PK[]; nnew = clamp(nnew, 1, min(PE.maxgen, MAXCTX - length(ids)))
     outp = Ptr{Int32}(PE.hx.c + PE.hx.tok)
     for i in 1:nnew; unsafe_store!(outp, Int32(-1), i); end
-    t0 = time(); job = Threads.@spawn request!(PE, [(ids, nnew)], SLOTS[][1:1], 0; stops)
-    n = 0; t1 = 0.0; ended = 0; pr = 0; tp = 0.0
-    prog = Ptr{UInt32}(PE.hx.c + PE.hx.out + 56)           # the prompt positions the kernel has run (host word 14)
+    hw(i) = Ptr{UInt32}(PE.hx.c + PE.hx.out + 4i)         # host words: 13 cancel, 14 the prompt positions run
+    for i in 12:15; unsafe_store!(hw(i), UInt32(0)); end
+    t0 = time(); job = Threads.@spawn request!(PE, [(ids, nnew)], SLOTS[][1:1], 0; stops, ctl = false)
+    n = 0; t1 = 0.0; ended = 0; pr = 0; tp = 0.0; gone = false
+    # a write to a client that has gone fails: the request is cancelled, and this still waits for the kernel (the
+    # lock is held until it stops, so no request starts under it)
+    say(a...) = gone || try
+        println(c, a...)
+    catch
+        gone = true; unsafe_store!(hw(13), UInt32(1))
+    end
     function progress()                                    # "prog ran total cached", at most one every 500 ms
         n == 0 || return
-        ran = Int(unsafe_load(prog)); now = time()
-        (ran > pr && now - tp >= 0.5) && (println(c, "prog ", ran, " ", length(ids), " 0"); pr = ran; tp = now)
+        ran = Int(unsafe_load(hw(14))); now = time()
+        (ran > pr && now - tp >= 0.5) && (say("prog ", ran, " ", length(ids), " 0"); pr = ran; tp = now)
     end
     pump() = while n < nnew
         t = unsafe_load(outp, n + 1); t < 0 && break
-        n += 1; n == 1 && (t1 = time()); println(c, "tok ", t); (t == stops[1] || t == stops[2]) && (ended = 1)
+        n += 1; n == 1 && (t1 = time()); say("tok ", t); (t == stops[1] || t == stops[2]) && (ended = 1)
     end
-    # cancel_on_eof: flashd closes its side when the client goes; the kernel then stops within two forwards
+    # cancel_on_eof: flashd closes its side when the client goes; the kernel stops at its next check (a forward at
+    # decode, a layer in a prefill)
     @async try
-        eof(c) && !istaskdone(job) && unsafe_store!(Ptr{UInt32}(PE.hx.c + PE.hx.out + 52), UInt32(1))
+        eof(c) && !istaskdone(job) && unsafe_store!(hw(13), UInt32(1))
+    catch
+        unsafe_store!(hw(13), UInt32(1))
+    end
+    while !istaskdone(job); progress(); pump(); gone || try flush(c) catch; gone = true end; sleep(0.005); end
+    res = fetch(job); pump()
+    gone || try
+        @printf(c, "done %d %d %d %.1f %.1f 0 0\n", n, ended, length(ids), 1e3(time() - t0), 1e3(t1 - t0)); flush(c)
     catch
     end
-    while !istaskdone(job); progress(); pump(); flush(c); sleep(0.005); end
-    res = fetch(job); pump()
-    @printf(c, "done %d %d %d %.1f %.1f 0 0\n", n, ended, length(ids), 1e3(time() - t0), 1e3(t1 - t0)); flush(c)
-    @printf("chat: %d prompt, %d out, prefill %.2f tok/s, decode %.2f tok/s, idle time %.1f%%\n", length(ids), n,
-            length(ids) / res[3], max(n - 1, 0) / max(res[4], 1e-9), idlepct(res[2])); flush(stdout)
+    @printf("chat: %d prompt, %d out, prefill %.2f tok/s, decode %.2f tok/s, idle time %.1f%%%s\n", length(ids), n,
+            length(ids) / res[3], max(n - 1, 0) / max(res[4], 1e-9), idlepct(res[2]), unsafe_load(hw(13)) != 0 ? " (cancelled)" : ""); flush(stdout)
 end
 function handle(c, line)
     a = split(line); s = SRV[]
