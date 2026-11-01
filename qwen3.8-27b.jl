@@ -289,6 +289,7 @@ const SLP = 2                                              # s_sleep units (64 c
 @inline ssleep() = ccall("llvm.amdgcn.s.sleep", llvmcall, Cvoid, (Int32,), Int32(SLP))
 @inline atadd(p::LP{UInt32}, v::UInt32) = Base.llvmcall("%r = atomicrmw add ptr addrspace(1) %0, i32 %1 syncscope(\"agent\") acq_rel, align 4\nret i32 %r", UInt32, Tuple{LP{UInt32},UInt32}, p, v)
 @inline ldacq(p::LP{UInt32}) = Base.llvmcall("%r = load atomic i32, ptr addrspace(1) %0 syncscope(\"agent\") acquire, align 4\nret i32 %r", UInt32, Tuple{LP{UInt32}}, p)
+@inline ldmono(p::LP{UInt32}) = Base.llvmcall("%r = load atomic i32, ptr addrspace(1) %0 syncscope(\"agent\") monotonic, align 4\nret i32 %r", UInt32, Tuple{LP{UInt32}}, p)
 @inline stmono(p::LP{UInt32}, v::UInt32) = Base.llvmcall("store atomic i32 %1, ptr addrspace(1) %0 syncscope(\"agent\") monotonic, align 4\nret void", Cvoid, Tuple{LP{UInt32},UInt32}, p, v)
 @inline ldacq_sys(p::LP{UInt32}) = Base.llvmcall("%r = load atomic volatile i32, ptr addrspace(1) %0 acquire, align 4\nret i32 %r", UInt32, Tuple{LP{UInt32}}, p)
 @inline strel_sys(p::LP{UInt32}, v::UInt32) = Base.llvmcall("store atomic volatile i32 %1, ptr addrspace(1) %0 release, align 4\nret void", Cvoid, Tuple{LP{UInt32},UInt32}, p, v)
@@ -331,7 +332,7 @@ struct KA
     posr::LP{Int32}; posa::LP{Int32}; tks::LP{Int32}         # a forward position's request and position; a request's last token
     npos::Int32                                            # positions a prefill forward (the most that fit)
     ssq::LP{Int64}                                         # sum of squares of x a position (fixed point, 2^-16)
-    rid::Int32                                             # request number (in the exchange tags)
+    rid::Int32                                             # request number
 end
 const NR = 2                                               # requests at once
 @inline slp(A::KA, r, j) = ld(A.sl, 4Int64(r) + j)
@@ -360,14 +361,17 @@ const TOUT = Int64(270_000_000)                            # 10 s of the 27 MHz 
 # grid barrier (count, generation, abort); a wait past TOUT sets abort, after which every barrier passes at once
 @inline function gbar!(A::KA)
     fence_rel(); sync_workgroup()
-    if workitemIdx().x == 1 && !aborted(A)
-        g = ldacq(A.bar + 4)
+    if workitemIdx().x == 1
+        # the generation (same cache line as the count, so it is read before the arrive lands) with a plain load,
+        # and the abort flag only while waiting: two acquire loads in a row cost a round trip each
+        # (one counter: two levels, groups of 8 on their own cache lines, measured 2.55 us a barrier against 2.0)
+        g = ldmono(A.bar + 4)
         if atadd(A.bar, UInt32(1)) == UInt32(A.nwg - 1)
             stmono(A.bar, UInt32(0)); atadd(A.bar + 4, UInt32(1))
         else
             t0 = memtime()
             while ldacq(A.bar + 4) == g
-                (memtime() - t0 > TOUT) && (atadd(A.bar + 8, UInt32(1)); break)
+                (memtime() - t0 > TOUT || aborted(A)) && (atadd(A.bar + 8, UInt32(1)); break)
                 ssleep()
             end
         end
@@ -433,12 +437,6 @@ end
 @inline function done!(A::KA, seq, t0, did)                # a workgroup's part of phase seq into the accounting
     did && tid() == Int32(0) && (p = A.acct + 8 * (3 + 2Int64(seq)); umin64(p, t0); umax64(p + 8, memtime()))
 end
-# the exchange words: (value bits, exchange number + 1), so a reader polls the data itself (the host memory is zeroed
-# before each request)
-@inline hxs(A::KA, slot, d) = reinterpret(LP{UInt64}, A.hx + 8 * ((Int64(slot) * ND + d) * A.npos * NE))
-@inline st64_sys(p::LP{UInt64}, v::UInt64) = Base.llvmcall("store atomic volatile i64 %1, ptr addrspace(1) %0 monotonic, align 8\nret void", Cvoid, Tuple{LP{UInt64},UInt64}, p, v)
-@inline ld64a_sys(p::LP{UInt64}) = Base.llvmcall("%r = load atomic i64, ptr addrspace(1) %0 monotonic, align 8\nret i64 %r", UInt64, Tuple{LP{UInt64}}, p)
-@inline ld64_sys(p::LP{UInt64}) = Base.llvmcall("%r = load atomic volatile i64, ptr addrspace(1) %0 monotonic, align 8\nret i64 %r", UInt64, Tuple{LP{UInt64}}, p)
 # the embedding value of row r (this die's vocabulary rows, repacked Q5_K), element k
 @inline function embval(W::LP{UInt8}, r::Int32, k::Int32)
     b = k >> Int32(8); e = k & Int32(255)
@@ -455,69 +453,89 @@ end
     q = ((s & Int32(1)) == Int32(0) ? qs & 0x0f : qs >> 4) | ((qh >> s) & 0x01) << 4
     d * Float32(sc) * Float32(q) - dmin * Float32(mn)
 end
-# The exchange, one thread an element of x: this die's share (the K-slice sums of matrix (l, j), or with j < 0 its
-# embedding rows of tok[p]) goes to host memory; then the other dies' shares of the same element are read (polled
-# until their exchange numbers match), x (+)= the sum, and the next norm's input is prepared: x w into xt with its
-# 16- and 32-sums, and each workgroup's sum of squares a position into red (the consumers apply 1 / rms). Phase seq is
-# the computing and writing; seq + 1 is the reading from when the first share arrived (the wait before it is idle).
+# The exchange: an all-reduce over the four dies of this die's share (the K-slice sums of matrix (l, j), or with
+# j < 0 its embedding rows of tok[p]), through page-locked host memory. A die reads host memory at about 4.5 GB/s
+# with 2 us a round trip (writes are posted), so it is a reduce-scatter then an all-gather: die d owns quarter d of
+# the elements (QTR of them);
+#   1. every die writes its share of each other quarter to that quarter's owner (hxr: owner, source);
+#   2. the owner reads the three, sums the four in die order, and writes the total to each other die (hxg: reader,
+#      owner); each die reads the other three quarters' totals.
+# A word is 4 bytes: the float with its lowest mantissa bit set (so a written word is never 0), and each word has
+# one reader, which zeroes it after reading: a nonzero word is a fresh one. Every die adds the same totals, so x stays
+# bit-identical on the four dies. Then x (+)= the total, and the next norm's input is prepared: x w into xt with its
+# 16- and 32-sums, and the sum of squares a position (the consumers apply 1 / rms). Phase seq is the computing and
+# writing; seq + 1 is the rest, from when the first share arrived (the wait before it is idle).
+const QTR = NE ÷ ND
+@inline xmark(v::Float32) = reinterpret(UInt32, v) | UInt32(1)
+@inline hxr(A::KA, slot, q, s) = reinterpret(LP{UInt32}, A.hx + 4 * (((Int64(slot) * ND + q) * ND + s) * A.npos * QTR))
+@inline hxg(A::KA, slot, r, s) = reinterpret(LP{UInt32}, A.hx + 4 * ((((Int64(2) + slot) * ND + r) * ND + s) * A.npos * QTR))
+@inline ld32a_sys(p::LP{UInt32}) = Base.llvmcall("%r = load atomic i32, ptr addrspace(1) %0 monotonic, align 4\nret i32 %r", UInt32, Tuple{LP{UInt32}}, p)
+@inline st32_sys(p::LP{UInt32}, v::UInt32) = Base.llvmcall("store atomic i32 %1, ptr addrspace(1) %0 monotonic, align 4\nret void", Cvoid, Tuple{LP{UInt32},UInt32}, p, v)
+@inline function xwait(A::KA, q::LP{UInt32}, u::UInt32)    # the word at q (u: its first read), fresh; q zeroed
+    if u == UInt32(0)
+        tw = memtime()
+        while u == UInt32(0)
+            (memtime() - tw > TOUT || aborted(A)) && (atadd(A.bar + 8, UInt32(1)); break)
+            u = ld32a_sys(q)
+        end
+    end
+    st32_sys(q, UInt32(0))
+    u
+end
+@inline xf(u::UInt32) = reinterpret(Float32, u)
 function xwr_ph!(A::KA, l::Int32, j::Int32, w::LP{Float32}, set::Bool, xs::Int32, seq::Int32, P::Int32)
-    t0 = memtime(); did = false; slot = xs & Int32(1); tag = UInt64(A.rid & Int32(255)) << 56 | UInt64(xs + Int32(1)) << 32
-    rows = Int32(0); ns = Int32(0); W = reinterpret(LP{UInt8}, Int64(0))
-    if j >= Int32(0)
-        _, rows, nb, _, _ = mat(A, l, j); ns = nsx(nb, P)
+    t0 = memtime(); slot = xs & Int32(1); d = A.d
+    rows, ns, W = if j >= Int32(0)                       # (one assignment each: the closure below captures them)
+        _, r_, nb, _, _ = mat(A, l, j); (r_, nsx(nb, P), reinterpret(LP{UInt8}, Int64(0)))
     else
-        woff, _, _, _, _ = mat(A, Int32(64), Int32(0)); W = reinterpret(LP{UInt8}, woff)
+        woff, _, _, _, _ = mat(A, Int32(64), Int32(0)); (Int32(0), Int32(0), reinterpret(LP{UInt8}, woff))
     end
-    # write
-    i = gtid(); vals = 0.0f0
-    while i < Int32(NE) * P
-        p = i ÷ Int32(NE); k = i - p * Int32(NE)
-        v = if j >= Int32(0)
-            psum(A, Int64(0), ns, rows, P, p, k)
-        else
-            r = ld(A.tok, p) - Int32(VPD) * A.d
-            r >= Int32(0) && r < Int32(VPD) ? embval(W, r, k) : 0.0f0
+    share(p, k) = if j >= Int32(0)
+        psum(A, Int64(0), ns, rows, P, p, k)
+    else
+        r = ld(A.tok, p) - Int32(VPD) * d
+        r >= Int32(0) && r < Int32(VPD) ? embval(W, r, k) : 0.0f0
+    end
+    # 1. this die's share of the other quarters, to their owners
+    i = gtid(); did = i < Int32(QTR) * P
+    while i < Int32(QTR) * P
+        p = i ÷ Int32(QTR); kk = i - p * Int32(QTR); o = Int64(p) * QTR + kk
+        for e in Int32(1):Int32(ND - 1)
+            q = (d + e) & Int32(ND - 1)
+            st32_sys(hxr(A, slot, q, d) + 4o, xmark(share(p, q * Int32(QTR) + kk)))
         end
-        st64_sys(hxs(A, slot, A.d) + 8 * (Int64(p) * NE + k), UInt64(reinterpret(UInt32, v)) | tag)
-        did = true; i += nthr(A)
+        i += nthr(A)
     end
-    fence_rel_sys()
-    t1 = memtime()
     done!(A, seq, t0, did)
-    # read (one element a thread a pass: the same elements as written)
+    # 2. this die's quarter: the four shares summed and sent out; then the other quarters' totals
     ta = UInt64(0); i = gtid()
-    while i < Int32(NE) * P
-        p = i ÷ Int32(NE); k = i - p * Int32(NE); o = Int64(p) * NE + k
-        # the other three dies' words, loaded together (plain atomic loads: volatile ones went one round trip at a
-        # time); this die's own share recomputed locally rather than read back over PCIe
-        us = ntuple(e -> ld64a_sys(hxs(A, slot, (A.d + Int32(e)) & Int32(ND - 1)) + 8o), Val(ND - 1))
-        v = set ? 0.0f0 : ld(A.x, o)
-        v += if j >= Int32(0)
-            psum(A, Int64(0), ns, rows, P, p, k)
-        else
-            r = ld(A.tok, p) - Int32(VPD) * A.d
-            r >= Int32(0) && r < Int32(VPD) ? embval(W, r, k) : 0.0f0
-        end
-        for e in 1:ND-1
-            u = us[e]
-            if u & 0xffffffff00000000 != tag
-                q = hxs(A, slot, (A.d + Int32(e)) & Int32(ND - 1)) + 8o; tw = memtime()
-                while u & 0xffffffff00000000 != tag
-                    (memtime() - tw > TOUT || aborted(A)) && (atadd(A.bar + 8, UInt32(1)); break)
-                    u = ld64_sys(q)
-                end
-            end
-            v += reinterpret(Float32, UInt32(u & 0xffffffff))
-        end
+    while i < Int32(QTR) * P
+        p = i ÷ Int32(QTR); kk = i - p * Int32(QTR); o = Int64(p) * QTR + kk
+        u3 = ntuple(e -> ld32a_sys(hxr(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 4o), Val(ND - 1))
+        mine = xmark(share(p, d * Int32(QTR) + kk))
+        sh = ntuple(e -> xwait(A, hxr(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 4o, u3[e]), Val(ND - 1))
         ta == UInt64(0) && (ta = memtime())
-        st!(A.x, v, o); xw = v * ld(w, k); st!(A.xt, xw, Int64(k) * P + p)
-        sw = AMDGPU.Device.wfred(+, v * v)                 # a wavefront holds 64 elements of one position
-        tid() & Int32(63) == Int32(0) && atadd64(A.ssq + 8p, round(Int64, sw * 65536.0f0))
-        a = xw
-        for sh in (Cint(1), Cint(2), Cint(4), Cint(8)); a += AMDGPU.Device.shfl_xor(a, sh); end
-        b = a + AMDGPU.Device.shfl_xor(a, Cint(16))
-        k & Int32(15) == Int32(0) && st!(A.x16, a, Int64(k >> Int32(4)) * P + p)
-        k & Int32(31) == Int32(0) && st!(A.x32, b, Int64(k >> Int32(5)) * P + p)
+        # the four shares in die order: source s's word is sh[(s - d) mod 4] (mine for s = d)
+        sw(s) = s == d ? mine : sh[(s - d) & Int32(ND - 1)]
+        tot = xmark(((xf(sw(Int32(0))) + xf(sw(Int32(1)))) + xf(sw(Int32(2)))) + xf(sw(Int32(3))))
+        for e in Int32(1):Int32(ND - 1)
+            st32_sys(hxg(A, slot, (d + e) & Int32(ND - 1), d) + 4o, tot)
+        end
+        g3 = ntuple(e -> ld32a_sys(hxg(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 4o), Val(ND - 1))
+        tq = ntuple(e -> xwait(A, hxg(A, slot, d, (d + Int32(e)) & Int32(ND - 1)) + 4o, g3[e]), Val(ND - 1))
+        for e in Int32(0):Int32(ND - 1)                     # quarter (d + e) mod 4
+            k = ((d + e) & Int32(ND - 1)) * Int32(QTR) + kk; u = e == Int32(0) ? tot : tq[e]
+            ox = Int64(p) * NE + k
+            v = (set ? 0.0f0 : ld(A.x, ox)) + xf(u)
+            st!(A.x, v, ox); xw = v * ld(w, k); st!(A.xt, xw, Int64(k) * P + p)
+            sq = AMDGPU.Device.wfred(+, v * v)            # a wavefront holds 64 elements of one position
+            tid() & Int32(63) == Int32(0) && atadd64(A.ssq + 8p, round(Int64, sq * 65536.0f0))
+            a = xw
+            for sh2 in (Cint(1), Cint(2), Cint(4), Cint(8)); a += AMDGPU.Device.shfl_xor(a, sh2); end
+            c = a + AMDGPU.Device.shfl_xor(a, Cint(16))
+            k & Int32(15) == Int32(0) && st!(A.x16, a, Int64(k >> Int32(4)) * P + p)
+            k & Int32(31) == Int32(0) && st!(A.x32, c, Int64(k >> Int32(5)) * P + p)
+        end
         i += nthr(A)
     end
     did && tid() == Int32(0) && (pa = A.acct + 8 * (3 + 2Int64(seq + Int32(1))); umin64(pa, ta); umax64(pa + 8, memtime()))
@@ -932,7 +950,7 @@ function hmax_ph!(A::KA, seq::Int32, P::Int32, pfirst::Int32)
     end
     done!(A, seq, t0, did)
 end
-@inline hxa(A::KA, slot, d, q) = A.hx + 8 * (2 * ND * Int64(A.npos) * NE) + 4 * (((Int64(slot) * ND + d) * NR + q) * 2)
+@inline hxa(A::KA, slot, d, q) = A.hx + 4 * (4 * ND * ND * Int64(A.npos) * QTR) + 4 * (((Int64(slot) * ND + d) * NR + q) * 2)
 function hred_ph!(A::KA, slot::Int32, seq::Int32, nq::Int32)
     (wgid() == Int32(0) && tid() < nq) || return
     t0 = memtime(); v = -Inf32; ix = Int32(0); q = tid()
@@ -1261,20 +1279,23 @@ struct KDie
     ap::ROCVector{Float32}; tok::ROCVector{Int32}; bar::ROCVector{UInt32}; ssq::ROCVector{Int64}
     posr::ROCVector{Int32}; posa::ROCVector{Int32}; tks::ROCVector{Int32}; sl::ROCVector{Int64}; rq::ROCVector{Int32}
 end
+# every exchange word back to zero (after an aborted request some were written and never read)
+xzero!(PE) = Libc.memset(PE.hx.p, 0, PE.hx.out)
 function KDie(D::Die, npos)
     AMDGPU.device!(D.dev); z(n) = AMDGPU.zeros(Float32, n); zi(n) = AMDGPU.zeros(Int32, n)
     KDie(ktable(D), z(NE * npos), z(NE * npos), z(NE ÷ 16 * npos), z(NE ÷ 32 * npos), z(max(VPD * 10, 2 * 4352 * npos, VPD * NSCORE)),
         z(2 * NWG * NR), z(QKVD * npos), z(1536 * npos), z(1536 * npos), z(6 * (HD + 2) * max(npos, NWG)),
         zi(npos), AMDGPU.zeros(UInt32, 64), AMDGPU.zeros(Int64, npos), zi(npos), zi(npos), zi(NR), AMDGPU.zeros(Int64, 4NR), zi(4NR))
 end
-# page-locked host memory every die maps: the exchange words (2 slots x dies x npos x NE), the argmax exchange
+# page-locked host memory every die maps: the exchange words (2 phases x 2 slots x dies x dies x npos x QTR), the argmax exchange
 # (2 slots x dies x NR), the counters, the generated tokens
 struct HostX
     p::Ptr{UInt8}; nbytes::Int; out::Int; tok::Int
 end
 function HostX(npos, maxgen)
-    out = 8 * 2 * ND * npos * NE + 4 * 2 * ND * NR * 2; tok = out + 64; n = tok + 4maxgen; r = Ref{Ptr{Cvoid}}(C_NULL)
+    out = 4 * 4 * ND * ND * npos * QTR + 4 * 2 * ND * NR * 2; tok = out + 64; n = tok + 4maxgen; r = Ref{Ptr{Cvoid}}(C_NULL)
     AMDGPU.HIP.hipHostMalloc(r, n, AMDGPU.HIP.hipHostMallocPortable | AMDGPU.HIP.hipHostMallocMapped | AMDGPU.HIP.hipHostMallocCoherent)
+    Libc.memset(Ptr{UInt8}(r[]), 0, n)                    # a fresh exchange word is a nonzero one
     HostX(Ptr{UInt8}(r[]), n, out, tok)
 end
 lp(T, p::Ptr) = reinterpret(LP{T}, p)
@@ -1306,7 +1327,7 @@ function clockhz(D::Die)
     hz
 end
 # npos: the positions a prefill forward takes, the most that fit (host exchange memory is the tighter bound here)
-function PEngine(dies; maxgen = 8192, npos = 4096)
+function PEngine(dies; maxgen = 8192, npos = 2048)
     K = [KDie(D, npos) for D in dies]; hx = HostX(npos, maxgen)
     AMDGPU.device!(dies[1].dev)
     A = kargs(K, hx, 1, 0, AMDGPU.zeros(UInt64, 4), AMDGPU.zeros(Int32, 1), 0, 0, 1, nothing, npos, 0)
@@ -1344,7 +1365,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
     for d in 1:ND
         AMDGPU.device!(dies[d].dev); K = PE.K[d]
         a = AMDGPU.zeros(UInt64, 3 + 2nphase); ah = zeros(UInt64, 3 + 2nphase); ah[1] = typemax(UInt64); ah[4:2:end] .= typemax(UInt64); up!(a, ah); push!(accts, a)
-        up!(K.bar, [UInt32[0, 0, 0, NLRUN[]]; zeros(UInt32, 28)]); up!(K.rq, rq)
+        up!(K.bar, [UInt32[0, 0, 0, NLRUN[]]; zeros(UInt32, 60)]); up!(K.rq, rq)
         for r in 1:nr; fill!(sts[r][d].S, 0.0f0); fill!(sts[r][d].ring, 0.0f0); end   # a request starts from zero state
         up!(K.sl, Int64[addr(getfield(sts[r][d], f)) for r in 1:nr for f in (:S, :ring, :kc, :vc)])
         ib = dev(inp); push!(ibs, ib)
@@ -1365,7 +1386,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
         AMDGPU.unsafe_free!(accts[d]); AMDGPU.unsafe_free!(ibs[d])
     end
     ab = [(AMDGPU.device!(D.dev); Array(K.bar)[3]) for (D, K) in zip(dies, PE.K)]
-    any(!=(0), ab) && error("persistent kernel aborted (a wait passed 10 s): $ab")
+    any(!=(0), ab) && (xzero!(PE); error("persistent kernel aborted (a wait passed 10 s): $ab"))
     toks = [[Int(unsafe_load(Ptr{Int32}(PE.hx.p + PE.hx.tok), ooff[r] + i)) for i in 1:reqs[r][2]] for r in 1:nr]
     toks, res, tpre, tdec
 end
