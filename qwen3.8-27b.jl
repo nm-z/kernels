@@ -763,18 +763,20 @@ end
 function kl_test(io, E::Engine, ids, refpath, n)
     st = newstate(E, cld(n, CH) * CH)
     ref = Mmap.mmap(refpath, Matrix{Float16}, (NV, n))
-    kls = Float64[]; top = 0; t0 = time()
+    kls = Float64[]; top = 0; skip = 0; t0 = time()
     for p0 in 0:PMAX:n-1
         P = min(PMAX, n - p0)
         Lg = forward!(E, st, ids[p0+1:p0+P], p0)
         for p in 1:P
             r = Float64.(view(ref, :, p0 + p)); o = Float64.(view(Lg, :, p))
+            all(isfinite, r) || (skip += 1; continue)              # positions the reference run lost
             lr = r .- (maximum(r) + log(sum(exp.(r .- maximum(r))))); lo = o .- (maximum(o) + log(sum(exp.(o .- maximum(o)))))
             push!(kls, sum(exp.(lr) .* (lr .- lo))); top += argmax(r) == argmax(o)
         end
     end
-    @printf(io, "KL vs BF16 over %d positions: mean %.4f, median %.4f, max %.3f; top-1 agreement %.3f (%.1f s)\n",
-        n, sum(kls) / n, sort(kls)[cld(n, 2)], maximum(kls), top / n, time() - t0)
+    m = length(kls)
+    @printf(io, "KL vs BF16 over %d positions (%d with a non-finite reference skipped): mean %.4f, median %.4f, max %.3f; top-1 agreement %.3f (%.1f s)\n",
+        m, skip, sum(kls) / m, sort(kls)[cld(m, 2)], maximum(kls), top / m, time() - t0)
 end
 
 # ---------------------------------------------------------------------------------------------
