@@ -290,6 +290,7 @@ const LP{T} = Core.LLVMPtr{T,1}
 @inline fence_acq() = Base.llvmcall("fence syncscope(\"agent\") acquire\nret void", Cvoid, Tuple{})
 @inline fence_rel_sys() = Base.llvmcall("fence release\nret void", Cvoid, Tuple{})
 @inline fence_acq_sys() = Base.llvmcall("fence acquire\nret void", Cvoid, Tuple{})
+@inline opv(v::Int32) = Base.llvmcall("%r = call i32 asm sideeffect \"; opv \$0\", \"=v,0\"(i32 %0)\nret i32 %r", Int32, Tuple{Int32}, v)
 @inline opq(v::Int32) = Base.llvmcall("%r = call i32 asm sideeffect \"; opq \$0\", \"=s,0\"(i32 %0)\nret i32 %r", Int32, Tuple{Int32}, v)
 # x for the GEMV through scalar buffer loads: the resource's base goes through an opaque (side-effecting) copy at
 # each phase, so the loads can't be hoisted above the barrier that orders them after x was written
@@ -330,6 +331,7 @@ const NMAT = 8                                             # matrix (and vector)
 const TABF = 65 * NMAT * 5                                 # where the f32-vector offsets start in the table
 const TOUT = Int64(1_000_000_000)                          # 10 s of the 100 MHz clock: a wait longer than this aborts
 @inline mat(A::KA, l, j) = (e = (Int64(l) * NMAT + j) * 5; (unsafe_load(A.tab, e + 1), Int32(unsafe_load(A.tab, e + 2)), Int32(unsafe_load(A.tab, e + 3)), Int32(unsafe_load(A.tab, e + 4)), unsafe_load(A.tab, e + 5)))
+@inline invf(A::KA, i) = reinterpret(Float64, unsafe_load(A.tab, TABF + 65NMAT + i + 1))   # rope inverse frequency i
 @inline fvec(A::KA, l, j) = reinterpret(LP{Float32}, unsafe_load(A.tab, TABF + Int64(l) * NMAT + j + 1))
 @inline ld(p, i) = unsafe_load(p, i + 1)                   # 0-based
 @inline st!(p, v, i) = unsafe_store!(p, v, i + 1)
@@ -565,14 +567,15 @@ function rec_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
         sync_workgroup()
         x = psum(A, oa, nsa, Int32(64), P, p, lv) * rinv(A, p) + ld(dtb, lv); sp = x > 20.0f0 ? x : log1p(exp(x))
         a = exp(ld(ssa, lv) * sp); bt = 1.0f0 / (1.0f0 + exp(-psum(A, ob4, nsa, Int32(64), P, p, lv) * rinv(A, p)))
-        s = let s = s; ntuple(j -> s[j] * a, Val(64)) end
+        # S = a S + e kᵀ with e = bt (v - a S k): the decay folded into the one update (one copy of S live)
         e = 0.0f0
         for j in 1:64; e = fma(s[j], ld(ks, Int32(64) * jh + Int32(j - 1)), e); end
         e += AMDGPU.Device.shfl_xor(e, Cint(1))
-        e = bt * (ld(A.u, ub + 1024 + DK * lv + i) - e)
-        s = let s = s, e = e; ntuple(j -> fma(e, ld(ks, Int32(64) * jh + Int32(j - 1)), s[j]), Val(64)) end
+        e = bt * (ld(A.u, ub + 1024 + DK * lv + i) - a * e)
+        kb = opv(Int32(64) * jh)                           # (opaque: k is read again from shared memory, not kept in 64 registers)
+        s = let s = s, e = e, a = a, kb = kb; ntuple(j -> fma(e, ld(ks, kb + Int32(j - 1)), a * s[j]), Val(64)) end
         o = 0.0f0
-        for j in 1:64; o = fma(s[j], ld(qs, Int32(64) * jh + Int32(j - 1)), o); end
+        for j in 1:64; o = fma(s[j], ld(qs, kb + Int32(j - 1)), o); end
         o = (o + AMDGPU.Device.shfl_xor(o, Cint(1))) * isc
         r = 1.0f0 / sqrt(wgsum(jh == Int32(0) ? o * o : 0.0f0, red) / Float32(DK) + EPS)
         if jh == Int32(0)
@@ -662,7 +665,9 @@ function aprep_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
             st!(L, v, t)
             sync_workgroup()
             if t < Int32(NROT)
-                ii = t & Int32(31); th = Float64(ld(A.posa, p)) * THETA^(-2.0 * Float64(ii) / NROT); c = Float32(cos(th)); sn = Float32(sin(th))
+                ii = t & Int32(31); th = Float64(ld(A.posa, p)) * invf(A, ii)
+                r = Float32(th - 2π * round(th * (1 / 2π)))       # reduced in Float64, the sine and cosine in Float32
+                c = cos(r); sn = sin(r)
                 a = ld(L, ii); b = ld(L, ii + Int32(32))
                 v = t < Int32(32) ? a * c - b * sn : b * c + a * sn
             end
@@ -806,19 +811,20 @@ function acomb_ph!(A::KA, amax::Int32, seq::Int32, P::Int32)
     end
     done!(A, seq, t0, did)
 end
-# FFN: silu(gate) up into xt (the down-projection's x) with its 16- and 32-sums (Q6_K or Q5_K)
+# FFN: silu(gate) up into xt (the down-projection's x), an element a thread, with its 16- and 32-sums (Q6_K or Q5_K)
 function act_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
-    t0 = memtime(); 
+    t0 = memtime()
     did = false; i = gtid()
     _, rg, nbg, _, _ = mat(A, l, Int32(5)); ns = nsx(nbg, P); ou = pof(A, l, JFF, 2, P)
-    while i < Int32(4352 ÷ 32) * P
-        g = i ÷ P; p = i - g * P; a = 0.0f0; b = 0.0f0
-        for e in Int32(0):Int32(31)
-            k = Int32(32) * g + e
-            v = silu(psum(A, Int64(0), ns, rg, P, p, k) * rinv(A, p)) * (psum(A, ou, ns, rg, P, p, k) * rinv(A, p))
-            st!(A.xt, v, Int64(k) * P + p); e < Int32(16) ? (a += v) : (b += v)
-        end
-        st!(A.x16, a, Int64(2g) * P + p); st!(A.x16, b, Int64(2g + 1) * P + p); st!(A.x32, a + b, Int64(g) * P + p)
+    while i < Int32(4352) * P                              # a wavefront: 64 elements of one position (4352 = 68 x 64)
+        p = i ÷ Int32(4352); k = i - p * Int32(4352)
+        v = silu(psum(A, Int64(0), ns, rg, P, p, k) * rinv(A, p)) * (psum(A, ou, ns, rg, P, p, k) * rinv(A, p))
+        st!(A.xt, v, Int64(k) * P + p)
+        a = v
+        for sh in (Cint(1), Cint(2), Cint(4), Cint(8)); a += AMDGPU.Device.shfl_xor(a, sh); end
+        b = a + AMDGPU.Device.shfl_xor(a, Cint(16))
+        k & Int32(15) == Int32(0) && st!(A.x16, a, Int64(k >> Int32(4)) * P + p)
+        k & Int32(31) == Int32(0) && st!(A.x32, b, Int64(k >> Int32(5)) * P + p)
         did = true; i += nthr(A)
     end
     done!(A, seq, t0, did)
@@ -1117,7 +1123,8 @@ freestate!(st) = foreach(s -> foreach(AMDGPU.unsafe_free!, (s.S, s.ring, s.kc, s
 addr(a) = reinterpret(Int64, UInt64(pointer(a)))
 # a die's table: every matrix's address and shape, every vector's address (the weights stay where they are)
 function ktable(D::Die)
-    tab = zeros(Int64, TABF + 65 * NMAT)
+    tab = zeros(Int64, TABF + 65 * NMAT + NROT ÷ 2)
+    tab[TABF+65NMAT+1:end] = reinterpret(Int64, [THETA^(-2i / NROT) for i in 0:NROT÷2-1])   # the rope inverse frequencies
     m!(l, j, m) = (e = (l * NMAT + j) * 5; tab[e+1:e+5] = [addr(m.W), m.rows, m.K ÷ 256, m.typ, m.typ == GQ6_K ? addr(m.D) : 0])
     v!(l, j, a) = (tab[TABF+l*NMAT+j+1] = addr(a))
     for l in 0:NL-1

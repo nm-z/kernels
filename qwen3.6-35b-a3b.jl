@@ -849,6 +849,27 @@ struct PBlock
     linear::Bool
 end
 PMat(m::DMat)=PMat(UInt(pointer(m.W)),Int16(m.K),Int16(m.typ),Int32(m.rows))
+# Load descriptor fields when used. Copying a complete 392-byte block descriptor
+# into the persistent loop keeps every matrix pointer live across every phase
+# and spills scalar registers into per-thread scratch memory.
+struct BlockRef{T}
+    ptr::UInt64
+end
+struct FieldRef{T,N}
+    ptr::UInt64
+end
+@inline Base.getindex(a::FieldRef{T,N},i::Integer) where {T,N}=
+    unsafe_load(Core.LLVMPtr{T,1}(getfield(a,:ptr)),i)
+@inline blockref(a,i::Integer)=BlockRef{eltype(a)}(UInt64(pointer(a))+UInt64(i-1)*UInt64(sizeof(eltype(a))))
+@inline Base.getproperty(b::BlockRef,s::Symbol)=blockfield(b,Val(s))
+@generated function blockfield(b::BlockRef{T},::Val{S}) where {T,S}
+    i=Base.fieldindex(T,S); F=fieldtype(T,i); off=fieldoffset(T,i)
+    address=:(getfield(b,:ptr)+UInt64($off))
+    if F<:Tuple
+        return :(FieldRef{$(fieldtype(F,1)),$(fieldcount(F))}($address))
+    end
+    :(unsafe_load(Core.LLVMPtr{$F,1}($address)))
+end
 # Sizes are type parameters: the persistent loop carries one pointer per buffer,
 # instead of retaining 36 four-word array descriptors in scarce scalar registers.
 struct PBuf{T,N}
@@ -860,12 +881,23 @@ end
 @inline Base.getindex(b::PBuf,i::Integer)=unsafe_load(pointer(b),i)
 @inline Base.setindex!(b::PBuf,v,i::Integer)=(unsafe_store!(pointer(b),v,i);v)
 pbuf(a)=PBuf{eltype(a),length(a)}(UInt(pointer(a)))
+struct Activations{T}
+    ptr::UInt64
+end
+@inline Base.getproperty(b::Activations,s::Symbol)=activation(b,Val(s))
+@generated function activation(b::Activations{T},::Val{S}) where {T,S}
+    i=Base.fieldindex(T,S); F=fieldtype(T,i)
+    :($F(unsafe_load(Core.LLVMPtr{UInt64,1}(getfield(b,:ptr)),$i)))
+end
+activations(b,table)=Activations{typeof(map(pbuf,b))}(UInt64(pointer(table)))
+rocdesc(a::ROCArray)=pbuf(a)
+rocdesc(a)=a
 @inline av(::Type{T},p::UInt64,n::Integer) where T =
     AMDGPU.ROCDeviceArray{T,1,1}((Int(n),),Core.LLVMPtr{T,1}(p))
 @inline fv(p::UInt64,n::Integer=16384)=av(Float32,p,n)
 # A resident cooperative grid uses one block per WGP. Launch checks occupancy
 # before submitting it. The device-owned generation counter avoids HIP's separate
-# cooperative queue, which ROCm 7.2's counter interceptor destroys twice at exit.
+# cooperative queue, which fails at shutdown with ROCm 7.2's counter interceptor.
 @inline function p_sync()
     Base.llvmcall(("""
     @qwen36_grid_barrier = linkonce_odr addrspace(1) global i32 0, align 4
@@ -1030,7 +1062,7 @@ end
 end
 @inline function p_restore!(blocks,k::Int32)
     @inbounds for l in Int32(1):Int32(length(blocks))
-        B=blocks[l]
+        B=blockref(blocks,l)
         if B.linear
             p_copy!(fv(B.state,524288),pv(fv(B.ss,8*524288),k-Int32(1)),Int32(524288))
             p_copy!(fv(B.conv,32768),pv(fv(B.cs,8*32768),k-Int32(1)),Int32(32768))
@@ -1042,7 +1074,7 @@ end
                           snapshot::Bool=false,capture::Bool=false,ropeoff::Int32=Int32(0))
     bid=Int32(workgroupIdx().x)-Int32(1); ng=Int32(gridGroupDim().x)
     @inbounds for l in Int32(1):Int32(length(blocks))
-        B=blocks[l]; M=B.mat; V=B.vec
+        B=blockref(blocks,l); M=B.mat; V=B.vec
         p_norm!(b.xn,b.x,fv(V[1]),Int32(2048),n)
         if B.linear
             p_mul!(b.qkv,M[1],b.xn,expertids,n,P); p_mul!(b.z,M[2],b.xn,expertids,n,P)
@@ -1187,7 +1219,7 @@ end
     d=s.db
     p_mul!(d.ctxh,s.fc,b.feat,ei,n,Val(8)); p_norm!(d.ctxh,d.ctxh,fv(s.dnorm[1]),Int32(2048),n)
     @inbounds for l in Int32(1):Int32(6)
-        B=s.dblocks[l]; p_mul!(d.k,B.mat[3],d.ctxh,ei,n,Val(8)); p_mul!(d.v,B.mat[4],d.ctxh,ei,n,Val(8))
+        B=blockref(s.dblocks,l); p_mul!(d.k,B.mat[3],d.ctxh,ei,n,Val(8)); p_mul!(d.v,B.mat[4],d.ctxh,ei,n,Val(8))
         p_dhnorm!(d.k,fv(B.vec[4]),Int32(8),n); p_drope!(d.k,Int32(8),pos,n)
         kc=av(Float16,B.kc,2048*1024); vc=av(Float16,B.vc,2048*1024)
         for i in gid0():Int32(gridItemDim().x):n*Int32(1024)-Int32(1)
@@ -1248,7 +1280,7 @@ end
     if gid0()==0; @inbounds for p in 2:8; s.proposal[p]=s.mask; end; end
     p_sync(); p_embed!(d.x,emb,s.proposal,Int32(0),Int32(8))
     @inbounds for l in Int32(1):Int32(6)
-        B=s.dblocks[l]; M=B.mat; V=B.vec
+        B=blockref(s.dblocks,l); M=B.mat; V=B.vec
         p_norm!(d.xn,d.x,fv(V[1]),Int32(2048),Int32(8)); p_mul!(d.coeff,M[1],d.xn,ei,Int32(8),Val(8))
         p_dconv!(d.inp,d.xn,d.coeff,V[2],Int32(0),Int32(8))
         p_mul!(d.q,M[2],d.inp,ei,Int32(8),Val(8)); p_mul!(d.k,M[3],d.inp,ei,Int32(8),Val(8)); p_mul!(d.v,M[4],d.inp,ei,Int32(8),Val(8))
@@ -1278,7 +1310,7 @@ end
     p_sync(); p_mul!(m.x,s.eh,m.concat,ei,Int32(1),Val(8)); return
 end
 @inline function p_mcache!(s,emb,id::Int32,prior,t::Int32,ctx::Int32,ei)
-    p_mprepare!(s,emb,id,prior,ei); m=s.mb; B=@inbounds s.mblocks[1]
+    p_mprepare!(s,emb,id,prior,ei); m=s.mb; B=blockref(s.mblocks,1)
     p_norm!(m.xn,m.x,fv(B.vec[1]),Int32(2048),Int32(1))
     p_mul!(m.k,B.mat[7],m.xn,ei,Int32(1),Val(8)); p_mul!(m.v,B.mat[8],m.xn,ei,Int32(1),Val(8))
     for h in Int32(workgroupIdx().x)-Int32(1):Int32(gridGroupDim().x):Int32(1)
@@ -1377,6 +1409,7 @@ mutable struct Engine
     ix::ROCArray{Int32,1}
     expertids::ROCArray{Int32,1}
     hostio::NamedTuple
+    descriptors::NTuple{3,ROCArray{UInt64,1}}
     ctx::Int
     groups::Int
     mode::Int
@@ -1385,6 +1418,19 @@ end
 z(n)=AMDGPU.zeros(Float32,n)
 function phase(s)
     p=get(ENV,"QWEN36_PHASES",""); isempty(p) || open(io->println(io,time_ns()," ",s),p,"a")
+end
+function memorystats(label)
+    path=get(ENV,"QWEN36_MEMORY",""); isempty(path) && return
+    pool=AMDGPU.HIP.memory_pool(AMDGPU.device())
+    open(path,"a") do io
+      println(io,label," pool_used ",AMDGPU.HIP.used_memory(pool)," pool_reserved ",AMDGPU.HIP.reserved_memory(pool))
+    for card in readdir("/sys/class/drm";join=true)
+        p=joinpath(card,"device","mem_info_vram_total"); isfile(p) || continue
+        for kind in ("vram_total","vram_used","gtt_used")
+            println(io,kind," ",strip(read(joinpath(card,"device","mem_info_"*kind),String)))
+        end
+    end
+    end
 end
 function buffers(vocab,ctx;draft=false)
     sizes=(:x=>2048,:xn=>2048,:y=>2048,:qkv=>8192,:u=>8192,:z=>4096,:alpha=>32,:beta=>32,:qdn=>2048,:kdn=>2048,
@@ -1427,7 +1473,7 @@ function Engine(g,ctx;compileonly=false,mode=0,draftpath=joinpath(dirname(DEFAUL
     head=mat(g,"output.weight"); norm=retain(ROCArray(tensor_f32(g,"output_norm.weight")))
     et=g.tensors["token_embd.weight"]
     emb=retain(compileonly ? AMDGPU.zeros(UInt16,1) : GC.@preserve g unsafe_wrap(ROCArray,Ptr{UInt16}(pointer(g.map)+et.off),(prod(et.dims),)))
-    vocab=length(tk.text); groups=Int(AMDGPU.HIP.properties(AMDGPU.device()).multiProcessorCount)
+    vocab=length(tk.text); groups=2Int(AMDGPU.HIP.properties(AMDGPU.device()).multiProcessorCount)
     b=buffers(vocab,ctx); dummy=PMat(0,0,0,0); eh=dummy; fc=dummy; selector=dummy; pred=dummy; succ=dummy
     mn=(UInt64(0),UInt64(0),UInt64(0)); dn=(UInt64(0),UInt64(0)); mbs=PBlock[]; dbs=DPBlock[]
     mb=mode==1 ? buffers(vocab,ctx) : b; db=mode==2 ? buffers(vocab,ctx;draft=true) : b
@@ -1461,17 +1507,20 @@ function Engine(g,ctx;compileonly=false,mode=0,draftpath=joinpath(dirname(DEFAUL
     free_upload!()
     hostio=(ids=zeros(Int32,ctx),output=zeros(Int32,ctx),control=zeros(Int32,4),ticks=zeros(UInt64,3))
     mapped(a)=compileonly ? AMDGPU.zeros(eltype(a),length(a)) : GC.@preserve a unsafe_wrap(ROCArray,pointer(a),(length(a),))
+    descriptor(a)=retain(ROCArray(UInt64[UInt64(pointer(v)) for v in values(a)]))
+    descriptors=(descriptor(b),descriptor(mb),descriptor(db))
     Engine(g,tk,c,keep,states,ROCArray(bs),head,norm,emb,b,spec,
            mapped(hostio.ids),mapped(hostio.output),mapped(hostio.control),mapped(hostio.ticks),
-           z(8groups),AMDGPU.zeros(Int32,8groups),AMDGPU.zeros(Int32,64),hostio,ctx,groups,mode,nothing)
+           z(8groups),AMDGPU.zeros(Int32,8groups),AMDGPU.zeros(Int32,64),hostio,descriptors,ctx,groups,mode,nothing)
 end
 function reset!(E)
     for a in E.states; fill!(a,zero(eltype(a))); end
     fill!(E.spec.last,0.0f0); AMDGPU.synchronize(;blocking=true); E
 end
 function request_kernel(E,np,nt;compile=false)
-    sb=merge(E.spec,(mb=map(pbuf,E.spec.mb),db=map(pbuf,E.spec.db)))
-    args=(E.blocks,E.head,E.output_norm,E.embedding,map(pbuf,E.b),sb,E.ids,E.output,E.control,E.ticks,E.part,E.ix,E.expertids,
+    sb=merge(map(rocdesc,E.spec),(mb=activations(E.spec.mb,E.descriptors[2]),db=activations(E.spec.db,E.descriptors[3])))
+    args=(pbuf(E.blocks),E.head,pbuf(E.output_norm),pbuf(E.embedding),activations(E.b,E.descriptors[1]),sb,
+          pbuf(E.ids),pbuf(E.output),pbuf(E.control),pbuf(E.ticks),pbuf(E.part),pbuf(E.ix),pbuf(E.expertids),
           Int32(np),Int32(nt),Int32(E.ctx),E.tk.eos,get(E.tk.ids,"<|im_end|>",E.tk.eos),Val(E.mode))
     if E.kernel===nothing
         # O1 avoids LLVM's quadratic IRCE pass over the persistent request loop.
@@ -1481,7 +1530,7 @@ function request_kernel(E,np,nt;compile=false)
         source=AMDGPU.methodinstance(typeof(k_request!),tt)
         job=AMDGPU.GPUCompiler.CompilerJob(source,cfg)
         arch=replace(AMDGPU.HIP.gcn_arch(dev),r"[^A-Za-z0-9_-]"=>"_")
-        key=SOURCE_DIGEST*"-$VERSION-$(pkgversion(AMDGPU))-$arch-$(E.mode)-$(E.ctx)"
+        key=SOURCE_DIGEST*"-$VERSION-$(pkgversion(AMDGPU))-$arch-$(E.mode)-$(E.ctx)-"*bytes2hex(sha256(string(tt)))
         cache=joinpath(get(ENV,"QWEN36_CACHE",joinpath(homedir(),".cache","qwen36")),key)
         mkpath(dirname(cache))
         if isfile(cache*".hsaco") && isfile(cache*".entry")
@@ -1501,6 +1550,7 @@ function request_kernel(E,np,nt;compile=false)
         resident=Ref{Cint}()
         AMDGPU.HIP.hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(resident,E.kernel.fun,256,0)
         resident[]>=1 || error("the cooperative grid cannot be resident")
+        E.groups=min(E.groups,Int(AMDGPU.HIP.properties(AMDGPU.device()).multiProcessorCount)*Int(resident[]))
         E.kernel(args...;groupsize=256,gridsize=E.groups)
     end
     E.kernel
@@ -1659,7 +1709,7 @@ function main(args)
     text="--raw" in flags ? prompt : chat_prompt(prompt)*("--think" in flags ? "" : "\n</think>\n\n")
     encode(E.tk,text); piece(E.tk,Int32(0)) # compile tokenizer/decoder before accepting a request
     get(ENV,"QWEN36_OUTPUT","")=="" || write(ENV["QWEN36_OUTPUT"],UInt8[])
-    request!(E,encode(E.tk,text),1); reset!(E); phase("warmed engine")
+    request!(E,encode(E.tk,text),1); reset!(E); phase("warmed engine"); memorystats("warmed")
     rate=Ref{Cint}()
     AMDGPU.HIP.hipDeviceGetAttribute(rate,AMDGPU.HIP.hipDeviceAttributeWallClockRate,AMDGPU.HIP.device_id(AMDGPU.device()))
     frequency=Float64(rate[])*1000; frequency>0 || error("no GPU steady clock frequency")
@@ -1681,7 +1731,7 @@ function main(args)
     dec=max(Float64(ticks[3]-ticks[2])/frequency,eps(Float64)); steps=max(ctl[2]-1,0)
     m=Dict{String,Any}("prefill_tps"=>length(ids)/pre,"decode_tps"=>steps/dec,"prompt_tokens"=>length(ids),"output_tokens"=>length(out))
     dest=get(ENV,"QWEN36_METRICS",""); isempty(dest) || open(io->TOML.print(io,m),dest,"w")
-    close_host!(E); profile_finish(); merge!(m,accounting(PROFILE_DIR[]))
+    memorystats("completed"); close_host!(E); profile_finish(); merge!(m,accounting(PROFILE_DIR[]))
     open(io->TOML.print(io,m),joinpath(PROFILE_DIR[],"accounting.toml"),"w")
     dest=get(ENV,"QWEN36_ACCOUNTING",""); isempty(dest) || open(io->TOML.print(io,m),dest,"w")
     @printf("prefill tps: %.2f\ndecode tps: %.2f\nidle time %%: %.4f\n",m["prefill_tps"],m["decode_tps"],m["idle_percent"])
