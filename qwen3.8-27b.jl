@@ -701,7 +701,9 @@ end
     s
 end
 # the items (64 rows, one K slice) of the matrices js of layer l, over every wavefront of the die
-function gemv_ph!(A::KA, l::Int32, js::NTuple{N,Int32}, seq::Int32, ::Val{P}) where {N,P}
+# With xs >= 0 (one matrix of NE rows: the out- and down-projections) the GEMV also starts exchange xs: the wavefront
+# that finishes the last K slice of a 64-row group (counted in cnt) sends the group's sums to host memory at once.
+function gemv_ph!(A::KA, l::Int32, js::NTuple{N,Int32}, seq::Int32, ::Val{P}, xs::Int32 = Int32(-1)) where {N,P}
     t = tid(); lane = t & Int32(63); gw = Int32(4) * wgid() + (t >> Int32(6)); NW = Int32(4) * A.nwg
     t0 = memtime(); did = false
     xr = sbuf(A.xt, NE * PMAX * 4); x16 = sbuf(A.x16, NE ÷ 16 * PMAX * 4); x32 = sbuf(A.x32, NE ÷ 32 * PMAX * 4)
@@ -716,10 +718,24 @@ function gemv_ph!(A::KA, l::Int32, js::NTuple{N,Int32}, seq::Int32, ::Val{P}) wh
             else
                 gemv6!(A.part + 4o, reinterpret(LP{UInt8}, woff), reinterpret(LP{UInt16}, doff), xr, x16, nb, rows, G, sl, lane, Val(P))
             end
+            if xs >= Int32(0)
+                fence_rel()
+                c = lane == Int32(0) ? atadd(A.bar + 16 + 4G, UInt32(1)) : UInt32(0)
+                c = reinterpret(UInt32, AMDGPU.Device.shfl(reinterpret(Int32, c), Cint(0)))
+                if c == UInt32(ns - Int32(1))
+                    fence_acq(); r = Int32(64) * G + lane; tag = UInt64(xs + Int32(1)) << 32; hb = hxs(A, xs & Int32(1), A.d)
+                    for p in Int32(0):Int32(P - 1)
+                        v = psum(A, o, ns, rows, P, p, r)
+                        st64_sys(hb + 8 * (Int64(p) * NE + r), UInt64(reinterpret(UInt32, v)) | tag)
+                    end
+                    lane == Int32(0) && stmono(A.bar + 16 + 4G, UInt32(0))
+                end
+            end
             did = true; g += NW
         end
         base += n; o += Int64(ns) * P * rows
     end
+    xs >= Int32(0) && fence_rel_sys()
     did && lane == Int32(0) && (p = A.acct + 8 * (3 + 2Int64(seq)); umin64(p, t0); umax64(p + 8, memtime()))
     return
 end
@@ -753,7 +769,14 @@ end
 # until their exchange numbers match), x (+)= the sum, and the next norm's input is prepared: x w into xt with its
 # 16- and 32-sums, and each workgroup's sum of squares a position into red (the consumers apply 1 / rms). Phase seq is
 # the computing and writing; seq + 1 is the reading from when the first share arrived (the wait before it is idle).
-function xwr_ph!(A::KA, l::Int32, j::Int32, w::LP{Float32}, set::Bool, xs::Int32, seq::Int32, P::Int32)
+# this die's share of element k at position p: the K-slice sums of matrix j, or (j < 0) its embedding rows of tok[p]
+@inline function share(A::KA, j, ns, rows, W, P, p, k)
+    j >= Int32(0) && return psum(A, Int64(0), ns, rows, P, p, k)
+    r = ld(A.tok, p) - Int32(VPD) * A.d
+    r >= Int32(0) && r < Int32(VPD) ? embval(W, r, k) : 0.0f0
+end
+# send = false: the GEMV already sent this die's share (gemv_ph! with xs)
+function xwr_ph!(A::KA, l::Int32, j::Int32, w::LP{Float32}, set::Bool, xs::Int32, seq::Int32, P::Int32, send::Bool = true)
     sq = @ROCStaticLocalArray(Float32, PMAX, false)
     t = tid(); t < P && st!(sq, 0.0f0, t)
     t0 = memtime()
@@ -766,27 +789,22 @@ function xwr_ph!(A::KA, l::Int32, j::Int32, w::LP{Float32}, set::Bool, xs::Int32
         woff, _, _, _, _ = mat(A, Int32(64), Int32(0)); W = reinterpret(LP{UInt8}, woff)
     end
     # write
-    i = gtid(); vals = 0.0f0
-    while i < Int32(NE) * P
+    i = gtid()
+    while send && i < Int32(NE) * P
         p = i ÷ Int32(NE); k = i - p * Int32(NE)
-        v = if j >= Int32(0)
-            psum(A, Int64(0), ns, rows, P, p, k)
-        else
-            r = ld(A.tok, p) - Int32(VPD) * A.d
-            r >= Int32(0) && r < Int32(VPD) ? embval(W, r, k) : 0.0f0
-        end
+        v = share(A, j, ns, rows, W, P, p, k)
         st64_sys(hxs(A, slot, A.d) + 8 * (Int64(p) * NE + k), UInt64(reinterpret(UInt32, v)) | tag)
         did = true; i += nthr(A)
     end
-    fence_rel_sys()
-    t1 = memtime()
+    send && fence_rel_sys()
     done!(A, seq, t0, did)
     # read (one element a thread a pass: the same elements as written)
     ta = UInt64(0); i = gtid()
     while i < Int32(NE) * P
         p = i ÷ Int32(NE); k = i - p * Int32(NE); o = Int64(p) * NE + k
-        v = set ? 0.0f0 : ld(A.x, o)
+        v = (set ? 0.0f0 : ld(A.x, o)) + share(A, j, ns, rows, W, P, p, k)   # this die's own share from local memory
         for d in Int32(0):Int32(ND - 1)
+            d == A.d && continue
             q = hxs(A, slot, d) + 8o; u = ld64_sys(q)
             if u & 0xffffffff00000000 != tag
                 tw = memtime()
@@ -1094,13 +1112,13 @@ function fwd!(A::KA, pos0::Int32, seq::Int32, xs::Int32, head::Bool, frominp::Bo
             attn_ph!(A, l, pos0, seq, Pi); seq += Int32(1); gbar!(A)
             acomb_ph!(A, pos0, seq, Pi); seq += Int32(1); gbar!(A)
         end
-        gemv_ph!(A, l, (Int32(4),), seq, Val(P)); seq += Int32(1); gbar!(A)
-        xwr_ph!(A, l, Int32(4), fvec(A, l, 1), false, xs, seq, Pi); seq += Int32(2); xs += Int32(1); gbar!(A)
+        gemv_ph!(A, l, (Int32(4),), seq, Val(P), xs); seq += Int32(1); gbar!(A)
+        xwr_ph!(A, l, Int32(4), fvec(A, l, 1), false, xs, seq, Pi, false); seq += Int32(2); xs += Int32(1); gbar!(A)
         gemv_ph!(A, l, JFF, seq, Val(P)); seq += Int32(1); gbar!(A)
         act_ph!(A, l, seq, Pi); seq += Int32(1); gbar!(A)
-        gemv_ph!(A, l, (Int32(7),), seq, Val(P)); seq += Int32(1); gbar!(A)
+        gemv_ph!(A, l, (Int32(7),), seq, Val(P), xs); seq += Int32(1); gbar!(A)
         wn = l < nl - Int32(1) ? fvec(A, l + Int32(1), 0) : fvec(A, 64, 0)
-        xwr_ph!(A, l, Int32(7), wn, false, xs, seq, Pi); seq += Int32(2); xs += Int32(1); gbar!(A)
+        xwr_ph!(A, l, Int32(7), wn, false, xs, seq, Pi, false); seq += Int32(2); xs += Int32(1); gbar!(A)
     end
     if head
         gemv_ph!(A, Int32(64), (Int32(1),), seq, Val(P)); seq += Int32(1); gbar!(A)
@@ -1325,7 +1343,7 @@ const NWG = 256                                             # buffers sized for 
 function KDie(D::Die, maxctx)
     AMDGPU.device!(D.dev); z(n) = AMDGPU.zeros(Float32, n)
     KDie(ktable(D), z(NE * PMAX), z(NE * PMAX), z(NE ÷ 16 * PMAX), z(NE ÷ 32 * PMAX), z(VPD * 10 * PMAX), z(3 * NWG * PMAX),
-        z(QKVD * PMAX), z(1536 * PMAX), z(1536 * PMAX), z(6 * PMAX * cld(maxctx, CH) * (HD + 2)), AMDGPU.zeros(Int32, PMAX), AMDGPU.zeros(UInt32, 4))
+        z(QKVD * PMAX), z(1536 * PMAX), z(1536 * PMAX), z(6 * PMAX * cld(maxctx, CH) * (HD + 2)), AMDGPU.zeros(Int32, PMAX), AMDGPU.zeros(UInt32, 4 + NE ÷ 64))
 end
 # page-locked host memory every die maps: the exchanges, the counters, the generated tokens
 struct HostX
@@ -1371,7 +1389,7 @@ function request!(PE::PEngine, st::Vector{DState}, inp::Vector{Int}, ngen::Int, 
     for d in 1:ND
         AMDGPU.device!(E.dies[d].dev)
         a = AMDGPU.zeros(UInt64, 3 + 2nphase); ah = zeros(UInt64, 3 + 2nphase); ah[1] = typemax(UInt64); ah[4:2:end] .= typemax(UInt64); copyto!(a, ah); push!(accts, a)
-        copyto!(PE.K[d].bar, UInt32[0, 0, 0, NLRUN[]])
+        copyto!(PE.K[d].bar, [UInt32[0, 0, 0, NLRUN[]]; zeros(UInt32, NE ÷ 64)])
         ib = ROCArray(Int32.(inp)); AMDGPU.synchronize()
         A = kargs(E, PE.K, PE.hx, d, st[d], a, ib, length(inp), ngen, mode, PE.nwg, lgs === nothing ? nothing : lgs[d])
         @roc groupsize = 256 gridsize = PE.nwg maxthreads = 256 k_req!(A)
