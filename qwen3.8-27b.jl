@@ -1285,15 +1285,19 @@ function KDie(D::Die, npos)
         z(2 * NWG * NR), z(QKVD * npos), z(1536 * npos), z(1536 * npos), z(6 * (HD + 2) * max(npos, NWG)),
         zi(npos), AMDGPU.zeros(UInt32, 64), AMDGPU.zeros(Int64, npos), zi(npos), zi(npos), zi(NR), AMDGPU.zeros(Int64, 4NR), zi(4NR))
 end
-# page-locked host memory every die maps: the exchange words (2 phases x 2 slots x dies x dies x npos x QTR), the argmax exchange
-# (2 slots x dies x NR), the counters, the generated tokens
+# page-locked host memory every die maps. p: what only the dies touch, the exchange words (2 phases x 2 slots x dies x
+# dies x npos x QTR) and the argmax exchange (2 slots x dies x NR); c: what the host reads or writes too, the counters
+# (at out) and the generated tokens (at tok). Both coherent (four dies read it at 14 GB/s together); in non-coherent
+# memory a die's L2 keeps the lines, so a poll does not see the other dies' writes (1 of 2560 words within 1 s).
 struct HostX
-    p::Ptr{UInt8}; nbytes::Int; out::Int; tok::Int
+    p::Ptr{UInt8}; c::Ptr{UInt8}; nbytes::Int; out::Int; tok::Int
 end
 function HostX(npos, maxgen)
-    out = 8 * 4 * ND * ND * npos * QTR + 4 * 2 * ND * NR * 2; tok = out + 64; n = tok + 4maxgen; r = Ref{Ptr{Cvoid}}(C_NULL)
-    AMDGPU.HIP.hipHostMalloc(r, n, AMDGPU.HIP.hipHostMallocPortable | AMDGPU.HIP.hipHostMallocMapped | AMDGPU.HIP.hipHostMallocCoherent)
-    HostX(Ptr{UInt8}(r[]), n, out, tok)
+    n = 8 * 4 * ND * ND * npos * QTR + 4 * 2 * ND * NR * 2; out = 0; tok = 64; r = Ref{Ptr{Cvoid}}(C_NULL); rc = Ref{Ptr{Cvoid}}(C_NULL)
+    H = AMDGPU.HIP
+    H.hipHostMalloc(r, n, H.hipHostMallocPortable | H.hipHostMallocMapped | H.hipHostMallocCoherent)
+    H.hipHostMalloc(rc, tok + 4maxgen, H.hipHostMallocPortable | H.hipHostMallocMapped | H.hipHostMallocCoherent)
+    HostX(Ptr{UInt8}(r[]), Ptr{UInt8}(rc[]), n, out, tok)
 end
 lp(T, p::Ptr) = reinterpret(LP{T}, p)
 lp(T, a::ROCArray) = reinterpret(LP{T}, pointer(a))
@@ -1338,8 +1342,8 @@ function kargs(K, hx::HostX, d, maxctx, acct, inp, nreq, mode, nwg, lg, npos, ri
     k = K[d]
     KA(lp(Int64, k.tab), lp(Float32, k.x), lp(Float32, k.xt), lp(Float32, k.x16), lp(Float32, k.x32), lp(Float32, k.part), lp(Float32, k.red),
        lp(Float32, k.u), lp(Float32, k.qh), lp(Float32, k.gh), lp(Float32, k.ap), lg === nothing ? lp(Float32, k.x) : lp(Float32, lg),
-       lp(Int64, k.sl), Int32(maxctx), lp(Float32, hx.p), lp(UInt32, hx.p + hx.out), Int32(d - 1), lp(UInt32, k.bar), lp(UInt64, acct),
-       lp(Int32, inp), lp(Int32, k.rq), Int32(nreq), lp(Int32, hx.p + hx.tok), Int32(mode), Int32(nwg), lp(Int32, k.tok),
+       lp(Int64, k.sl), Int32(maxctx), lp(Float32, hx.p), lp(UInt32, hx.c + hx.out), Int32(d - 1), lp(UInt32, k.bar), lp(UInt64, acct),
+       lp(Int32, inp), lp(Int32, k.rq), Int32(nreq), lp(Int32, hx.c + hx.tok), Int32(mode), Int32(nwg), lp(Int32, k.tok),
        lp(Int32, k.posr), lp(Int32, k.posa), lp(Int32, k.tks), Int32(npos), lp(Int64, k.ssq), Int32(rid))
 end
 # up to NR requests at once on the four dies, one dispatch a die. reqs: (input ids, tokens to generate) each, with
@@ -1358,7 +1362,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
     inp = Int32.(vcat(first.(reqs)...)); ioff = cumsum([0; length.(first.(reqs))]); ooff = cumsum([0; last.(reqs)])
     rq = Int32.(vcat([[ioff[r], length(reqs[r][1]), reqs[r][2], ooff[r]] for r in 1:nr]...))
     nphase = (sum(cld(length(i), npos) for (i, _) in reqs) + maximum(last, reqs) + 2) * 1100; rid = (PE.rid[] += 1)
-    unsafe_store!(Ptr{UInt64}(PE.hx.p + PE.hx.out), 0, 1); unsafe_store!(Ptr{UInt64}(PE.hx.p + PE.hx.out), 0, 2)   # the counters
+    unsafe_store!(Ptr{UInt64}(PE.hx.c + PE.hx.out), 0, 1); unsafe_store!(Ptr{UInt64}(PE.hx.c + PE.hx.out), 0, 2)   # the counters
     accts = ROCVector{UInt64}[]; ibs = ROCVector{Int32}[]
     for d in 1:ND
         AMDGPU.device!(dies[d].dev); K = PE.K[d]
@@ -1385,7 +1389,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
     end
     ab = [(AMDGPU.device!(D.dev); Array(K.bar)[3]) for (D, K) in zip(dies, PE.K)]
     any(!=(0), ab) && (error("persistent kernel aborted (a wait passed 10 s): $ab"))
-    toks = [[Int(unsafe_load(Ptr{Int32}(PE.hx.p + PE.hx.tok), ooff[r] + i)) for i in 1:reqs[r][2]] for r in 1:nr]
+    toks = [[Int(unsafe_load(Ptr{Int32}(PE.hx.c + PE.hx.tok), ooff[r] + i)) for i in 1:reqs[r][2]] for r in 1:nr]
     toks, res, tpre, tdec
 end
 if !isdefined(Main, :KWPE)
@@ -1454,7 +1458,7 @@ if !isdefined(Main, :PK)
     const PK = Ref{Any}(nothing)                           # the persistent kernel engine
 end
 function pinit()
-    t0 = time(); PK[] === nothing || (foreach(K -> foreach(a -> a isa ROCArray && AMDGPU.unsafe_free!(a), (getfield(K, f) for f in fieldnames(typeof(K)))), PK[].K); AMDGPU.HIP.hipHostFree(PK[].hx.p))
+    t0 = time(); PK[] === nothing || (foreach(K -> foreach(a -> a isa ROCArray && AMDGPU.unsafe_free!(a), (getfield(K, f) for f in fieldnames(typeof(K)))), PK[].K); AMDGPU.HIP.hipHostFree(PK[].hx.p); hasproperty(PK[].hx, :c) && AMDGPU.HIP.hipHostFree(PK[].hx.c))
     PK[] = PEngine(SRV[].dies)
     @printf("persistent kernel: %d workgroups a die, %d positions a prefill forward, clock %.2f MHz, compiled in %.0f s\n", PK[].nwg, PK[].npos, PK[].hz / 1e6, time() - t0); flush(stdout)
 end
