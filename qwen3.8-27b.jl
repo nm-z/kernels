@@ -181,6 +181,17 @@ end
     return
 end
 # a weight matrix on the device, repacked: rows r0 .. r0 + n of a GGUF tensor
+# host -> device copies that finish before they return, the source kept alive until then (an asynchronous copy
+# that outlives its source reads freed host pages: a GPU fault)
+function dev(a::Array)
+    d = ROCArray{eltype(a)}(undef, size(a))
+    GC.@preserve a begin; copyto!(d, a); AMDGPU.synchronize(); end
+    d
+end
+function up!(d::ROCArray, a::Array, n = length(a))
+    GC.@preserve a begin; copyto!(d, 1, a, 1, n); AMDGPU.synchronize(); end
+    d
+end
 struct DMat
     typ::Int; K::Int; rows::Int
     W::ROCVector{UInt8}
@@ -218,7 +229,7 @@ function DMat(g::GGUF, name::String, rows::Vector, blocks::Vector)
         end
     end
     W, D = repack(t.typ, 256nbk, np, src)
-    DMat(t.typ, 256nbk, np, ROCArray(W), ROCArray(D))
+    DMat(t.typ, 256nbk, np, dev(W), dev(D))
 end
 
 # ---------------------------------------------------------------------------------------------
@@ -1050,7 +1061,7 @@ function load_layer(g::GGUF, l, d)
     p = "blk.$l."; all20 = [(0, 20)]
     gate = DMat(g, p * "ffn_gate.weight", [(4352d, 4352)], all20); up = DMat(g, p * "ffn_up.weight", [(4352d, 4352)], all20)
     down = DMat(g, p * "ffn_down.weight", [(0, NE)], [(17d, 17)])
-    an = ROCArray(f32(g, p * "attn_norm.weight")); pn = ROCArray(f32(g, p * "post_attention_norm.weight"))
+    an = dev(f32(g, p * "attn_norm.weight")); pn = dev(f32(g, p * "post_attention_norm.weight"))
     if isrec(l)
         vh = [16j + 4d for j in 0:2]                       # the first value head of each 4-head run
         heads = [16j + 4d + i for j in 0:2 for i in 0:3]
@@ -1061,12 +1072,12 @@ function load_layer(g::GGUF, l, d)
         chans = [512d:512d+511; 2048+512d:2048+512d+511; [4096+128h:4096+128h+511 for h in vh]...]
         cw = f32(g, p * "ssm_conv1d.weight"); cwd = [cw[4c+k] for c in chans for k in 1:4]
         dtb = f32(g, p * "ssm_dt.bias")[heads .+ 1]; ssa = f32(g, p * "ssm_a")[heads .+ 1]
-        return DLayer(true, an, pn, gate, up, down, qkv, z, al, be, out, ROCArray(cwd), ROCArray(dtb), ROCArray(ssa), ROCArray(f32(g, p * "ssm_norm.weight")))
+        return DLayer(true, an, pn, gate, up, down, qkv, z, al, be, out, dev(cwd), dev(dtb), dev(ssa), dev(f32(g, p * "ssm_norm.weight")))
     end
     q = DMat(g, p * "attn_q.weight", [(3072d, 3072)], all20)
     k = DMat(g, p * "attn_k.weight", [(256d, 256)], all20); v = DMat(g, p * "attn_v.weight", [(256d, 256)], all20)
     out = DMat(g, p * "attn_output.weight", [(0, NE)], [(6d, 6)])
-    DLayer(false, an, pn, gate, up, down, q, k, v, nothing, out, ROCArray(f32(g, p * "attn_q_norm.weight")), ROCArray(f32(g, p * "attn_k_norm.weight")), ROCArray(NOV), ROCArray(NOV))
+    DLayer(false, an, pn, gate, up, down, q, k, v, nothing, out, dev(f32(g, p * "attn_q_norm.weight")), dev(f32(g, p * "attn_k_norm.weight")), ROCArray(NOV), ROCArray(NOV))
 end
 struct Die
     dev::HIPDevice; d::Int
@@ -1080,7 +1091,7 @@ DState(maxctx) = DState(AMDGPU.zeros(Float32, 48 * VHD * DK * DK), AMDGPU.zeros(
     AMDGPU.zeros(UInt8, 16 * maxctx * KVROW), AMDGPU.zeros(UInt8, 16 * maxctx * KVROW), maxctx)
 function load_die(g::GGUF, dev, d, L)
     AMDGPU.device!(dev)
-    Die(dev, d, L, DMat(g, "token_embd.weight", VPD * d, VPD), DMat(g, "output.weight", VPD * d, VPD), ROCArray(f32(g, "output_norm.weight")))
+    Die(dev, d, L, DMat(g, "token_embd.weight", VPD * d, VPD), DMat(g, "output.weight", VPD * d, VPD), dev(f32(g, "output_norm.weight")))
 end
 # the layers are read in file order, each one for all four dies at once (one pass over the file: the GGUF is on a
 # spinning disk and sentry's RAM can't cache all of it)
@@ -1117,7 +1128,7 @@ function ktable(D::Die)
         W.rec && (v!(l, 4, W.w3); v!(l, 5, W.w4))
     end
     m!(64, 0, D.emb); m!(64, 1, D.head); v!(64, 0, D.onrm)
-    ROCArray(tab)
+    dev(tab)
 end
 const NWG = 256                                             # most workgroups a die
 const MAXCTX = 262144                                      # positions a request slot holds
@@ -1188,11 +1199,11 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing)
     accts = ROCVector{UInt64}[]; ibs = ROCVector{Int32}[]
     for d in 1:ND
         AMDGPU.device!(dies[d].dev); K = PE.K[d]
-        a = AMDGPU.zeros(UInt64, 3 + 2nphase); ah = zeros(UInt64, 3 + 2nphase); ah[1] = typemax(UInt64); ah[4:2:end] .= typemax(UInt64); copyto!(a, ah); push!(accts, a)
-        copyto!(K.bar, UInt32[0, 0, 0, NLRUN[]]); copyto!(K.rq, 1, rq, 1, length(rq))
+        a = AMDGPU.zeros(UInt64, 3 + 2nphase); ah = zeros(UInt64, 3 + 2nphase); ah[1] = typemax(UInt64); ah[4:2:end] .= typemax(UInt64); up!(a, ah); push!(accts, a)
+        up!(K.bar, UInt32[0, 0, 0, NLRUN[]]); up!(K.rq, rq)
         for r in 1:nr; fill!(sts[r][d].S, 0.0f0); fill!(sts[r][d].ring, 0.0f0); end   # a request starts from zero state
-        copyto!(K.sl, 1, Int64[addr(getfield(sts[r][d], f)) for r in 1:nr for f in (:S, :ring, :kc, :vc)], 1, 4nr)
-        ib = ROCArray(inp); push!(ibs, ib); AMDGPU.synchronize()
+        up!(K.sl, Int64[addr(getfield(sts[r][d], f)) for r in 1:nr for f in (:S, :ring, :kc, :vc)])
+        ib = dev(inp); push!(ibs, ib)
         A = kargs(PE.K, PE.hx, d, mc, a, ib, nr, mode, PE.nwg, lgs === nothing ? nothing : lgs[d], npos, rid)
         @roc groupsize = 256 gridsize = PE.nwg maxthreads = 256 waves_per_eu = KWPE[] k_req!(A)
     end

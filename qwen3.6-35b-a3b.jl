@@ -33,6 +33,8 @@ const PROFILE_ID=Ref(ProfileClientID(24,C_NULL,0))
 const PROFILE_CONFIG=Ref(ProfileConfig(32,C_NULL,C_NULL,C_NULL))
 const PROFILE_TOOL_CONFIG=Ref{Ptr{Cvoid}}(C_NULL)
 const PROFILE_TOOL_INIT=Ref{Ptr{Cvoid}}(C_NULL)
+const PROFILE_TOOL_FINI=Ref{Ptr{Cvoid}}(C_NULL)
+const PROFILE_TOOL_DATA=Ref{Ptr{Cvoid}}(C_NULL)
 const PROFILE_WRAPPER_INIT=Ref{Ptr{Cvoid}}(C_NULL)
 const PROFILE_FINISH=Ref{Ptr{Cvoid}}(C_NULL)
 const PROFILE_HANDLES=Ptr{Cvoid}[]
@@ -48,14 +50,15 @@ function profile_initialize(finalizer::Ptr{Cvoid},data::Ptr{Cvoid})::Cint
     ccall(PROFILE_TOOL_INIT[],Cint,(Ptr{Cvoid},Ptr{Cvoid}),finalizer,data)
 end
 function profile_configure(version::UInt32,runtime::Ptr{UInt8},priority::UInt32,id::Ptr{ProfileClientID})::Ptr{ProfileConfig}
+    # Load the client after SDK client discovery. Loading it before discovery
+    # registers its exported configure function as a second, duplicate client.
+    tool=Libdl.dlopen("/opt/rocm/lib/rocprofiler-sdk/librocprofiler-sdk-tool.so",Libdl.RTLD_LAZY|Libdl.RTLD_LOCAL)
+    push!(PROFILE_HANDLES,tool); PROFILE_TOOL_CONFIG[]=Libdl.dlsym(tool,:rocprofiler_configure)
     p=ccall(PROFILE_TOOL_CONFIG[],Ptr{ProfileConfig},(UInt32,Ptr{UInt8},UInt32,Ptr{ProfileClientID}),version,runtime,priority,id)
     restore_profile_signals()
     cfg=unsafe_load(p); PROFILE_ID[]=unsafe_load(id); PROFILE_TOOL_INIT[]=cfg.initialize
+    PROFILE_TOOL_FINI[]=cfg.finalize; PROFILE_TOOL_DATA[]=cfg.data
     PROFILE_CONFIG[]=ProfileConfig(cfg.size,PROFILE_WRAPPER_INIT[],cfg.finalize,cfg.data)
-    # SDK also discovers the tool's exported configure function. Keep that entry
-    # passive; only this wrapped client creates contexts. Its presence makes SDK
-    # return a client finalizer, preserving SDK runtime state until HIP shuts down.
-    unsafe_store!(p,ProfileConfig(cfg.size,C_NULL,C_NULL,cfg.data))
     Base.unsafe_convert(Ptr{ProfileConfig},PROFILE_CONFIG)
 end
 function profile_start()
@@ -78,16 +81,16 @@ function profile_start()
                   "ROCPROFILER_LOG_LEVEL"=>"error","ROCTX_LOG_LEVEL"=>"error")
         ENV[k]=v
     end
-    tool=Libdl.dlopen("/opt/rocm/lib/rocprofiler-sdk/librocprofiler-sdk-tool.so",Libdl.RTLD_LAZY|Libdl.RTLD_LOCAL)
-    push!(PROFILE_HANDLES,tool); PROFILE_TOOL_CONFIG[]=Libdl.dlsym(tool,:rocprofiler_configure)
     status=ccall((:rocprofiler_force_configure,"/opt/rocm/lib/librocprofiler-sdk.so"),Cint,(Ptr{Cvoid},),configure)
     restore_profile_signals()
     status==0 || error("profiler configuration failed: $status")
     dir
 end
 function profile_finish()
-    f=PROFILE_FINISH[]; f==C_NULL && error("profiler did not initialize")
-    ccall(f,Cvoid,(ProfileClientID,),PROFILE_ID[]); PROFILE_FINISH[]=C_NULL
+    f=PROFILE_TOOL_FINI[]; f==C_NULL && error("profiler did not initialize")
+    # The tool stops its contexts and flushes its buffers. SDK retains its HSA
+    # interception state until normal process shutdown, after HIP destroys queues.
+    ccall(f,Cvoid,(Ptr{Cvoid},),PROFILE_TOOL_DATA[]); PROFILE_TOOL_FINI[]=C_NULL
 end
 if abspath(PROGRAM_FILE)==@__FILE__() && !any(a->a in ("--help","--compile","--download","--prepare"),ARGS)
     profile_start()
@@ -820,25 +823,78 @@ pbuf(a)=PBuf{eltype(a),length(a)}(UInt(pointer(a)))
 @inline av(::Type{T},p::UInt64,n::Integer) where T =
     AMDGPU.ROCDeviceArray{T,1,1}((Int(n),),Core.LLVMPtr{T,1}(p))
 @inline fv(p::UInt64,n::Integer=16384)=av(Float32,p,n)
+# gfx1101, code-object ABI 500: the cooperative launch's synchronization
+# object has its generation counter at byte 32 and resident group count at 40.
+# Use the ROCm generation protocol with active acquire polling; sleeping every
+# poll adds a scheduler delay at each of the transformer's grid barriers.
+@inline function p_sync()
+    Base.llvmcall(("""
+    declare void @llvm.amdgcn.s.barrier()
+    declare i32 @llvm.amdgcn.workitem.id.x()
+    declare ptr addrspace(4) @llvm.amdgcn.implicitarg.ptr()
+    define void @entry() alwaysinline convergent {
+    start:
+      fence syncscope("workgroup") release
+      call void @llvm.amdgcn.s.barrier()
+      %tid = call i32 @llvm.amdgcn.workitem.id.x()
+      %leader = icmp eq i32 %tid, 0
+      br i1 %leader, label %arrive, label %finish
+    arrive:
+      fence syncscope("workgroup") acquire
+      fence syncscope("agent") release
+      %args = call ptr addrspace(4) @llvm.amdgcn.implicitarg.ptr()
+      %slot = getelementptr i8, ptr addrspace(4) %args, i64 88
+      %address = load i64, ptr addrspace(4) %slot, align 8
+      %sync = inttoptr i64 %address to ptr addrspace(1)
+      %counter = getelementptr i8, ptr addrspace(1) %sync, i64 32
+      %groupsptr = getelementptr i8, ptr addrspace(1) %sync, i64 40
+      %groups = load i32, ptr addrspace(1) %groupsptr, align 8
+      %old = atomicrmw add ptr addrspace(1) %counter, i32 1 syncscope("agent-one-as") monotonic, align 4
+      %arrivals = and i32 %old, 65535
+      %lastindex = add i32 %groups, -1
+      %last = icmp eq i32 %arrivals, %lastindex
+      br i1 %last, label %advance, label %poll
+    advance:
+      %step = sub i32 65536, %groups
+      %unused = atomicrmw add ptr addrspace(1) %counter, i32 %step syncscope("agent-one-as") monotonic, align 4
+      br label %poll
+    poll:
+      %current = load atomic i32, ptr addrspace(1) %counter syncscope("agent-one-as") monotonic, align 4
+      %generation = and i32 %current, -65536
+      %previous = and i32 %old, -65536
+      %waiting = icmp eq i32 %generation, %previous
+      br i1 %waiting, label %poll, label %release
+    release:
+      fence syncscope("agent") acquire
+      fence syncscope("workgroup") release
+      br label %finish
+    finish:
+      call void @llvm.amdgcn.s.barrier()
+      fence syncscope("workgroup") acquire
+      ret void
+    }
+    ""","entry"),Nothing,Tuple{})
+    return
+end
 # All activation arrays have eight position slots. Val(P) changes the number of
 # accumulators, without introducing a second implementation of any target layer.
 @inline pv(a,p::Int32) = av(eltype(a),UInt64(pointer(a))+UInt64(4p)*UInt64(length(a)÷8),length(a))
 @inline function p_copy!(y,x,n::Int32)
     for j in gid0():Int32(gridItemDim().x):n-Int32(1); @inbounds y[j+1]=x[j+1]; end
-    AMDGPU.Device.sync_grid(); return
+    p_sync(); return
 end
 @inline function p_norm!(y,x,w,n::Int32,active::Int32)
     for p in Int32(workgroupIdx().x)-Int32(1):Int32(gridGroupDim().x):active-Int32(1)
         k_norm!(pv(y,p),pv(x,p),w,n,1.0f-6)
     end
-    AMDGPU.Device.sync_grid(); return
+    p_sync(); return
 end
 @inline function p_embed!(x,emb,ids,off::Int32,n::Int32)
     for j in gid0():Int32(gridItemDim().x):n*Int32(2048)-Int32(1)
         p=j÷Int32(2048); c=j%Int32(2048)
         @inbounds x[j+1]=bf32(emb[Int64(ids[off+p+1])*Int64(2048)+c+1])
     end
-    AMDGPU.Device.sync_grid(); return
+    p_sync(); return
 end
 @inline function p_mul_t!(y,m,x,ids,mode::Int32,n::Int32,::Val{P},::Val{T}) where {P,T}
     ti=tid0(); lane=ti&Int32(31); bid=Int32(workgroupIdx().x)-Int32(1)
@@ -877,7 +933,7 @@ end
     elseif m.typ==30; p_mul_t!(y,m,x,ids,mode,n,P,Val(30))
     else; p_mul_t!(y,m,x,ids,mode,n,P,Val(0))
     end
-    AMDGPU.Device.sync_grid(); return
+    p_sync(); return
 end
 @inline function p_route!(ids,w,r,n::Int32)
     if gid0()==0
@@ -896,7 +952,7 @@ end
             for s in 1:8; w[8p+s]/=den; end
         end
     end
-    AMDGPU.Device.sync_grid(); return
+    p_sync(); return
 end
 @inline function p_argmax!(logits,part,ix,out,n::Int32,active::Int32,off::Int32=Int32(0))
     bid=Int32(workgroupIdx().x)-Int32(1); ti=tid0(); ng=Int32(gridGroupDim().x)
@@ -917,7 +973,7 @@ end
         end
         if ti==0; part[p*ng+bid+1]=sh[1]; ix[p*ng+bid+1]=si[1]; end
     end
-    AMDGPU.Device.sync_grid()
+    p_sync()
     if gid0()==0
         @inbounds for p in Int32(0):active-Int32(1)
             best=part[p*ng+1]; id=ix[p*ng+1]
@@ -928,12 +984,12 @@ end
             out[off+p+1]=id
         end
     end
-    AMDGPU.Device.sync_grid(); return
+    p_sync(); return
 end
 @inline function p_save!(dst::UInt64,src::UInt64,p::Int32,n::Int32)
     d=fv(dst,8n); s=fv(src,n)
     for j in gid0():Int32(gridItemDim().x):n-Int32(1); @inbounds d[p*n+j+1]=s[j+1]; end
-    AMDGPU.Device.sync_grid(); return
+    p_sync(); return
 end
 @inline function p_restore!(blocks,k::Int32)
     @inbounds for l in Int32(1):Int32(length(blocks))
@@ -956,66 +1012,66 @@ end
             p_mul!(b.alpha,M[3],b.xn,expertids,n,P); p_mul!(b.beta,M[4],b.xn,expertids,n,P)
             for p in Int32(0):n-Int32(1)
                 k_conv!(pv(b.u,p),pv(b.qkv,p),fv(B.conv,32768),fv(V[5],32768),pos+p,Int32(8192))
-                AMDGPU.Device.sync_grid()
+                p_sync()
                 snapshot && p_save!(B.cs,B.conv,p,Int32(32768))
             end
             for task in bid:ng:n*Int32(16)-Int32(1)
                 p=task÷Int32(16); k_qknorm!(pv(b.qdn,p),pv(b.kdn,p),pv(b.u,p),Int32(16),1.0f-6,task%Int32(16))
             end
-            AMDGPU.Device.sync_grid()
+            p_sync()
             for p in Int32(0):n-Int32(1)
                 for task in bid:ng:Int32(511)
                     k_delta!(pv(b.rawdn,p),fv(B.state,524288),pv(b.qdn,p),pv(b.kdn,p),pv(b.u,p),pv(b.alpha,p),pv(b.beta,p),fv(V[4]),fv(V[3]),Int32(16),task)
                 end
-                AMDGPU.Device.sync_grid()
+                p_sync()
                 snapshot && p_save!(B.ss,B.state,p,Int32(524288))
             end
             for task in bid:ng:n*Int32(32)-Int32(1)
                 p=task÷Int32(32); k_gatednorm!(pv(b.on,p),pv(b.rawdn,p),pv(b.z,p),fv(V[6]),1.0f-6,task%Int32(32))
             end
-            AMDGPU.Device.sync_grid(); p_mul!(b.y,M[5],b.on,expertids,n,P)
+            p_sync(); p_mul!(b.y,M[5],b.on,expertids,n,P)
         else
             p_mul!(b.qg,M[6],b.xn,expertids,n,P); p_mul!(b.k,M[7],b.xn,expertids,n,P); p_mul!(b.v,M[8],b.xn,expertids,n,P)
             for task in bid:ng:n*Int32(18)-Int32(1)
                 p=task÷Int32(18)
                 k_attnprep!(pv(b.q,p),fv(B.kc,512ctx),fv(B.vc,512ctx),pv(b.qg,p),pv(b.k,p),pv(b.v,p),fv(V[7]),fv(V[8]),pos+p,Int32(16),Int32(2),1.0f7,1.0f-6,task%Int32(18),pos+p+ropeoff)
             end
-            AMDGPU.Device.sync_grid()
+            p_sync()
             for p in Int32(0):n-Int32(1)
                 nch=cld(pos+p+Int32(1),Int32(8))
                 for task in bid:ng:Int32(16)*nch-Int32(1)
                     k_attnscore!(pv(b.scores,p),pv(b.q,p),fv(B.kc,512ctx),pos+p,Int32(16),Int32(2),ctx,task%Int32(16),task÷Int32(16))
                 end
             end
-            AMDGPU.Device.sync_grid()
+            p_sync()
             for task in bid:ng:n*Int32(16)-Int32(1)
                 p=task÷Int32(16); k_softmax!(pv(b.scores,p),pos+p,ctx,task%Int32(16))
             end
-            AMDGPU.Device.sync_grid()
+            p_sync()
             for task in bid:ng:n*Int32(16)-Int32(1)
                 p=task÷Int32(16); k_attnout!(pv(b.on,p),pv(b.scores,p),fv(B.vc,512ctx),pv(b.qg,p),pos+p,Int32(16),Int32(2),ctx,task%Int32(16))
             end
-            AMDGPU.Device.sync_grid(); p_mul!(b.y,M[9],b.on,expertids,n,P)
+            p_sync(); p_mul!(b.y,M[9],b.on,expertids,n,P)
         end
-        k_add!(b.x,b.y,n*Int32(2048)); AMDGPU.Device.sync_grid()
+        k_add!(b.x,b.y,n*Int32(2048)); p_sync()
         p_norm!(b.xn,b.x,fv(V[2]),Int32(2048),n)
         p_mul!(b.route,M[10],b.xn,expertids,n,P); p_mul!(b.sg,M[11],b.xn,expertids,n,P)
         p_mul!(b.shg,M[12],b.xn,expertids,n,P); p_mul!(b.shu,M[13],b.xn,expertids,n,P)
-        k_swiglu!(b.shh,b.shg,b.shu,n*Int32(512)); AMDGPU.Device.sync_grid()
+        k_swiglu!(b.shh,b.shg,b.shu,n*Int32(512)); p_sync()
         p_mul!(b.shout,M[14],b.shh,expertids,n,P); p_route!(expertids,b.weights,b.route,n)
         p_mul!(b.eg,M[15],b.xn,expertids,n,P,Int32(1)); p_mul!(b.eu,M[16],b.xn,expertids,n,P,Int32(1))
-        k_swiglu!(b.eh,b.eg,b.eu,n*Int32(4096)); AMDGPU.Device.sync_grid()
+        k_swiglu!(b.eh,b.eg,b.eu,n*Int32(4096)); p_sync()
         p_mul!(b.ed,M[17],b.eh,expertids,n,P,Int32(2))
         for p in Int32(0):n-Int32(1)
             k_moemix!(pv(b.x,p),pv(b.ed,p),pv(b.weights,p),pv(b.shout,p),pv(b.sg,p),Int32(2048),Int32(8))
         end
-        AMDGPU.Device.sync_grid()
+        p_sync()
         tap=l==2 ? Int32(0) : l==7 ? Int32(1) : l==12 ? Int32(2) : l==17 ? Int32(3) : l==23 ? Int32(4) : l==28 ? Int32(5) : l==33 ? Int32(6) : l==38 ? Int32(7) : Int32(-1)
         if capture && tap>=0
             for j in gid0():Int32(gridItemDim().x):n*Int32(2048)-Int32(1)
                 p=j÷Int32(2048); c=j%Int32(2048); b.feat[p*Int32(16384)+tap*Int32(2048)+c+1]=b.x[j+1]
             end
-            AMDGPU.Device.sync_grid()
+            p_sync()
         end
     end
     p_norm!(b.xn,b.x,normout,Int32(2048),n); return
@@ -1035,13 +1091,13 @@ end
         sn,cs=sincos(Float32(pos+p)*1.0f7^(-Float32(j)/64.0f0))
         @inbounds a=x[o+j+1]; v=x[o+j+65]; x[o+j+1]=fma(-v,sn,a*cs); x[o+j+65]=fma(a,sn,v*cs)
     end
-    AMDGPU.Device.sync_grid(); return
+    p_sync(); return
 end
 @inline function p_dhnorm!(x,w,heads::Int32,n::Int32)
     for t in Int32(workgroupIdx().x)-Int32(1):Int32(gridGroupDim().x):heads*n-Int32(1)
         a=av(Float32,UInt64(pointer(x))+UInt64(512t),128); k_norm!(a,a,w,Int32(128),1.0f-6)
     end
-    AMDGPU.Device.sync_grid(); return
+    p_sync(); return
 end
 @inline function p_dconv!(y,x,coef,base,side::Int32,n::Int32)
     w=fv(base,8192)
@@ -1050,7 +1106,7 @@ end
         @inbounds a=w[side*Int32(4096)+c+1]+coef[o+1]; v=w[side*Int32(4096)+Int32(2048)+c+1]+coef[o+129]
         @inbounds y[i+1]=p>0 ? fma(a,x[i+1],v*x[i-2047]) : a*x[i+1]
     end
-    AMDGPU.Device.sync_grid(); return
+    p_sync(); return
 end
 @inline function p_dattn!(out,q,ks,vs,kp::UInt64,vp::UInt64,context::Int32,n::Int32,task::Int32)
     p=task÷Int32(32); h=task%Int32(32); kh=h÷Int32(4)
@@ -1101,7 +1157,7 @@ end
             p=i÷Int32(1024); c=i%Int32(1024); dest=((pos+p)&Int32(2047))*Int32(1024)+c+1
             kc[dest]=Float16(d.k[i+1]); vc[dest]=Float16(d.v[i+1])
         end
-        AMDGPU.Device.sync_grid()
+        p_sync()
     end
     return
 end
@@ -1128,7 +1184,7 @@ end
             prev=sh[1]; previ=si[1]; sync_workgroup()
         end
     end
-    AMDGPU.Device.sync_grid()
+    p_sync()
     if gid0()==0
         wp=av(UInt8,s.pred.ptr,typemax(Int32)); ws=av(UInt8,s.succ.ptr,typemax(Int32))
         @inbounds for p in Int32(1):Int32(7)
@@ -1148,12 +1204,12 @@ end
             s.proposal[p+1]=chosen
         end
     end
-    AMDGPU.Device.sync_grid(); return
+    p_sync(); return
 end
 @inline function p_dpropose!(s,head,emb,pos::Int32,ei,part,ix)
     d=s.db; bid=Int32(workgroupIdx().x)-Int32(1); ng=Int32(gridGroupDim().x)
     if gid0()==0; @inbounds for p in 2:8; s.proposal[p]=s.mask; end; end
-    AMDGPU.Device.sync_grid(); p_embed!(d.x,emb,s.proposal,Int32(0),Int32(8))
+    p_sync(); p_embed!(d.x,emb,s.proposal,Int32(0),Int32(8))
     @inbounds for l in Int32(1):Int32(6)
         B=s.dblocks[l]; M=B.mat; V=B.vec
         p_norm!(d.xn,d.x,fv(V[1]),Int32(2048),Int32(8)); p_mul!(d.coeff,M[1],d.xn,ei,Int32(8),Val(8))
@@ -1162,13 +1218,13 @@ end
         p_dhnorm!(d.q,fv(V[3]),Int32(32),Int32(8)); p_dhnorm!(d.k,fv(V[4]),Int32(8),Int32(8))
         p_drope!(d.q,Int32(32),pos,Int32(8)); p_drope!(d.k,Int32(8),pos,Int32(8))
         for task in bid:ng:Int32(255); p_dattn!(d.on,d.q,d.k,d.v,B.kc,B.vc,pos,Int32(8),task); end
-        AMDGPU.Device.sync_grid(); p_mul!(d.y,M[5],d.on,ei,Int32(8),Val(8))
-        p_dconv!(d.tmp,d.y,d.coeff,V[2],Int32(1),Int32(8)); k_add!(d.x,d.tmp,Int32(16384)); AMDGPU.Device.sync_grid()
+        p_sync(); p_mul!(d.y,M[5],d.on,ei,Int32(8),Val(8))
+        p_dconv!(d.tmp,d.y,d.coeff,V[2],Int32(1),Int32(8)); k_add!(d.x,d.tmp,Int32(16384)); p_sync()
         p_norm!(d.xn,d.x,fv(V[5]),Int32(2048),Int32(8)); p_mul!(d.coeff,M[6],d.xn,ei,Int32(8),Val(8))
         p_dconv!(d.inp,d.xn,d.coeff,V[6],Int32(0),Int32(8))
         p_mul!(d.shg,M[7],d.inp,ei,Int32(8),Val(8)); p_mul!(d.shu,M[8],d.inp,ei,Int32(8),Val(8))
-        k_swiglu!(d.shh,d.shg,d.shu,Int32(49152)); AMDGPU.Device.sync_grid(); p_mul!(d.y,M[9],d.shh,ei,Int32(8),Val(8))
-        p_dconv!(d.tmp,d.y,d.coeff,V[6],Int32(1),Int32(8)); k_add!(d.x,d.tmp,Int32(16384)); AMDGPU.Device.sync_grid()
+        k_swiglu!(d.shh,d.shg,d.shu,Int32(49152)); p_sync(); p_mul!(d.y,M[9],d.shh,ei,Int32(8),Val(8))
+        p_dconv!(d.tmp,d.y,d.coeff,V[6],Int32(1),Int32(8)); k_add!(d.x,d.tmp,Int32(16384)); p_sync()
     end
     p_norm!(d.xn,d.x,fv(s.dnorm[2]),Int32(2048),Int32(8)); p_mul!(d.sel,s.selector,d.xn,ei,Int32(8),Val(8))
     p_mul!(d.logits,head,d.xn,ei,Int32(8),Val(8)); p_dselect!(s,part,ix,ei); return
@@ -1177,12 +1233,12 @@ end
 @inline function p_mprepare!(s,emb,id::Int32,prior,ei)
     m=s.mb
     for c in gid0():Int32(gridItemDim().x):Int32(2047); @inbounds m.x[c+1]=bf32(emb[Int64(id)*2048+c+1]); end
-    AMDGPU.Device.sync_grid()
+    p_sync()
     if workgroupIdx().x==1
         k_norm!(m.concat,m.x,fv(s.mnorm[1]),Int32(2048),1.0f-6)
         k_norm!(av(Float32,UInt64(pointer(m.concat))+UInt64(8192),2048),prior,fv(s.mnorm[2]),Int32(2048),1.0f-6)
     end
-    AMDGPU.Device.sync_grid(); p_mul!(m.x,s.eh,m.concat,ei,Int32(1),Val(8)); return
+    p_sync(); p_mul!(m.x,s.eh,m.concat,ei,Int32(1),Val(8)); return
 end
 @inline function p_mcache!(s,emb,id::Int32,prior,t::Int32,ctx::Int32,ei)
     p_mprepare!(s,emb,id,prior,ei); m=s.mb; B=@inbounds s.mblocks[1]
@@ -1191,7 +1247,7 @@ end
     for h in Int32(workgroupIdx().x)-Int32(1):Int32(gridGroupDim().x):Int32(1)
         k_attnprep!(m.q,fv(B.kc,512ctx),fv(B.vc,512ctx),m.qg,m.k,m.v,fv(B.vec[7]),fv(B.vec[8]),t-Int32(1),Int32(16),Int32(2),1.0f7,1.0f-6,h+Int32(16),t)
     end
-    AMDGPU.Device.sync_grid(); return
+    p_sync(); return
 end
 @inline function p_mpropose!(s,head,emb,pos::Int32,ctx::Int32,ei,part,ix)
     p_mprepare!(s,emb,(@inbounds s.proposal[1]),s.last,ei)
@@ -1216,7 +1272,7 @@ end
 function k_request!(blocks,head,normout,embedding,b,s,ids,output,control,ticks,part,ix,expertids,
                     np::Int32,nt::Int32,ctx::Int32,eos::Int32,imend::Int32,::Val{MODE}) where MODE
     if gid0()==0; @inbounds ticks[1]=clockgpu(); control[1]=Int32(0); control[2]=Int32(0); end
-    AMDGPU.Device.sync_grid(); pos=Int32(0)
+    p_sync(); pos=Int32(0)
     while pos<np
         n=min(Int32(8),np-pos); p_embed!(b.x,embedding,ids,pos,n)
         p_blocks!(blocks,normout,b,expertids,pos,n,Val(8),ctx,false,MODE==2)
@@ -1229,7 +1285,7 @@ function k_request!(blocks,head,normout,embedding,b,s,ids,output,control,ticks,p
                 @inbounds id=s.prediction[1]; output[1]=id; control[2]=Int32(1); control[3]=id
                 control[1]=(id==eos || id==imend) ? Int32(1) : Int32(0); ticks[2]=clockgpu()
             end
-            AMDGPU.Device.sync_grid()
+            p_sync()
         end
     end
     P=Val(8)
@@ -1237,7 +1293,7 @@ function k_request!(blocks,head,normout,embedding,b,s,ids,output,control,ticks,p
     while (@inbounds control[2]<nt && control[1]==0)
         n=min(width,nt-(@inbounds control[2]))
         if gid0()==0; @inbounds s.proposal[1]=control[3]; end
-        AMDGPU.Device.sync_grid()
+        p_sync()
         if MODE==2 && n>1; p_dpropose!(s,head,embedding,pos,expertids,part,ix)
         elseif MODE==1 && n>1; p_mpropose!(s,head,embedding,pos,ctx,expertids,part,ix)
         end
@@ -1255,7 +1311,7 @@ function k_request!(blocks,head,normout,embedding,b,s,ids,output,control,ticks,p
                 end
             end
         end
-        AMDGPU.Device.sync_grid(); k=@inbounds control[4]
+        p_sync(); k=@inbounds control[4]
         MODE!=0 && k<n && p_restore!(blocks,k)
         p_append!(s,b,embedding,s.proposal,Int32(0),pos,k,ctx,expertids,Val(MODE),false)
         pos+=k
@@ -1366,14 +1422,14 @@ function Engine(g,ctx;compileonly=false,mode=0,draftpath=joinpath(dirname(DEFAUL
     phase("loaded engine")
     free_upload!()
     hostio=(ids=zeros(Int32,ctx),output=zeros(Int32,ctx),control=zeros(Int32,4),ticks=zeros(UInt64,3))
-    mapped(a)=GC.@preserve a unsafe_wrap(ROCArray,pointer(a),(length(a),))
+    mapped(a)=compileonly ? AMDGPU.zeros(eltype(a),length(a)) : GC.@preserve a unsafe_wrap(ROCArray,pointer(a),(length(a),))
     Engine(g,tk,c,keep,states,ROCArray(bs),head,norm,emb,b,spec,
            mapped(hostio.ids),mapped(hostio.output),mapped(hostio.control),mapped(hostio.ticks),
            z(8groups),AMDGPU.zeros(Int32,8groups),AMDGPU.zeros(Int32,64),hostio,ctx,groups,mode,nothing)
 end
 function reset!(E)
     for a in E.states; fill!(a,zero(eltype(a))); end
-    fill!(E.spec.last,0.0f0); AMDGPU.synchronize(); E
+    fill!(E.spec.last,0.0f0); AMDGPU.synchronize(;blocking=true); E
 end
 function request_kernel(E,np,nt;compile=false)
     sb=merge(E.spec,(mb=map(pbuf,E.spec.mb),db=map(pbuf,E.spec.db)))
@@ -1408,14 +1464,28 @@ function request_kernel(E,np,nt;compile=false)
 end
 function request!(E,ids,nt)
     length(ids)+nt<=E.ctx || error("context too small")
-    copyto!(E.hostio.ids,1,ids,1,length(ids)); request_kernel(E,length(ids),nt); AMDGPU.synchronize()
+    copyto!(E.hostio.ids,1,ids,1,length(ids)); request_kernel(E,length(ids),nt); AMDGPU.synchronize(;blocking=true)
     ctl=copy(E.hostio.control); out=E.hostio.output[1:ctl[2]]; ticks=copy(E.hostio.ticks)
     out,ticks,ctl
 end
 function close_host!(E)
+    seen=IdDict{Any,Nothing}()
+    function release(a)
+        haskey(seen,a) && return
+        seen[a]=nothing
+        if a isa ROCArray
+            AMDGPU.unsafe_free!(a)
+        elseif a isa DMat
+            release(a.W)
+        elseif a isa NamedTuple || a isa Tuple || a isa Vector{Any}
+            foreach(release,a)
+        end
+    end
     GC.@preserve E begin
-        for a in (E.ids,E.output,E.control,E.ticks,E.embedding); AMDGPU.unsafe_free!(a); end
+        for f in fieldnames(Engine); release(getfield(E,f)); end
+        E.kernel===nothing || finalize(E.kernel.fun.mod)
         AMDGPU.HIP.hipStreamSynchronize(AMDGPU.stream())
+        AMDGPU.reclaim()
     end
 end
 
@@ -1536,7 +1606,8 @@ function main(args)
     "--compile" in flags && return
     text="--raw" in flags ? prompt : chat_prompt(prompt)*("--think" in flags ? "" : "\n</think>\n\n")
     encode(E.tk,text); piece(E.tk,Int32(0)) # compile tokenizer/decoder before accepting a request
-    request!(E,Int32[0],1); reset!(E); phase("warmed engine")
+    get(ENV,"QWEN36_OUTPUT","")=="" || write(ENV["QWEN36_OUTPUT"],UInt8[])
+    request!(E,encode(E.tk,text),1); reset!(E); phase("warmed engine")
     rate=Ref{Cint}()
     AMDGPU.HIP.hipDeviceGetAttribute(rate,AMDGPU.HIP.hipDeviceAttributeWallClockRate,AMDGPU.HIP.device_id(AMDGPU.device()))
     frequency=Float64(rate[])*1000; frequency>0 || error("no GPU steady clock frequency")
@@ -1556,7 +1627,7 @@ function main(args)
     ccall((:roctxProfilerPause,"/opt/rocm/lib/librocprofiler-sdk-roctx.so"),Cint,(Cint,),0)
     pre=Float64(ticks[2]-ticks[1])/frequency
     dec=max(Float64(ticks[3]-ticks[2])/frequency,eps(Float64)); steps=max(ctl[2]-1,0)
-    m=Dict("prefill_tps"=>length(ids)/pre,"decode_tps"=>steps/dec,"prompt_tokens"=>length(ids),"output_tokens"=>length(out))
+    m=Dict{String,Any}("prefill_tps"=>length(ids)/pre,"decode_tps"=>steps/dec,"prompt_tokens"=>length(ids),"output_tokens"=>length(out))
     dest=get(ENV,"QWEN36_METRICS",""); isempty(dest) || open(io->TOML.print(io,m),dest,"w")
     close_host!(E); profile_finish(); merge!(m,accounting(PROFILE_DIR[]))
     open(io->TOML.print(io,m),joinpath(PROFILE_DIR[],"accounting.toml"),"w")
