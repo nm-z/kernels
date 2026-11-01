@@ -736,6 +736,7 @@ function xw_ph!(A::KA, l::Int32, j::Int32, slot::Int32, seq::Int32, P::Int32)
         p = i ÷ Int32(NE); k = i - p * Int32(NE)
         st!(hb, psum(A, Int64(0), ns, rows, P, p, k), Int64(p) * NE + k); did = true; i += nthr(A)
     end
+    fence_rel_sys()                                        # the share reaches host memory before the counter
     done!(A, seq, t0, did)
 end
 # this die's share of the embedding: its vocabulary rows of tok[p] (repacked Q5_K), zeros for the others
@@ -762,6 +763,7 @@ function xe_ph!(A::KA, slot::Int32, seq::Int32, P::Int32)
         end
         st!(hb, v, Int64(p) * NE + k); did = true; i += nthr(A)
     end
+    fence_rel_sys()
     done!(A, seq, t0, did)
 end
 # raise this die's exchange counter and wait for the other dies' (workgroup 0; the rest wait at the next barrier)
@@ -831,7 +833,7 @@ function conv_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
     done!(A, seq, t0, did)
 end
 # the gated delta rule, one workgroup a local value head (thread t: row t ÷ 2, columns 64 (t mod 2) ..); output
-# rmsnorm(S q / sqrt(128)) ssm_norm silu(z) into xt (the out-projection's x) with its 32-sums
+# rmsnorm(S q / sqrt(128)) ssm_norm silu(z) into xt (the out-projection's x) with its 16- and 32-sums
 function rec_ph!(A::KA, l::Int32, seq::Int32, ::Val{P}) where {P}
     qs = @ROCStaticLocalArray(Float32, DK, false); ks = @ROCStaticLocalArray(Float32, DK, false)
     ob = @ROCStaticLocalArray(Float32, DK, false); red = @ROCStaticLocalArray(Float32, RED, false)
@@ -871,9 +873,9 @@ function rec_ph!(A::KA, l::Int32, seq::Int32, ::Val{P}) where {P}
         end
         sync_workgroup()
         if t < Int32(4)
-            g = 0.0f0
-            for e2 in Int32(0):Int32(31); g += ld(ob, Int32(32) * t + e2); end
-            st!(A.x32, g, Int64(4lv + t) * P + p)
+            a2 = 0.0f0; b2 = 0.0f0
+            for e2 in Int32(0):Int32(15); a2 += ld(ob, Int32(32) * t + e2); b2 += ld(ob, Int32(32) * t + Int32(16) + e2); end
+            st!(A.x32, a2 + b2, Int64(4lv + t) * P + p); st!(A.x16, a2, Int64(8lv + 2t) * P + p); st!(A.x16, b2, Int64(8lv + 2t + 1) * P + p)
         end
         sync_workgroup()
     end
@@ -945,7 +947,7 @@ function attn_ph!(A::KA, l::Int32, pos0::Int32, seq::Int32, P::Int32)
     end
     done!(A, seq, t0, did)
 end
-# combine the key chunks, times sigmoid(gate): into xt (the out-projection's x) with its 32-sums
+# combine the key chunks, times sigmoid(gate): into xt (the out-projection's x) with its 16- and 32-sums
 function acomb_ph!(A::KA, pos0::Int32, seq::Int32, P::Int32)
     ob = @ROCStaticLocalArray(Float32, HD, false)
     t0 = memtime(); did = false; t = tid(); nch = cld(pos0 + P, Int32(CH)); it = wgid()
@@ -964,27 +966,28 @@ function acomb_ph!(A::KA, pos0::Int32, seq::Int32, P::Int32)
         st!(A.xt, v, Int64(k) * P + p); st!(ob, v, t)
         sync_workgroup()
         if t < Int32(8)
-            s = 0.0f0
-            for e in Int32(0):Int32(31); s += ld(ob, Int32(32) * t + e); end
-            st!(A.x32, s, Int64(8hx + t) * P + p)
+            a2 = 0.0f0; b2 = 0.0f0
+            for e in Int32(0):Int32(15); a2 += ld(ob, Int32(32) * t + e); b2 += ld(ob, Int32(32) * t + Int32(16) + e); end
+            st!(A.x32, a2 + b2, Int64(8hx + t) * P + p); st!(A.x16, a2, Int64(16hx + 2t) * P + p); st!(A.x16, b2, Int64(16hx + 2t + 1) * P + p)
         end
         sync_workgroup()
         did = true; it += A.nwg
     end
     done!(A, seq, t0, did)
 end
-# FFN: silu(gate) up into xt (the down-projection's x) with its 16-sums
+# FFN: silu(gate) up into xt (the down-projection's x) with its 16- and 32-sums (Q6_K or Q5_K)
 function act_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
     t0 = memtime(); did = false; i = gtid()
     _, rg, nbg, _, _ = mat(A, l, Int32(5)); ns = nsl(nbg); ou = pof(A, l, JFF, 2, P)
-    while i < Int32(4352 ÷ 16) * P
-        g = i ÷ P; p = i - g * P; s = 0.0f0
-        for e in Int32(0):Int32(15)
-            k = Int32(16) * g + e
+    while i < Int32(4352 ÷ 32) * P
+        g = i ÷ P; p = i - g * P; a = 0.0f0; b = 0.0f0
+        for e in Int32(0):Int32(31)
+            k = Int32(32) * g + e
             v = silu(psum(A, Int64(0), ns, rg, P, p, k)) * psum(A, ou, ns, rg, P, p, k)
-            st!(A.xt, v, Int64(k) * P + p); s += v
+            st!(A.xt, v, Int64(k) * P + p); e < Int32(16) ? (a += v) : (b += v)
         end
-        st!(A.x16, s, Int64(g) * P + p); did = true; i += nthr(A)
+        st!(A.x16, a, Int64(2g) * P + p); st!(A.x16, b, Int64(2g + 1) * P + p); st!(A.x32, a + b, Int64(g) * P + p)
+        did = true; i += nthr(A)
     end
     done!(A, seq, t0, did)
 end
@@ -1051,7 +1054,8 @@ function fwd!(A::KA, pos0::Int32, seq::Int32, xs::Int32, head::Bool, frominp::Bo
     xe_ph!(A, xs & Int32(1), seq, Pi); seq += Int32(1); gbar!(A)
     xsig!(A, xs); gbar!(A)
     xr_ph!(A, xs & Int32(1), true, seq, Pi); seq += Int32(1); xs += Int32(1); gbar!(A)
-    for l in Int32(0):Int32(NL - 1)
+    nlr = Int32(ldacq(A.bar + 12)); nl = nlr == Int32(0) ? Int32(NL) : nlr   # bar[3]: layers to run (0: all), for debugging
+    for l in Int32(0):nl-Int32(1)
         norm_ph!(A, fvec(A, l, 0), seq, Pi); seq += Int32(1); gbar!(A)
         if isrec(l)
             gemv_ph!(A, l, JQKV, seq, Val(P)); seq += Int32(1); gbar!(A)
@@ -1319,7 +1323,7 @@ end
 function PEngine(E::Engine; maxctx = 4096, maxgen = 4096)
     K = [KDie(D, maxctx) for D in E.dies]; hx = HostX(maxgen)
     AMDGPU.device!(E.dies[1].dev)
-    k = @roc launch = false maxthreads = 256 k_req!(kargs(E, K, hx, 1, nothing, AMDGPU.zeros(UInt64, 4), AMDGPU.zeros(Int32, 1), 0, 0, 0, 1, 0))
+    k = @roc launch = false maxthreads = 256 k_req!(kargs(E, K, hx, 1, nothing, AMDGPU.zeros(UInt64, 4), AMDGPU.zeros(Int32, 1), 0, 0, 0, 1, nothing))
     nb = Ref{Cint}(0); AMDGPU.HIP.hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(nb, k.fun, 256, 0)
     nwg = Int(nb[]) * 56
     0 < nwg <= NWG || error("persistent kernel: $(nb[]) workgroups a CU")
@@ -1344,7 +1348,7 @@ function request!(PE::PEngine, st::Vector{DState}, inp::Vector{Int}, ngen::Int, 
     for d in 1:ND
         AMDGPU.device!(E.dies[d].dev)
         a = AMDGPU.zeros(UInt64, 3 + 2nphase); ah = zeros(UInt64, 3 + 2nphase); ah[1] = typemax(UInt64); ah[4:2:end] .= typemax(UInt64); copyto!(a, ah); push!(accts, a)
-        fill!(PE.K[d].bar, UInt32(0))
+        copyto!(PE.K[d].bar, UInt32[0, 0, 0, NLRUN[]])
         ib = ROCArray(Int32.(inp)); AMDGPU.synchronize()
         A = kargs(E, PE.K, PE.hx, d, st[d], a, ib, length(inp), ngen, mode, PE.nwg, lgs === nothing ? nothing : lgs[d])
         @roc groupsize = 256 gridsize = PE.nwg maxthreads = 256 k_req!(A)
@@ -1365,6 +1369,9 @@ function request!(PE::PEngine, st::Vector{DState}, inp::Vector{Int}, ngen::Int, 
     any(!=(0), ab) && error("persistent kernel aborted (a wait passed 10 s): $ab")
     toks = [Int(unsafe_load(Ptr{Int32}(PE.hx.p + HXTOK), i)) for i in 1:ngen]
     toks, res, tpre, tdec
+end
+if !isdefined(Main, :NLRUN)
+    const NLRUN = Ref(0)                                   # layers the persistent kernel runs (0: all), for debugging
 end
 idlepct(res) = 100sum(r[2] for r in res) / sum(r[3] for r in res)
 
