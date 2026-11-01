@@ -1346,7 +1346,7 @@ end
 function PEngine(E::Engine; maxctx = 4096, maxgen = 4096)
     K = [KDie(D, maxctx) for D in E.dies]; hx = HostX(maxgen)
     AMDGPU.device!(E.dies[1].dev)
-    k = @roc launch = false maxthreads = 256 k_req!(kargs(E, K, hx, 1, nothing, AMDGPU.zeros(UInt64, 4), AMDGPU.zeros(Int32, 1), 0, 0, 0, 1, nothing))
+    k = @roc launch = false maxthreads = 256 waves_per_eu = KWPE[] k_req!(kargs(E, K, hx, 1, nothing, AMDGPU.zeros(UInt64, 4), AMDGPU.zeros(Int32, 1), 0, 0, 0, 1, nothing))
     nb = Ref{Cint}(0); AMDGPU.HIP.hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(nb, k.fun, 256, 0)
     nwg = Int(nb[]) * 56
     0 < nwg <= NWG || error("persistent kernel: $(nb[]) workgroups a CU")
@@ -1374,7 +1374,7 @@ function request!(PE::PEngine, st::Vector{DState}, inp::Vector{Int}, ngen::Int, 
         copyto!(PE.K[d].bar, UInt32[0, 0, 0, NLRUN[]])
         ib = ROCArray(Int32.(inp)); AMDGPU.synchronize()
         A = kargs(E, PE.K, PE.hx, d, st[d], a, ib, length(inp), ngen, mode, PE.nwg, lgs === nothing ? nothing : lgs[d])
-        @roc groupsize = 256 gridsize = PE.nwg maxthreads = 256 k_req!(A)
+        @roc groupsize = 256 gridsize = PE.nwg maxthreads = 256 waves_per_eu = KWPE[] k_req!(A)
     end
     res = NTuple{3,Float64}[]; tpre = 0.0; tdec = 0.0
     for d in 1:ND
@@ -1393,6 +1393,9 @@ function request!(PE::PEngine, st::Vector{DState}, inp::Vector{Int}, ngen::Int, 
     any(!=(0), ab) && error("persistent kernel aborted (a wait passed 10 s): $ab")
     toks = [Int(unsafe_load(Ptr{Int32}(PE.hx.p + HXTOK), i)) for i in 1:ngen]
     toks, res, tpre, tdec
+end
+if !isdefined(Main, :KWPE)
+    const KWPE = Ref(2)                                    # waves a SIMD the persistent kernel is compiled for (2: 38.8 vs 31.6 tok/s decode at 1)
 end
 if !isdefined(Main, :NLRUN)
     const NLRUN = Ref(0)                                   # layers the persistent kernel runs (0: all), for debugging
