@@ -30,40 +30,63 @@ struct ProfileConfig
     data::Ptr{Cvoid}
 end
 const PROFILE_ID=Ref(ProfileClientID(24,C_NULL,0))
+const PROFILE_CONFIG=Ref(ProfileConfig(32,C_NULL,C_NULL,C_NULL))
 const PROFILE_TOOL_CONFIG=Ref{Ptr{Cvoid}}(C_NULL)
 const PROFILE_TOOL_INIT=Ref{Ptr{Cvoid}}(C_NULL)
+const PROFILE_WRAPPER_INIT=Ref{Ptr{Cvoid}}(C_NULL)
 const PROFILE_FINISH=Ref{Ptr{Cvoid}}(C_NULL)
 const PROFILE_HANDLES=Ptr{Cvoid}[]
 const PROFILE_DIR=Ref("")
+const PROFILE_SIGNALS=Tuple{Int,Vector{UInt8}}[]
+function restore_profile_signals()
+    for (sig,act) in PROFILE_SIGNALS
+        ccall(:sigaction,Cint,(Cint,Ptr{Cvoid},Ptr{Cvoid}),sig,act,C_NULL)
+    end
+end
 function profile_initialize(finalizer::Ptr{Cvoid},data::Ptr{Cvoid})::Cint
     PROFILE_FINISH[]=finalizer
     ccall(PROFILE_TOOL_INIT[],Cint,(Ptr{Cvoid},Ptr{Cvoid}),finalizer,data)
 end
+function profile_configure(version::UInt32,runtime::Ptr{UInt8},priority::UInt32,id::Ptr{ProfileClientID})::Ptr{ProfileConfig}
+    p=ccall(PROFILE_TOOL_CONFIG[],Ptr{ProfileConfig},(UInt32,Ptr{UInt8},UInt32,Ptr{ProfileClientID}),version,runtime,priority,id)
+    restore_profile_signals()
+    cfg=unsafe_load(p); PROFILE_ID[]=unsafe_load(id); PROFILE_TOOL_INIT[]=cfg.initialize
+    PROFILE_CONFIG[]=ProfileConfig(cfg.size,PROFILE_WRAPPER_INIT[],cfg.finalize,cfg.data)
+    # SDK also discovers the tool's exported configure function. Keep that entry
+    # passive; only this wrapped client creates contexts. Its presence makes SDK
+    # return a client finalizer, preserving SDK runtime state until HIP shuts down.
+    unsafe_store!(p,ProfileConfig(cfg.size,C_NULL,C_NULL,cfg.data))
+    Base.unsafe_convert(Ptr{ProfileConfig},PROFILE_CONFIG)
+end
 function profile_start()
     dir=mktempdir(;prefix="qwen36-profile-",cleanup=false); PROFILE_DIR[]=dir
+    # Julia uses SIGSEGV for GC safepoints. The tool's glog failure handler must
+    # not replace Julia's handler when a profiler is loaded into a running Julia.
+    empty!(PROFILE_SIGNALS)
+    for sig in (2,4,6,7,8,10,11,12,15)
+        act=zeros(UInt8,256); ccall(:sigaction,Cint,(Cint,Ptr{Cvoid},Ptr{Cvoid}),sig,C_NULL,act)
+        push!(PROFILE_SIGNALS,(sig,act))
+    end
+    PROFILE_WRAPPER_INIT[]=@cfunction(profile_initialize,Cint,(Ptr{Cvoid},Ptr{Cvoid}))
+    configure=@cfunction(profile_configure,Ptr{ProfileConfig},(UInt32,Ptr{UInt8},UInt32,Ptr{ProfileClientID}))
     for (k,v) in ("ROCPROF_OUTPUT_PATH"=>dir,"ROCPROF_OUTPUT_FILE_NAME"=>"qwen36","ROCPROF_OUTPUT_FORMAT"=>"csv",
                   "ROCPROF_KERNEL_TRACE"=>"1","ROCPROF_MEMORY_COPY_TRACE"=>"1","ROCPROF_MARKER_API_TRACE"=>"1",
                   "ROCPROF_COUNTER_COLLECTION"=>"1","ROCPROF_COUNTERS"=>"pmc: GPUBusy GRBM_COUNT GRBM_GUI_ACTIVE",
                   "ROCPROF_SELECTED_REGIONS"=>"1","GLOG_minloglevel"=>"3",
+                  "ROCPROF_SIGNAL_HANDLERS"=>"0",
                   "ROCPROF_KERNEL_FILTER_INCLUDE_REGEX"=>".*k_request.*","ROCPROF_LOG_LEVEL"=>"error",
                   "ROCPROFILER_LOG_LEVEL"=>"error","ROCTX_LOG_LEVEL"=>"error")
         ENV[k]=v
     end
     tool=Libdl.dlopen("/opt/rocm/lib/rocprofiler-sdk/librocprofiler-sdk-tool.so",Libdl.RTLD_LAZY|Libdl.RTLD_LOCAL)
     push!(PROFILE_HANDLES,tool); PROFILE_TOOL_CONFIG[]=Libdl.dlsym(tool,:rocprofiler_configure)
-    # Use the tool's own configure pointer so SDK's ELF discovery deduplicates it.
-    # Its static result can retain our initialize wrapper across configuration.
-    p=ccall(PROFILE_TOOL_CONFIG[],Ptr{ProfileConfig},(UInt32,Cstring,UInt32,Ref{ProfileClientID}),10100,"qwen36",0,PROFILE_ID)
-    cfg=unsafe_load(p); PROFILE_TOOL_INIT[]=cfg.initialize
-    unsafe_store!(p,ProfileConfig(cfg.size,@cfunction(profile_initialize,Cint,(Ptr{Cvoid},Ptr{Cvoid})),cfg.finalize,cfg.data))
-    status=ccall((:rocprofiler_force_configure,"/opt/rocm/lib/librocprofiler-sdk.so"),Cint,(Ptr{Cvoid},),PROFILE_TOOL_CONFIG[])
+    status=ccall((:rocprofiler_force_configure,"/opt/rocm/lib/librocprofiler-sdk.so"),Cint,(Ptr{Cvoid},),configure)
+    restore_profile_signals()
     status==0 || error("profiler configuration failed: $status")
     dir
 end
 function profile_finish()
     f=PROFILE_FINISH[]; f==C_NULL && error("profiler did not initialize")
-    # SDK 1.1 returns the process finalizer when exactly one client is registered;
-    # that callback ignores its client-ID argument (registration.cpp).
     ccall(f,Cvoid,(ProfileClientID,),PROFILE_ID[]); PROFILE_FINISH[]=C_NULL
 end
 if abspath(PROGRAM_FILE)==@__FILE__() && !any(a->a in ("--help","--compile","--download","--prepare"),ARGS)
@@ -72,7 +95,8 @@ end
 using AMDGPU
 const SOURCE_DIGEST=let source=read(@__FILE__,String)
     clip(a,b)=source[first(findfirst(a,source)):first(findfirst(b,source))-1]
-    bytes2hex(sha256(clip(r"(?m)^# Device primitives",r"(?m)^# Tokenizer follows")*
+    bytes2hex(sha256(clip(r"(?m)^# Device primitives",r"(?m)^struct DMat")*
+                    clip(r"(?m)^function k_norm!",r"(?m)^# Tokenizer follows")*
                     clip(r"(?m)^struct PMat",r"(?m)^mutable struct Engine")*
                     clip(r"(?m)^function request_kernel",r"(?m)^function request!")*
                     match(r"(?m)^bf32\(.*$",source).match))
@@ -1259,6 +1283,7 @@ mutable struct Engine
     part::ROCArray{Float32,1}
     ix::ROCArray{Int32,1}
     expertids::ROCArray{Int32,1}
+    hostio::NamedTuple
     ctx::Int
     groups::Int
     mode::Int
@@ -1340,9 +1365,11 @@ function Engine(g,ctx;compileonly=false,mode=0,draftpath=joinpath(dirname(DEFAUL
           topv=z(8groups*16),topi=AMDGPU.zeros(Int32,8groups*16))
     phase("loaded engine")
     free_upload!()
+    hostio=(ids=zeros(Int32,ctx),output=zeros(Int32,ctx),control=zeros(Int32,4),ticks=zeros(UInt64,3))
+    mapped(a)=GC.@preserve a unsafe_wrap(ROCArray,pointer(a),(length(a),))
     Engine(g,tk,c,keep,states,ROCArray(bs),head,norm,emb,b,spec,
-           AMDGPU.zeros(Int32,ctx),AMDGPU.zeros(Int32,ctx),AMDGPU.zeros(Int32,4),AMDGPU.zeros(UInt64,3),
-           z(8groups),AMDGPU.zeros(Int32,8groups),AMDGPU.zeros(Int32,64),ctx,groups,mode,nothing)
+           mapped(hostio.ids),mapped(hostio.output),mapped(hostio.control),mapped(hostio.ticks),
+           z(8groups),AMDGPU.zeros(Int32,8groups),AMDGPU.zeros(Int32,64),hostio,ctx,groups,mode,nothing)
 end
 function reset!(E)
     for a in E.states; fill!(a,zero(eltype(a))); end
@@ -1381,9 +1408,15 @@ function request_kernel(E,np,nt;compile=false)
 end
 function request!(E,ids,nt)
     length(ids)+nt<=E.ctx || error("context too small")
-    copyto!(E.ids,1,ids,1,length(ids)); request_kernel(E,length(ids),nt); AMDGPU.synchronize()
-    ctl=Array(E.control); out=Array(E.output)[1:ctl[2]]; ticks=Array(E.ticks)
+    copyto!(E.hostio.ids,1,ids,1,length(ids)); request_kernel(E,length(ids),nt); AMDGPU.synchronize()
+    ctl=copy(E.hostio.control); out=E.hostio.output[1:ctl[2]]; ticks=copy(E.hostio.ticks)
     out,ticks,ctl
+end
+function close_host!(E)
+    GC.@preserve E begin
+        for a in (E.ids,E.output,E.control,E.ticks,E.embedding); AMDGPU.unsafe_free!(a); end
+        AMDGPU.HIP.hipStreamSynchronize(AMDGPU.stream())
+    end
 end
 
 function download_model(path)
@@ -1525,7 +1558,7 @@ function main(args)
     dec=max(Float64(ticks[3]-ticks[2])/frequency,eps(Float64)); steps=max(ctl[2]-1,0)
     m=Dict("prefill_tps"=>length(ids)/pre,"decode_tps"=>steps/dec,"prompt_tokens"=>length(ids),"output_tokens"=>length(out))
     dest=get(ENV,"QWEN36_METRICS",""); isempty(dest) || open(io->TOML.print(io,m),dest,"w")
-    profile_finish(); merge!(m,accounting(PROFILE_DIR[]))
+    close_host!(E); profile_finish(); merge!(m,accounting(PROFILE_DIR[]))
     open(io->TOML.print(io,m),joinpath(PROFILE_DIR[],"accounting.toml"),"w")
     dest=get(ENV,"QWEN36_ACCOUNTING",""); isempty(dest) || open(io->TOML.print(io,m),dest,"w")
     @printf("prefill tps: %.2f\ndecode tps: %.2f\nidle time %%: %.4f\n",m["prefill_tps"],m["decode_tps"],m["idle_percent"])
