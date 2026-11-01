@@ -272,7 +272,7 @@ end
 # embedding and the argmax go through an exchange: each die writes its share into page-locked host memory that
 # every die maps, raises its counter, waits for the other three, and reads theirs.
 # Time accounting: for each phase, the first start and the last end over the workgroups that worked in it
-# (memrealtime, a 100 MHz clock) go into acct; their union is instruction time, the rest of the die's request time
+# (memrealtime: 27 MHz here, its rate measured at startup) go into acct; their union is instruction time, the rest of the die's request time
 # is idle (the exchanges compute while they move data, so their time is instruction time).
 # ---------------------------------------------------------------------------------------------
 const LP{T} = Core.LLVMPtr{T,1}
@@ -1222,7 +1222,10 @@ end
 function clockhz(D::Die)
     AMDGPU.device!(D.dev); o = AMDGPU.zeros(UInt64, 1)
     @roc k_spin!(o, UInt64(1000)); AMDGPU.synchronize()
-    t(n) = (t0 = time_ns(); @roc(k_spin!(o, UInt64(n))); AMDGPU.synchronize(); (time_ns() - t0) / 1e9, Array(o)[1])
+    function t(n)
+        t0 = time_ns(); @roc k_spin!(o, UInt64(n)); AMDGPU.synchronize()
+        (time_ns() - t0) / 1e9, Array(o)[1]
+    end
     t1, n1 = t(2_000_000); t2, n2 = t(20_000_000)
     (n2 - n1) / (t2 - t1)
 end

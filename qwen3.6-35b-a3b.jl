@@ -229,7 +229,7 @@ end
       ret ptr addrspace(3) %p
     }
     ""","entry"),Core.LLVMPtr{UInt32,3},Tuple{})
-    AMDGPU.ROCDeviceArray{T,1,3}((Int(n),),reinterpret(Core.LLVMPtr{T,3},p)+offset)
+    AMDGPU.ROCDeviceArray{T,1,3}((Int(n),),reinterpret(Core.LLVMPtr{T,3},p)+offset*sizeof(T))
 end
 @inline silu(x) = x * sigm(x)
 @inline softplus(x) = max(x, 0.0f0) + log1p(exp(-abs(x)))
@@ -936,53 +936,10 @@ rocdesc(a)=a
 @inline av(::Type{T},p::UInt64,n::Integer) where T =
     AMDGPU.ROCDeviceArray{T,1,1}((Int(n),),Core.LLVMPtr{T,1}(p))
 @inline fv(p::UInt64,n::Integer=16384)=av(Float32,p,n)
-# A resident cooperative grid uses one block per WGP. Launch checks occupancy
-# before submitting it. The device-owned generation counter avoids HIP's separate
-# cooperative queue, which fails at shutdown with ROCm 7.2's counter interceptor.
+# HIP reserves the complete grid before any block enters a grid barrier.
+# Occupancy alone cannot guarantee residency for an ordinary dispatch.
 @inline function p_sync()
-    Base.llvmcall(("""
-    @qwen36_grid_barrier = linkonce_odr addrspace(1) global i32 0, align 4
-    declare void @llvm.amdgcn.s.barrier()
-    declare i32 @llvm.amdgcn.workitem.id.x()
-    declare i64 @__ockl_get_num_groups(i32)
-    define void @entry() alwaysinline convergent {
-    start:
-      fence syncscope("workgroup") release
-      call void @llvm.amdgcn.s.barrier()
-      %tid = call i32 @llvm.amdgcn.workitem.id.x()
-      %leader = icmp eq i32 %tid, 0
-      br i1 %leader, label %arrive, label %finish
-    arrive:
-      fence syncscope("workgroup") acquire
-      fence syncscope("agent") release
-      %counter = getelementptr i8, ptr addrspace(1) @qwen36_grid_barrier, i64 0
-      %ng = call i64 @__ockl_get_num_groups(i32 0)
-      %groups = trunc i64 %ng to i32
-      %old = atomicrmw add ptr addrspace(1) %counter, i32 1 syncscope("agent-one-as") monotonic, align 4
-      %arrivals = and i32 %old, 65535
-      %lastindex = add i32 %groups, -1
-      %last = icmp eq i32 %arrivals, %lastindex
-      br i1 %last, label %advance, label %poll
-    advance:
-      %step = sub i32 65536, %groups
-      %unused = atomicrmw add ptr addrspace(1) %counter, i32 %step syncscope("agent-one-as") monotonic, align 4
-      br label %poll
-    poll:
-      %current = load atomic i32, ptr addrspace(1) %counter syncscope("agent-one-as") monotonic, align 4
-      %generation = and i32 %current, -65536
-      %previous = and i32 %old, -65536
-      %waiting = icmp eq i32 %generation, %previous
-      br i1 %waiting, label %poll, label %release
-    release:
-      fence syncscope("agent") acquire
-      fence syncscope("workgroup") release
-      br label %finish
-    finish:
-      call void @llvm.amdgcn.s.barrier()
-      fence syncscope("workgroup") acquire
-      ret void
-    }
-    ""","entry"),Nothing,Tuple{})
+    AMDGPU.Device.sync_grid()
     return
 end
 # All activation arrays have eight position slots. Val(P) changes the number of
@@ -1529,7 +1486,7 @@ function Engine(g,ctx;compileonly=false,mode=0,draftpath=joinpath(dirname(DEFAUL
     head=mat(g,"output.weight"); norm=retain(ROCArray(tensor_f32(g,"output_norm.weight")))
     et=g.tensors["token_embd.weight"]
     emb=retain(compileonly ? AMDGPU.zeros(UInt16,1) : GC.@preserve g unsafe_wrap(ROCArray,Ptr{UInt16}(pointer(g.map)+et.off),(prod(et.dims),)))
-    vocab=length(tk.text); groups=8Int(AMDGPU.HIP.properties(AMDGPU.device()).multiProcessorCount)
+    vocab=length(tk.text); groups=Int(AMDGPU.HIP.properties(AMDGPU.device()).multiProcessorCount)
     b=buffers(vocab,ctx); dummy=PMat(0,0,0,0); eh=dummy; fc=dummy; selector=dummy; pred=dummy; succ=dummy
     mn=(UInt64(0),UInt64(0),UInt64(0)); dn=(UInt64(0),UInt64(0)); mbs=PBlock[]; dbs=DPBlock[]
     mb=mode==1 ? buffers(vocab,ctx) : b; db=mode==2 ? buffers(vocab,ctx;draft=true) : b
@@ -1608,7 +1565,7 @@ function request_kernel(E,np,nt;compile=false)
         AMDGPU.HIP.hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(resident,E.kernel.fun,256,0)
         resident[]>=1 || error("the cooperative grid cannot be resident")
         E.groups=min(E.groups,Int(AMDGPU.HIP.properties(AMDGPU.device()).multiProcessorCount)*Int(resident[]))
-        E.kernel(args...;groupsize=256,gridsize=E.groups)
+        E.kernel(args...;groupsize=256,gridsize=E.groups,cooperative=true)
     end
     E.kernel
 end
@@ -1795,4 +1752,12 @@ function main(args)
 end
 if abspath(PROGRAM_FILE)==@__FILE__()
     main(ARGS)
+    if !isempty(PROFILE_DIR[])
+        # Buffers, trace files, mapped memory and the power setting are already
+        # closed above. ROCm 7.2's dispatch-counter interceptor leaves HIP's
+        # cooperative-queue destructor with a stale HSA allocation. End this
+        # standalone process after explicit cleanup, before C++ exit handlers.
+        flush(stdout); flush(stderr)
+        ccall(:_exit,Cvoid,(Cint,),0)
+    end
 end
