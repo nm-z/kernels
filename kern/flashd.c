@@ -440,6 +440,31 @@ static void chat(int fd, const char *body, size_t bn, double request_start_ms) {
 	if (!req || req->k != J_DICT) { error(fd, 400, "the body is not a JSON object"); arena_free(a); return; }
 	jv *msgs = jv_getz(req, "messages");
 	if (!msgs || msgs->k != J_LIST || !msgs->l.n) { error(fd, 400, "messages must be a non-empty list"); arena_free(a); return; }
+	/* The GGUF chat template takes one system message, first; Codex sends several (its developer instructions later in the
+	   conversation). Every system and developer message is folded, in order, into one leading system message. */
+	{
+		sbuf sys = {0}; int nsys = 0; jv *rest = jv_new(a, J_LIST);
+		for (int i = 0; i < msgs->l.n; i++) {
+			jv *m = msgs->l.a[i], *r = jv_getz(m, "role");
+			int issys = r && r->k == J_STR && ((r->s.n == 6 && !memcmp(r->s.s, "system", 6)) || (r->s.n == 9 && !memcmp(r->s.s, "developer", 9)));
+			if (!issys) { jv_push(a, rest, m); continue; }
+			jv *c = jv_getz(m, "content"); nsys++;
+			if (c && c->k == J_STR && c->s.n) { if (sys.n) sb_puts(&sys, "\n\n"); sb_put(&sys, c->s.s, c->s.n); }
+			else if (c && c->k == J_LIST)
+				for (int j = 0; j < c->l.n; j++) {
+					jv *t = jv_getz(c->l.a[j], "text");
+					if (t && t->k == J_STR && t->s.n) { if (sys.n) sb_puts(&sys, "\n\n"); sb_put(&sys, t->s.s, t->s.n); }
+				}
+		}
+		if (nsys) {
+			jv *l2 = jv_new(a, J_LIST), *sm = jv_new(a, J_DICT);
+			jv_set(a, sm, "role", 4, jv_str(a, "system", 6)); jv_set(a, sm, "content", 7, jv_str(a, sys.s ? sys.s : "", sys.n));
+			jv_push(a, l2, sm);
+			for (int i = 0; i < rest->l.n; i++) jv_push(a, l2, rest->l.a[i]);
+			msgs = l2;
+		}
+		sb_free(&sys);
+	}
 	/* The sampler has no penalties: the thinking-mode settings presence_penalty 0.0 and repetition_penalty 1.0 are what it does, so
 	   those values are accepted and any other is refused rather than silently ignored. */
 	{
@@ -474,6 +499,18 @@ static void chat(int fd, const char *body, size_t bn, double request_start_ms) {
 	}
 	unsigned img_tokens = 0; for (int i = 0; i < nim; i++) img_tokens += imgs[i].ntok;
 	if (img_tokens > IMG_ROWS) { char m[160]; snprintf(m, sizeof m, "the images take %u tokens; one response holds %u", img_tokens, IMG_ROWS); error(fd, 400, m); arena_free(a); return; }
+	/* OpenAI clients send a tool call's arguments as a JSON string; the template iterates them as a mapping */
+	for (int i = 0; i < msgs->l.n; i++) {
+		jv *tcs = jv_getz(msgs->l.a[i], "tool_calls");
+		if (!tcs || tcs->k != J_LIST) continue;
+		for (int j = 0; j < tcs->l.n; j++) {
+			jv *f = jv_getz(tcs->l.a[j], "function"); if (!f || f->k != J_DICT) f = tcs->l.a[j];
+			jv *ar = jv_getz(f, "arguments"); const char *e2 = NULL;
+			if (!ar || ar->k != J_STR) continue;
+			jv *d = ar->s.n ? json_parse(a, ar->s.s, ar->s.n, &e2) : jv_new(a, J_DICT);
+			if (d && d->k == J_DICT) jv_set(a, f, "arguments", 9, d);
+		}
+	}
 	jv *vars = jv_new(a, J_DICT);
 	jv_set(a, vars, "messages", 8, msgs);
 	jv_set(a, vars, "add_generation_prompt", 21, jv_bool(a, 1));
