@@ -258,6 +258,8 @@ end
     attributes #0 = { alwaysinline }
     """, "mt"), UInt64, Tuple{})
 @inline dcinv() = ccall("llvm.amdgcn.s.dcache.inv", llvmcall, Cvoid, ())
+# (the clock is a message to the SPI, shared by a whole shader engine's waves: only the lane that writes the accounting reads it)
+@inline wtime() = (AMDGPU.Device.readfirstlane((KI.get_local_id(Int32).x - Int32(1)) >> Int32(5)) == Int32(0) ? memtime() : UInt64(0))   # (uniform: a wavefront's branch)
 const SLP = 2                                              # s_sleep units (64 clocks) between a waiter's polls
 @inline ssleep() = ccall("llvm.amdgcn.s.sleep", llvmcall, Cvoid, (Int32,), Int32(SLP))
 @inline atadd(p::LP{UInt32}, v::UInt32) = Base.llvmcall("%r = atomicrmw add ptr addrspace(1) %0, i32 %1 syncscope(\"agent\") acq_rel, align 4\nret i32 %r", UInt32, Tuple{LP{UInt32},UInt32}, p, v)
@@ -327,9 +329,9 @@ const TOUT = Int64(1_000_000_000)                          # 10 s of the 100 MHz
             for f in Int32(0):Int32(15); stmono(A.flg + 4f, UInt32(0)); end
             atadd(A.bar + 4, UInt32(1))
         else
-            t0 = memtime()
-            while ldacq(A.bar + 4) == g
-                (memtime() - t0 > TOUT || aborted(A)) && (atadd(A.bar + 8, UInt32(1)); break)
+            n = Int64(0)                                   # (polls, not the clock; about 10 s at the sleep and a read)
+            while ldmono(A.bar + 4) == g                   # (the fence below does the one invalidate the barrier needs)
+                ((n += Int64(1)) > Int64(30_000_000) || ldmono(A.bar + 8) != UInt32(0)) && (atadd(A.bar + 8, UInt32(1)); break)
                 ssleep()
             end
         end
@@ -412,14 +414,17 @@ end
     lane == Int32(0) && atadd(A.flg + 4sl, UInt32(1))
     return
 end
+# (a plain read: an acquire load invalidates the L0 and L1 caches at every poll, under the other wavefronts. No invalidate after
+# it either: x wasn't read since the barrier before its producer invalidated, so no cache holds an old line of it. A slice is
+# a whole number of cache lines, so reading a ready one brings in none of a slice not ready.)
 @inline function xready!(A::KR, sl::Int32, need::Int32)
-    tw = memtime()
-    while rdf(reinterpret(Int32, ldacq(A.flg + 4sl))) < need
-        memtime() - tw > TOUT && (atadd(A.bar + 8, UInt32(1)); break)
-        aborted(A) && break
+    rdf(reinterpret(Int32, ldmono(A.flg + 4sl))) >= need && return
+    n = Int64(0)                                           # (polls, not the clock: see wtime; about 10 s at the sleep and a read)
+    while rdf(reinterpret(Int32, ldmono(A.flg + 4sl))) < need
+        (n += Int64(1)) > Int64(30_000_000) && (atadd(A.bar + 8, UInt32(1)); break)
+        rdf(reinterpret(Int32, ldmono(A.bar + 8))) != Int32(0) && break
         ssleep()
     end
-    fence_acq(); dcinv()
 end
 @generated function withpart2(A::KR)
     f = [:(A.$(n == :part ? :part2 : n)) for n in fieldnames(KR)]
@@ -429,7 +434,7 @@ end
     end
 end
 @inline function mat_ph!(A::KR, l::Int32, j0::Int32, nm::Int32, seq::Int32, P::Int32, need::Int32)
-    t0 = memtime(); did = false; lane = lanei(); gw = waveid(); NW = nwv(A); xp = fresh(A.xt); dyn = A.dyn != Int32(0); okm = UInt32(0); flow = A.flow != Int32(0)
+    t0 = wtime(); did = false; lane = lanei(); gw = waveid(); NW = nwv(A); xp = fresh(A.xt); dyn = A.dyn != Int32(0); okm = UInt32(0); flow = A.flow != Int32(0)
     g = dyn ? claim(A, lane) : gw
     while true
         ok, W, rows, nc, ns, it, o = matof(A, l, j0, nm, g, P)
@@ -437,7 +442,7 @@ end
         G = it ÷ ns; sl = it - G * ns
         if flow && (okm >> sl) & UInt32(1) == UInt32(0)    # (okm: the slices this wavefront has seen ready)
             xready!(A, sl, need); okm |= UInt32(1) << sl; xp = fresh(A.xt)
-            did || (t0 = memtime())
+            did || (t0 = wtime())
         end
         if P == Int32(1)
             mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(1))
@@ -477,7 +482,7 @@ end
 # the embeddings of the positions (the head's rows) into x, with their sums of squares (bank 1); the positions' rope
 # tables: rc[(p, full or sliding)][angle] (cos, sin), BF16 as the vendor's forward has them
 @inline function emb_ph!(A::KR, seq::Int32, P::Int32)
-    t0 = memtime(); lane = lanei(); gw = waveid(); NW = nwv(A)
+    t0 = wtime(); lane = lanei(); gw = waveid(); NW = nwv(A)
     W, _, nc, _ = mat(A, HEADL, Int32(0)); n = Int32(64) * P
     g = gw
     while g < n
@@ -501,7 +506,7 @@ end
 end
 # x normalized and weighted into xt, positions pf ..; reads bank 1, zeroes bank 0 and the head's argmax
 @inline function pre_ph!(A::KR, w::LP{Float32}, seq::Int32, P::Int32, pf::Int32)
-    t0 = memtime(); lane = lanei(); gw = waveid(); NW = nwv(A); Np = P - pf; n = Int32(64) * Np
+    t0 = wtime(); lane = lanei(); gw = waveid(); NW = nwv(A); Np = P - pf; n = Int32(64) * Np
     g = gw
     while g < n
         q = g >> Int32(6); G = g & Int32(63); k = G * LANES + lane; p = pf + q
@@ -517,7 +522,7 @@ end
 end
 # a mixer's or FFN's output, its slices added, into o, with its sums of squares (bank 0); zeroes bank 1
 @inline function ssq_ph!(A::KR, l::Int32, j::Int32, seq::Int32, P::Int32)
-    t0 = memtime(); lane = lanei(); gw = waveid(); NW = nwv(A); n = Int32(64) * P
+    t0 = wtime(); lane = lanei(); gw = waveid(); NW = nwv(A); n = Int32(64) * P
     _, rows, _, ns = mat(A, l, j)
     g = gw
     while g < n
@@ -532,7 +537,7 @@ end
 end
 # o normalized and weighted, added to x, x's sums of squares (bank 1)
 @inline function norm_ph!(A::KR, w::LP{Float32}, seq::Int32, P::Int32)
-    t0 = memtime(); lane = lanei(); gw = waveid(); NW = nwv(A); n = Int32(64) * P
+    t0 = wtime(); lane = lanei(); gw = waveid(); NW = nwv(A); n = Int32(64) * P
     g = gw
     while g < n
         p = g >> Int32(6); G = g & Int32(63); k = G * LANES + lane; e = Int64(k) * P + p
@@ -546,7 +551,7 @@ end
 end
 # the gated short conv after its in_proj: h = B x, the 7-tap causal depthwise conv over a ring of h, C conv into xt
 @inline function conv_ph!(A::KR, l::Int32, seq::Int32, P::Int32, pre::Bool)
-    t0 = memtime(); lane = lanei(); gw = waveid(); NW = nwv(A); n = Int32(64)
+    t0 = wtime(); lane = lanei(); gw = waveid(); NW = nwv(A); n = Int32(64)
     _, rows, _, ns = mat(A, l, Int32(0)); cw = fvec(A, l, 4); rg = reinterpret(LP{UInt16}, vaddr(A, l, 6))
     g = gw
     while g < n
@@ -575,7 +580,7 @@ end
 end
 # the FFN's activation: silu(w1 x) (w3 x) into xt
 @inline function act_ph!(A::KR, l::Int32, seq::Int32, P::Int32)
-    t0 = memtime(); lane = lanei(); gw = waveid(); NW = nwv(A); n = Int32(NFF ÷ 32) * P
+    t0 = wtime(); lane = lanei(); gw = waveid(); NW = nwv(A); n = Int32(NFF ÷ 32) * P
     _, rows, _, ns = mat(A, l, Int32(5)); ou = Int64(ns) * P * rows
     g = gw
     while g < n
@@ -610,7 +615,7 @@ end
 # (128 lanes, the head's sum of squares and the rotation's other half through shared memory), its waves 4 .. 7 the rows
 # of v and the gate
 @inline function aprep_ph!(A::KR, lds, l::Int32, seq::Int32, P::Int32)
-    t0 = memtime(); t = tid(); w = wgid(); full = isfull(l); tt = full ? Int32(0) : Int32(1)
+    t0 = wtime(); t = tid(); w = wgid(); full = isfull(l); tt = full ? Int32(0) : Int32(1)
     kc = reinterpret(LP{UInt8}, vaddr(A, l, 6)); vc = reinterpret(LP{UInt8}, vaddr(A, l, 7))
     qn = fvec(A, l, 4); kn = fvec(A, l, 5); did = false
     _, rq, _, nsq = mat(A, l, Int32(0)); _, rk, _, _ = mat(A, l, Int32(1)); _, rv, _, _ = mat(A, l, Int32(2)); _, rg, _, _ = mat(A, l, Int32(3))
@@ -675,7 +680,7 @@ end
     (v[1].value, v[2].value, v[3].value, v[4].value)
 end
 @inline function score_ph!(A::KR, l::Int32, seq::Int32, P::Int32, pre::Bool)
-    t0 = memtime(); did = false; lane = lanei(); gw = waveid(); NW = nwv(A); full = isfull(l)
+    t0 = wtime(); did = false; lane = lanei(); gw = waveid(); NW = nwv(A); full = isfull(l)
     kc = reinterpret(LP{UInt8}, vaddr(A, l, 6)); qb = fresh(A.qh); lo = (lane % UInt32) << 4; base = Int32(0)
     amaxb = rdf(ld(A.posa, P - Int32(1)))
     for p in Int32(0):P-Int32(1)
@@ -700,7 +705,7 @@ end
 end
 # each head's total of the scores into et (items 0 .. 4 P - 1), then the mix: Σ score v, slices into pv
 @inline function vmix_ph!(A::KR, l::Int32, seq::Int32, P::Int32, pre::Bool)
-    t0 = memtime(); did = false; lane = lanei(); gw = waveid(); NW = nwv(A); full = isfull(l)
+    t0 = wtime(); did = false; lane = lanei(); gw = waveid(); NW = nwv(A); full = isfull(l)
     vc = reinterpret(LP{UInt8}, vaddr(A, l, 7)); ebf = fresh(A.eb); lo = (lane % UInt32) << 4
     amaxb = rdf(ld(A.posa, P - Int32(1))); n0 = Int32(4) * P; g = gw
     while g < n0
@@ -735,7 +740,7 @@ end
 end
 # the mix divided by the head's total, gated, into xt for o_proj
 @inline function acomb_ph!(A::KR, l::Int32, seq::Int32, P::Int32, pre::Bool)
-    t0 = memtime(); did = false; lane = lanei(); gw = waveid(); NW = nwv(A); full = isfull(l); n = Int32(64) * P; g = gw
+    t0 = wtime(); did = false; lane = lanei(); gw = waveid(); NW = nwv(A); full = isfull(l); n = Int32(64) * P; g = gw
     amaxb = rdf(ld(A.posa, P - Int32(1)))
     while g < n
         p = g >> Int32(6); h = (g & Int32(63)) >> Int32(2); Gc = g & Int32(3); j = h >> Int32(2); i = h & Int32(3); c = Gc * LANES + lane
@@ -778,11 +783,11 @@ end
     end
 end
 @inline function head_ph!(A::KR, seq::Int32, P::Int32, pf::Int32)
-    t0 = memtime(); did = false; lane = lanei(); gw = waveid(); NW = nwv(A); gen = A.mode == Int32(0); xp = fresh(A.xt); Np = P - pf
+    t0 = wtime(); did = false; lane = lanei(); gw = waveid(); NW = nwv(A); gen = A.mode == Int32(0); xp = fresh(A.xt); Np = P - pf
     W, rows, nc, _ = mat(A, HEADL, Int32(0)); n = rows >> Int32(5); dyn = A.dyn != Int32(0); g = dyn ? claim(A, lane) : gw
     if A.flow != Int32(0) && g < n                         # (the whole K a wavefront: every slice)
         for f in Int32(0):Int32(3); xready!(A, f, Int32(16) * Np); end
-        xp = fresh(A.xt); t0 = memtime()
+        xp = fresh(A.xt); t0 = wtime()
     end
     if gen && A.temp > 0.0f0                               # the sampler's histogram and list start empty
         i = WGS * wgid() + tid(); i < Int32(NR) * HBINS && st!(A.hs, UInt32(0), i)
@@ -820,7 +825,7 @@ end
 # a request's next token (its last at a stop token), a lane a position
 @inline function tok_ph!(A::KR, seq::Int32, P::Int32, pf::Int32)
     (wgid() == Int32(0) && tid() < P - pf) || return
-    t0 = memtime(); q = tid()
+    t0 = wtime(); q = tid()
     tok_out!(A, reinterpret(Int32, ~(ld(A.best, q) % UInt32)), ld(A.posr, pf + q))
     done!(A, seq, t0, true)
 end
@@ -836,7 +841,7 @@ const SMARGIN, HBINS, SCAND, SKMAX = 22.0f0, Int32(256), Int32(128), Int32(64)
     reinterpret(Float32, u >> 31 != UInt32(0) ? u & 0x7fffffff : ~u)
 end
 @inline function hist_ph!(A::KR, seq::Int32, P::Int32, pf::Int32)
-    t0 = memtime(); lane = lanei(); gw = waveid(); NW = nwv(A); Np = P - pf; nq = Int32(NV ÷ 32)
+    t0 = wtime(); lane = lanei(); gw = waveid(); NW = nwv(A); Np = P - pf; nq = Int32(NV ÷ 32)
     g = gw; did = false
     while g < nq * Np
         q = g ÷ nq; r = (g - q * nq) * LANES + lane; mx = bestv(A, q); w = ld(A.sp, 4rdf(ld(A.posr, pf + q))) * SMARGIN / Float32(HBINS)
@@ -850,7 +855,7 @@ end
 end
 @inline function thr_ph!(A::KR, seq::Int32, P::Int32, pf::Int32)
     (wgid() == Int32(0) && tid() < P - pf) || return
-    t0 = memtime(); q = tid(); rs = ld(A.posr, pf + q); T = ld(A.sp, 4rs); w = T * SMARGIN / Float32(HBINS); k = min(unsafe_trunc(Int32, ld(A.sp, 4rs + Int32(1))), SKMAX); c = Int32(0); b = Int32(0)
+    t0 = wtime(); q = tid(); rs = ld(A.posr, pf + q); T = ld(A.sp, 4rs); w = T * SMARGIN / Float32(HBINS); k = min(unsafe_trunc(Int32, ld(A.sp, 4rs + Int32(1))), SKMAX); c = Int32(0); b = Int32(0)
     while b < HBINS - Int32(1)
         c += reinterpret(Int32, ld(A.hs, Int64(q) * HBINS + b))
         if c >= k
@@ -868,7 +873,7 @@ end
     reinterpret(Float32, u >> 31 != UInt32(0) ? u & 0x7fffffff : ~u)
 end
 @inline function cand_ph!(A::KR, seq::Int32, P::Int32, pf::Int32)
-    t0 = memtime(); lane = lanei(); gw = waveid(); NW = nwv(A); Np = P - pf; nq = Int32(NV ÷ 32)
+    t0 = wtime(); lane = lanei(); gw = waveid(); NW = nwv(A); Np = P - pf; nq = Int32(NV ÷ 32)
     g = gw; did = false
     while g < nq * Np
         q = g ÷ nq; r = (g - q * nq) * LANES + lane
@@ -882,7 +887,7 @@ end
 end
 @inline function stok_ph!(A::KR, lds2, seq::Int32, P::Int32, pf::Int32)
     (wgid() == Int32(0) && tid() < P - pf) || return
-    t0 = memtime(); q = tid(); rq = ld(A.posr, pf + q); T = ld(A.sp, 4rq); n = min(reinterpret(Int32, ld(A.cn, q)), SCAND); o = Int(q) * 2 * Int(SCAND)
+    t0 = wtime(); q = tid(); rq = ld(A.posr, pf + q); T = ld(A.sp, 4rq); n = min(reinterpret(Int32, ld(A.cn, q)), SCAND); o = Int(q) * 2 * Int(SCAND)
     if !(T > 0.0f0)                                        # a greedy slot in a forward with sampling ones
         tok_out!(A, reinterpret(Int32, ~(ld(A.best, q) % UInt32)), rq); done!(A, seq, t0, true); return
     end
@@ -1173,7 +1178,7 @@ struct PEngine
 end
 # the clock's rate, from two spins of different lengths against the host clock
 @kernel unsafe_indices = true function k_spin!(o, n)
-    t0 = memtime()
+    t0 = wtime()
     while memtime() - t0 < n; end
     o[1] = memtime() - t0
 end
