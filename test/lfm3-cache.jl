@@ -12,11 +12,13 @@ function chat(prompt, n; snap = 0, sample = "")
     close(c); t, split(d)
 end
 ok = true; check(name, c) = (println(c ? "PASS " : "FAIL ", name); global ok &= c)
+flush_slots() = for j in 1:4; chat(I[400+20j:440+20j], 1; snap = 30); end
 for (n1, s1, n2) in ((400, 390, 600), (300, 299, 310), (40, 30, 500))
+    flush_slots()
     chat(I[1:n1], 1; snap = s1)                            # leaves a snapshot at s1
     a, d = chat(I[1:n2], 48)                               # resumes from it
     check("prompt $n1 snapshot $s1, then $n2 resumes $s1", parse(Int, d[7]) == s1)
-    chat(I[2:20], 1)                                       # a cold request drops the snapshot
+    flush_slots()                                          # other conversations take the slots: the snapshot is gone
     b, e = chat(I[1:n2], 48)
     check("  that run is cold", parse(Int, e[7]) == 0)
     check("  resumed tokens == cold tokens ($(length(a)))", a == b)

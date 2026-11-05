@@ -91,7 +91,7 @@ const WIN, RING = 256, 288                                 # the sliding window;
 const CRING = 16                                           # a conv layer's ring of inputs: 7 taps + a block
 const NPOS = 16                                             # positions a prefill forward
 const MAXCTX = 262144                                      # positions in the cache, shared by the requests of a dispatch
-const NR = 2                                               # requests at once
+const NR = 4                                               # request slots: requests at once, each with its own cache
 const MAXGEN = 8192
 isattn(l) = l >= 2 && iseven(l)
 isfull(l) = isattn(l) && (l - 2) % 4 == 0
@@ -136,7 +136,7 @@ const V4F = NTuple{4,VecElement{Float32}}
 end
 # P floats of x as one scalar load: invariant, so with a uniform address it is a load into SGPRs. It can't move above the
 # barrier that orders it after x was written, because the base comes through fresh, an opaque copy each phase.
-for P in (1, 2, 4, 8, 16)
+for P in (1, 2, 3, 4, 8, 16)
     ir = """
         define <$P x i32> @xv(ptr addrspace(1) %p) #0 {
             %v = load <$P x i32>, ptr addrspace(1) %p, align 4, !invariant.load !0
@@ -282,12 +282,13 @@ struct KR
     bar::LP{UInt32}; acct::LP{UInt64}; ssq::LP{Int64}; best::LP{UInt64}
     inp::LP{Int32}; rq::LP{Int32}; tok::LP{Int32}; posr::LP{Int32}; posa::LP{Int32}; tks::LP{Int32}; nem::LP{Int32}
     out::LP{Int32}; hf::LP{UInt32}
-    nreq::Int32; mode::Int32; nwg::Int32; npos::Int32; stp1::Int32; stp2::Int32
-    a0::Int32                                              # the first position to run (a resumed prompt; one request)
-    temp::Float32; topk::Int32; topp::Float32              # sampling (temp 0: the argmax)
+    nreq::Int32; mode::Int32; nwg::Int32; npos::Int32
+    temp::Float32                                          # above 0: a slot samples (the slots' settings are in sp)
     dyn::Int32                                             # wavefronts claim matrix items (0: a fixed share each)
     sl::LP{Float32}; hs::LP{UInt32}; th::LP{Float32}; cn::LP{UInt32}; cd::LP{Int32}; rng::LP{UInt64}
-    pen::Float32; seen::LP{UInt32}                         # repetition penalty (1: none); a bit a vocabulary row, a request
+    pen::Float32; seen::LP{UInt32}                         # any slot penalizes (1: none); a bit a vocabulary row, a slot
+    sp::LP{Float32}; si::LP{Int32}                         # a slot's (temperature, top_k, top_p, penalty); its stop tokens
+    apos::LP{Int32}; lim::LP{Int32}                        # a slot's next prompt position; where its prompt stops for now (a snapshot)
 end
 const SEENW = NV ÷ 32                                      # words of a request's seen-token bits
 const TABV = (NL + 1) * 8 * 4                              # where the vector addresses start in the table
@@ -409,6 +410,8 @@ end
             mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(1))
         elseif P == Int32(2)
             mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(2))
+        elseif P == Int32(3)
+            mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(3))
         elseif P == Int32(4)
             mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(4))
         elseif P == Int32(8)
@@ -431,9 +434,9 @@ end
     elseif i == Int32(0)
         n = Int32(0)
         for q in Int32(0):A.nreq-Int32(1)
-            m = ld(A.nem, q)
-            if m < ld(A.rq, 5q + Int32(2))
-                st!(A.posr, q, n); st!(A.posa, ld(A.rq, 5q + Int32(1)) + m - Int32(1), n); st!(A.tok, ld(A.tks, q), n); sq0!(A, 1, n); n += Int32(1)
+            m = ld(A.nem, q); ni = ld(A.rq, 5q + Int32(1))
+            if ld(A.apos, q) >= ni && m >= Int32(1) && m < ld(A.rq, 5q + Int32(2))
+                st!(A.posr, q, n); st!(A.posa, ni + m - Int32(1), n); st!(A.tok, ld(A.tks, q), n); sq0!(A, 1, n); n += Int32(1)
             end
         end
     end
@@ -722,8 +725,9 @@ end
     for q in 0:N-1
         v = bf(acc[q+1])
         # the repetition penalty on a row the request has seen, after the rounding: the vendor applies it to the logits in Float32
-        if gen && A.pen != 1.0f0 && (ld(A.seen, Int64(rdf(ld(A.posr, pf + Int32(q)))) * SEENW + G) >> lane) & UInt32(1) != UInt32(0)
-            v = v < 0.0f0 ? v * A.pen : v / A.pen
+        pr = (gen && A.pen != 1.0f0) ? rdf(ld(A.posr, pf + Int32(q))) : Int32(0); pn = (gen && A.pen != 1.0f0) ? ld(A.sp, 4pr + Int32(3)) : 1.0f0
+        if pn != 1.0f0 && (ld(A.seen, Int64(pr) * SEENW + G) >> lane) & UInt32(1) != UInt32(0)
+            v = v < 0.0f0 ? v * pn : v / pn
         end
         (gen && A.temp > 0.0f0) && st!(A.sl, v, Int64(q) * NV + r)
         if gen
@@ -750,6 +754,8 @@ end
             head_item!(A, W, nc, g, lane, xp, pf, gen, Val(1))
         elseif Np == Int32(2)
             head_item!(A, W, nc, g, lane, xp, pf, gen, Val(2))
+        elseif Np == Int32(3)
+            head_item!(A, W, nc, g, lane, xp, pf, gen, Val(3))
         elseif Np == Int32(4)
             head_item!(A, W, nc, g, lane, xp, pf, gen, Val(4))
         elseif Np == Int32(8)
@@ -761,14 +767,14 @@ end
     end
     done!(A, seq, t0, did)
 end
-@inline isstop(A::KR, t) = t == A.stp1 || t == A.stp2
+@inline isstop(A::KR, r, t) = t == ld(A.si, 2r) || t == ld(A.si, 2r + Int32(1))
 @inline function tok_out!(A::KR, ix::Int32, r::Int32)       # request r's next token (its last at a stop token)
     st!(A.tks, ix, r); n = ld(A.nem, r)
-    if A.pen != 1.0f0                                      # (one lane a request: no other writer of its bits)
+    if A.pen != 1.0f0                                      # (one lane a slot: no other writer of its bits)
         e = Int64(r) * SEENW + (ix >> Int32(5)); st!(A.seen, ld(A.seen, e) | (UInt32(1) << (ix & Int32(31))), e)
     end
     st!(A.out, ix, ld(A.rq, 5r + Int32(3)) + n)
-    st!(A.nem, isstop(A, ix) ? ld(A.rq, 5r + Int32(2)) : n + Int32(1), r)
+    st!(A.nem, isstop(A, r, ix) ? ld(A.rq, 5r + Int32(2)) : n + Int32(1), r)
 end
 # a request's next token (its last at a stop token), a lane a position
 @inline function tok_ph!(A::KR, seq::Int32, P::Int32, pf::Int32)
@@ -789,10 +795,10 @@ const SMARGIN, HBINS, SCAND, SKMAX = 22.0f0, Int32(256), Int32(128), Int32(64)
     reinterpret(Float32, u >> 31 != UInt32(0) ? u & 0x7fffffff : ~u)
 end
 @inline function hist_ph!(A::KR, seq::Int32, P::Int32, pf::Int32)
-    t0 = memtime(); lane = lanei(); gw = waveid(); NW = nwv(A); Np = P - pf; nq = Int32(NV ÷ 32); w = A.temp * SMARGIN / Float32(HBINS)
+    t0 = memtime(); lane = lanei(); gw = waveid(); NW = nwv(A); Np = P - pf; nq = Int32(NV ÷ 32)
     g = gw; did = false
     while g < nq * Np
-        q = g ÷ nq; r = (g - q * nq) * LANES + lane; mx = bestv(A, q)
+        q = g ÷ nq; r = (g - q * nq) * LANES + lane; mx = bestv(A, q); w = ld(A.sp, 4rdf(ld(A.posr, pf + q))) * SMARGIN / Float32(HBINS)
         d = (mx - ld(A.sl, Int64(q) * NV + r)) / w
         if d < Float32(HBINS)
             atadd(A.hs + 4 * (Int64(q) * HBINS + unsafe_trunc(Int32, d)), UInt32(1))
@@ -803,7 +809,7 @@ end
 end
 @inline function thr_ph!(A::KR, seq::Int32, P::Int32, pf::Int32)
     (wgid() == Int32(0) && tid() < P - pf) || return
-    t0 = memtime(); q = tid(); w = A.temp * SMARGIN / Float32(HBINS); k = min(A.topk, SKMAX); c = Int32(0); b = Int32(0)
+    t0 = memtime(); q = tid(); rs = ld(A.posr, pf + q); T = ld(A.sp, 4rs); w = T * SMARGIN / Float32(HBINS); k = min(unsafe_trunc(Int32, ld(A.sp, 4rs + Int32(1))), SKMAX); c = Int32(0); b = Int32(0)
     while b < HBINS - Int32(1)
         c += reinterpret(Int32, ld(A.hs, Int64(q) * HBINS + b))
         if c >= k
@@ -813,7 +819,7 @@ end
         end
         b += Int32(1)
     end
-    st!(A.th, unordf(ld(A.best, q)) - Float32(b + Int32(1)) * w, q)
+    st!(A.th, T > 0.0f0 ? unordf(ld(A.best, q)) - Float32(b + Int32(1)) * w : Inf32, q)   # (a greedy slot lists nothing)
     done!(A, seq, t0, true)
 end
 @inline function unordf(k::UInt64)                         # (a lane's own maximum)
@@ -835,7 +841,10 @@ end
 end
 @inline function stok_ph!(A::KR, lds2, seq::Int32, P::Int32, pf::Int32)
     (wgid() == Int32(0) && tid() < P - pf) || return
-    t0 = memtime(); q = tid(); n = min(reinterpret(Int32, ld(A.cn, q)), SCAND); o = Int(q) * 2 * Int(SCAND)
+    t0 = memtime(); q = tid(); rq = ld(A.posr, pf + q); T = ld(A.sp, 4rq); n = min(reinterpret(Int32, ld(A.cn, q)), SCAND); o = Int(q) * 2 * Int(SCAND)
+    if !(T > 0.0f0)                                        # a greedy slot in a forward with sampling ones
+        tok_out!(A, reinterpret(Int32, ~(ld(A.best, q) % UInt32)), rq); done!(A, seq, t0, true); return
+    end
     i = Int32(0)
     while i < n                                            # insertion sort: the value down, the row up on a tie
         r = ld(A.cd, Int64(q) * SCAND + i); v = ld(A.sl, Int64(q) * NV + r); j = i
@@ -846,21 +855,21 @@ end
         end
         @inbounds lds2[o+2Int(j)+1] = v; @inbounds lds2[o+2Int(j)+2] = reinterpret(Float32, r); i += Int32(1)
     end
-    k = min(n, min(A.topk, SKMAX)); mx = @inbounds lds2[o+1]; s = 0.0f0; i = Int32(0); m = Int32(0)
+    k = min(n, min(unsafe_trunc(Int32, ld(A.sp, 4rq + Int32(1))), SKMAX)); tp = ld(A.sp, 4rq + Int32(2)); mx = @inbounds lds2[o+1]; s = 0.0f0; i = Int32(0); m = Int32(0)
     while i < k                                            # the top k, then as many as reach top_p of them
-        s += exp2f((@inbounds(lds2[o+2Int(i)+1]) - mx) / A.temp * LOG2E); i += Int32(1)
+        s += exp2f((@inbounds(lds2[o+2Int(i)+1]) - mx) / T * LOG2E); i += Int32(1)
     end
     c = 0.0f0; i = Int32(0)
     while i < k
-        c += exp2f((@inbounds(lds2[o+2Int(i)+1]) - mx) / A.temp * LOG2E); i += Int32(1); m = i
-        c >= A.topp * s && break
+        c += exp2f((@inbounds(lds2[o+2Int(i)+1]) - mx) / T * LOG2E); i += Int32(1); m = i
+        c >= tp * s && break
     end
-    rq = ld(A.posr, pf + q); x = ld(A.rng, rq)              # xorshift64*
+    x = ld(A.rng, rq)                                      # xorshift64*
     x ⊻= x >> 12; x ⊻= x << 25; x ⊻= x >> 27; st!(A.rng, x, rq)
     u = Float32(((x * 0x106689d45497fdb5) >> 40) % UInt32) * Float32(2.0^-24) * c
     c2 = 0.0f0; i = Int32(0); ix = reinterpret(Int32, @inbounds lds2[o+2])
     while i < m
-        c2 += exp2f((@inbounds(lds2[o+2Int(i)+1]) - mx) / A.temp * LOG2E)
+        c2 += exp2f((@inbounds(lds2[o+2Int(i)+1]) - mx) / T * LOG2E)
         if u < c2
             ix = reinterpret(Int32, @inbounds lds2[o+2Int(i)+2]); break
         end
@@ -916,14 +925,11 @@ end
     gen = A.mode == Int32(0); smp = gen && A.temp > 0.0f0
     emb_ph!(A, seq, P); seq += Int32(1)
     nlr = rdf(reinterpret(Int32, ldacq(A.bar + 12))); nl = nlr == Int32(0) ? Int32(NL) : nlr   # bar[3]: layers to run (0: all), for debugging
-    l = Int32(0); i = Int32(0); pchk = false
+    l = Int32(0); i = Int32(0)
     while l <= HEADL
         kind, j0, nm, vn = lstep(l, i)
         (smp && l == HEADL && i >= Int32(2)) && (kind = S_HIST + i - Int32(2))
         gbar!(A)
-        (pchk && stopped(A)) && return seq, true
-        chk = pre && i == Int32(0) && l < HEADL
-        chk && cancelq!(A)
         if kind == S_MAT
             mat_ph!(A, l, j0, nm, seq, P)
         elseif kind == S_PRE
@@ -961,7 +967,7 @@ end
         else
             tok_ph!(A, seq, P, pfirst)
         end
-        seq += Int32(1); pchk = chk; i += Int32(1)
+        seq += Int32(1); i += Int32(1)
         if i == nsteps(l, gen, smp)
             i = Int32(0)
             l = l < nl - Int32(1) ? l + Int32(1) : l < HEADL ? (head ? HEADL : HEADL + Int32(1)) : HEADL + Int32(1)
@@ -971,43 +977,48 @@ end
     seq, false
 end
 @inline bigblock(n::Int32, npos::Int32) = n >= npos ? npos : n >= Int32(8) ? Int32(8) : n >= Int32(4) ? Int32(4) : n >= Int32(2) ? Int32(2) : Int32(1)
-# the requests (up to NR), one dispatch: each request's prefill (or scoring) in forwards of a block of positions, then the
-# decode steps of all of them together, a position a request a forward. One call of fwd! (one copy of the forward in the
-# kernel): each loop turn picks the next forward.
+# The slots: each turn of the loop picks the next forward from what the slots need, a block of a prompt or a decode step of
+# every slot generating, taking turns so a long prompt doesn't hold up the others' tokens. One call of fwd! (one copy of the
+# forward in the kernel). The dispatch ends when nothing is left, when the host asks (word 13: a request arriving or leaving
+# joins at the next one, between forwards, so nothing has to be redone) or when a prompt reaches its snapshot.
 @kernel unsafe_indices = true function k_req!(A)
     lds = @localmem Float32 (132,); lds2 = @localmem Float32 (512,)
     tid() == Int32(0) && umin64(A.acct, memtime())
-    seq = Int32(0); r = Int32(0); a = A.a0; prefill = true; pdone = A.a0; stop = false
+    seq = Int32(0); lastpre = false; prefill = true; stop = false; rr = Int32(0)
     while true
-        cancelq!(A); gbar!(A)                              # a cancel check each forward
+        cancelq!(A); gbar!(A)                              # the host's check, each forward
         stopped(A) && break
-        if prefill && r >= A.nreq                          # every prefill done
+        rp = Int32(-1); Pd = Int32(0)
+        for j in Int32(0):A.nreq-Int32(1)
+            q = (rr + j) % A.nreq; ap = rdf(ld(A.apos, q)); ni = rdf(ld(A.rq, 5q + Int32(1))); m = rdf(ld(A.nem, q))
+            (rp < Int32(0) && ap < rdf(ld(A.lim, q))) && (rp = q)
+            (ap >= ni && m >= Int32(1) && m < rdf(ld(A.rq, 5q + Int32(2)))) && (Pd += Int32(1))
+        end
+        if prefill && rp < Int32(0)                        # every prompt done
             tid() == Int32(0) && umax64(A.acct + 16, memtime())
             prefill = false
         end
-        if prefill
-            ninp = rdf(ld(A.rq, 5r + Int32(1))); ngen = rdf(ld(A.rq, 5r + Int32(2)))
-            P = bigblock(ninp - a, A.npos)
+        if rp >= Int32(0) && (!lastpre || Pd == Int32(0))
+            a = rdf(ld(A.apos, rp)); l = rdf(ld(A.lim, rp)); ninp = rdf(ld(A.rq, 5rp + Int32(1))); ngen = rdf(ld(A.rq, 5rp + Int32(2)))
+            P = bigblock(l - a, A.npos)
             head = A.mode == Int32(1) || (a + P == ninp && ngen > Int32(0)); pfirst = A.mode == Int32(1) ? Int32(0) : P - Int32(1)
-            setpos_ph!(A, r, a, P); gbar!(A)
+            setpos_ph!(A, rp, a, P); gbar!(A)
             seq, stop = fwd!(A, lds, lds2, P, seq, head, pfirst, true)
-            stop && break
-            # the prompt positions run so far, for the host's progress lines (host counter word 14)
-            pdone += P; (wgid() == Int32(0) && tid() == Int32(0)) && strel_sys(A.hf + 56, UInt32(pdone))
-            a += P
-            a >= ninp && (r += Int32(1); a = Int32(0))
-        else
-            P = Int32(0)
-            for q in Int32(0):A.nreq-Int32(1)
-                n = rdf(ld(A.nem, q))
-                n < rdf(ld(A.rq, 5q + Int32(2))) && (P += Int32(1))
+            # the slot's position, and for the host's progress lines its host word
+            if wgid() == Int32(0) && tid() == Int32(0)
+                st!(A.apos, a + P, rp); strel_sys(A.hf + 4 * (Int64(16) + rp), UInt32(a + P))
             end
-            P == Int32(0) && break
-            setpos_ph!(A, Int32(-1), Int32(0), P); gbar!(A)
-            seq, stop = fwd!(A, lds, lds2, P, seq, true, Int32(0), false)
-            stop && break
+            lastpre = true; rr = rp + Int32(1)
+            (a + P == l && l < ninp) && break              # a snapshot: the host copies the slot's rings and carries on
+        elseif Pd > Int32(0)
+            setpos_ph!(A, Int32(-1), Int32(0), Pd); gbar!(A)
+            seq, stop = fwd!(A, lds, lds2, Pd, seq, true, Int32(0), false)
+            lastpre = false
+        else
+            break
         end
     end
+    fence_rel(); KI.barrier()
     tid() == Int32(0) && umax64(A.acct + 8, memtime())
 end
 
@@ -1082,8 +1093,8 @@ struct HostX
     c::Ptr{UInt8}; out::Int; tok::Int
 end
 function HostX(maxgen)
-    out = 0; tok = 64; rc = Ref{Ptr{Cvoid}}(C_NULL); H = AMDGPU.HIP
-    H.hipHostMalloc(rc, tok + 4maxgen, H.hipHostMallocPortable | H.hipHostMallocMapped | H.hipHostMallocCoherent)
+    out = 0; tok = 128; rc = Ref{Ptr{Cvoid}}(C_NULL); H = AMDGPU.HIP   # (host words: 13 end the dispatch, 16 .. a slot's prompt position)
+    H.hipHostMalloc(rc, tok + 4NR * maxgen, H.hipHostMallocPortable | H.hipHostMallocMapped | H.hipHostMallocCoherent)
     HostX(Ptr{UInt8}(rc[]), out, tok)
 end
 lp(T, p::Ptr) = reinterpret(LP{T}, p)
@@ -1099,6 +1110,7 @@ struct KBuf
     eb::ROCVector{Float32}; es::ROCVector{Float32}
     bar::ROCVector{UInt32}; ssq::ROCVector{Int64}; best::ROCVector{UInt64}
     sl::ROCVector{Float32}; hs::ROCVector{UInt32}; th::ROCVector{Float32}; cn::ROCVector{UInt32}; cd::ROCVector{Int32}; rng::ROCVector{UInt64}; seen::ROCVector{UInt32}
+    sp::ROCVector{Float32}; si::ROCVector{Int32}; apos::ROCVector{Int32}; lim::ROCVector{Int32}
     rq::ROCVector{Int32}; tok::ROCVector{Int32}; posr::ROCVector{Int32}; posa::ROCVector{Int32}; tks::ROCVector{Int32}; nem::ROCVector{Int32}
 end
 function KBuf(M::Model, npos)
@@ -1109,6 +1121,7 @@ function KBuf(M::Model, npos)
         z(npos * NKV * PVS * HD * 4), z(npos * NKV * (ERW ÷ 2) * 4), z(npos * NKV * EGW * 4),
         AMDGPU.zeros(UInt32, 64), AMDGPU.zeros(Int64, 2 * BSSQ), AMDGPU.zeros(UInt64, npos),
         z(NR * NV), AMDGPU.zeros(UInt32, NR * HBINS), z(NR), AMDGPU.zeros(UInt32, NR), zi(NR * SCAND), AMDGPU.zeros(UInt64, NR), AMDGPU.zeros(UInt32, NR * SEENW),
+        z(4NR), zi(2NR), zi(NR), zi(NR),
         zi(5NR), zi(npos), zi(npos), zi(npos), zi(NR), zi(NR))
 end
 struct PEngine
@@ -1143,17 +1156,17 @@ function occupancy(k, A)
     nb = Ref{Cint}(0); AMDGPU.HIP.hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(nb, kf.kern.kernel.fun, WGS, 0)
     Int(nb[]) * KI.multiprocessor_count(b)
 end
-function kargs(K::KBuf, hx::HostX, acct, inp, lg, nreq, mode, nwg, npos; stops = (-1, -1), start = 0, sample = (0.0, 0, 1.0), penalty = 1.0)
+function kargs(K::KBuf, hx::HostX, acct, inp, lg, nreq, mode, nwg, npos; smp = false, pen = false)
     KR(lp(Int64, K.tab), lp(Float32, K.x), lp(Float32, K.o), lp(Float32, K.xt), lp(Float32, K.part),
        lp(Float32, K.qh), lp(Float32, K.rc), lp(Float32, K.rf), lp(Float32, K.gh), lp(Float32, K.et), lp(Float32, K.pv),
        lp(Float32, K.eb), lp(Float32, K.es), lg === nothing ? lp(Float32, K.x) : lp(Float32, lg),
        lp(UInt32, K.bar), lp(UInt64, acct), lp(Int64, K.ssq), lp(UInt64, K.best),
        lp(Int32, inp), lp(Int32, K.rq), lp(Int32, K.tok), lp(Int32, K.posr), lp(Int32, K.posa), lp(Int32, K.tks), lp(Int32, K.nem),
        lp(Int32, hx.c + hx.tok), lp(UInt32, hx.c + hx.out),
-       Int32(nreq), Int32(mode), Int32(nwg), Int32(npos), Int32(stops[1]), Int32(stops[2]), Int32(start),
-       Float32(sample[1]), Int32(sample[2]), Float32(sample[3]), Int32(DYNCLAIM[] ? 1 : 0),
+       Int32(nreq), Int32(mode), Int32(nwg), Int32(npos),
+       smp ? 1.0f0 : 0.0f0, Int32(DYNCLAIM[] ? 1 : 0),
        lp(Float32, K.sl), lp(UInt32, K.hs), lp(Float32, K.th), lp(UInt32, K.cn), lp(Int32, K.cd), lp(UInt64, K.rng),
-       Float32(penalty), lp(UInt32, K.seen))
+       pen ? 1.1f0 : 1.0f0, lp(UInt32, K.seen), lp(Float32, K.sp), lp(Int32, K.si), lp(Int32, K.apos), lp(Int32, K.lim))
 end
 # The card also runs the desktop: a kernel holding every wave slot starves the graphics ring until its timeout resets it
 # (gfx_0.0.0 timeout, GPU Hang, at 108 of 108 workgroups). The cap leaves the graphics shaders their room.
@@ -1167,96 +1180,244 @@ function PEngine(M::Model; maxgen = MAXGEN, npos = NPOS)
     nwg = occupancy(k, A); NWGMAX[] > 0 && (nwg = min(nwg, NWGMAX[]))
     PEngine(M, K, hx, nwg, npos, maxgen, clockhz(), M.ring)
 end
-# up to NR requests at once, one dispatch. reqs: (input ids, tokens to generate) each. mode 0: greedy; mode 1: score one
-# request's input (the logits of every position into lg). Returns each request's tokens, (instruction, idle, wall)
-# seconds, and the prefill and decode seconds.
-# (ctl: zero the progress and cancel words 12 .. 15 too; chat zeroes them itself, before it can see an EOF)
-function request!(PE::PEngine, reqs, mode::Int; lg = nothing, stops = (-1, -1), ctl = true, start = 0, sample = (0.0, 0, 1.0), seed = UInt64(1), penalty = 1.0)
-    K = PE.K; npos = PE.npos; nr = length(reqs)
-    1 <= nr <= NR || error("$nr requests: at most $NR at once")
-    rb = Int32[]; b = 0
-    for (inp, ngen) in reqs
-        isempty(inp) && error("a request with no input tokens")
-        push!(rb, b); b = cld(b + length(inp) + ngen, 32) * 32
-    end
-    b <= MAXCTX || error("requests of $b positions: the cache holds $MAXCTX")
-    sum(last, reqs) <= PE.maxgen || error("$(sum(last, reqs)) tokens: the output holds $(PE.maxgen)")
-    inp = Int32.(vcat(first.(reqs)...)); ioff = cumsum([0; length.(first.(reqs))]); ooff = cumsum([0; last.(reqs)])
-    rq = Int32.(vcat([[ioff[r], length(reqs[r][1]), reqs[r][2], ooff[r], rb[r]] for r in 1:nr]...))
-    nphase = (sum((length(i) - start) ÷ npos + 5 for (i, _) in reqs) + maximum(last, reqs) + 2) * 340
-    for i in 1:(ctl ? 8 : 6); unsafe_store!(Ptr{UInt64}(PE.hx.c + PE.hx.out), 0, i); end   # the counters
-    DPMLOCK[] && dpm!("high")                              # the clocks up for the request
-    a = AMDGPU.zeros(UInt64, 3 + 2nphase); ah = zeros(UInt64, 3 + 2nphase); ah[1] = typemax(UInt64); ah[4:2:end] .= typemax(UInt64); up!(a, ah)
-    up!(K.bar, [UInt32[0, 0, 0, NLRUN[]]; zeros(UInt32, 60)]); up!(K.rq, rq); up!(K.nem, zeros(Int32, NR))
-    # a request starts from zero state, a resumed one from its snapshot (restored by resume!)
-    if start == 0
-        SNAP[] = nothing
-        for rg in PE.rings; fill!(rg, 0x0000); end
-    end
-    ib = dev(inp)
-    up!(K.rng, UInt64[(x = (seed + UInt64(i) * 0x9e3779b97f4a7c15) * 0xbf58476d1ce4e5b9; (x ⊻ (x >> 31)) | 1) for i in 1:NR])
-    if penalty != 1.0                                      # the bits of what each request has seen so far: its prompt
-        sb = zeros(UInt32, NR * SEENW)
-        for (r, (i, _)) in enumerate(reqs), t in i
-            sb[(r-1)*SEENW+t>>5+1] |= UInt32(1) << (t & 31)
+# ---- the slots ----
+# Each slot holds a request, or between requests its conversation: the arena rows of a region (in units of a quarter of the
+# arena) and, at a snapshot position flashd names, a copy of what the rings hold, so that the conversation's next turn runs
+# only its new positions. A request takes the slot whose snapshot starts its prompt; failing that, an idle slot, the one
+# longest unused; a long one takes several units, dropping the conversations there that aren't running.
+const UNIT = MAXCTX ÷ NR
+mutable struct Rq
+    ids::Vector{Int}; nnew::Int; stops::NTuple{2,Int}; sample::NTuple{3,Float64}; seed::UInt64; penalty::Float64; snap::Int
+    slot::Int; resumed::Int; snapped::Int; cancelled::Bool; done::Bool; err::String
+end
+Rq(ids, nnew; stops = (-1, -1), sample = (0.0, 0.0, 1.0), seed = UInt64(1), penalty = 1.0, snap = 0) =
+    Rq(ids, nnew, stops, Float64.(sample), seed, penalty, snap, -1, 0, 0, false, false, "")
+mutable struct Slot
+    unit::Int; units::Int; cached::Vector{Int}; used::Float64; rq::Union{Nothing,Rq}
+end
+if !isdefined(Main, :SLOTS)
+    const SLOTS = Ref{Vector{Slot}}(Slot[])
+    const PENDING = Rq[]; const SLK = ReentrantLock()      # requests waiting for a slot
+    const GLK = ReentrantLock()                            # the GPU: a dispatch, or a command that needs it alone
+    const SCHEDSTOP = Ref(false); const SCHEDTASK = Ref{Any}(nothing)
+    const SNAPB = Ref{Any}(nothing)                        # the rings' copies, allocated once
+    const LASTRES = Ref((0.0, 0.0, 1.0))                   # the last dispatch's (instruction, idle, wall) seconds
+end
+hword(PE::PEngine, i) = Ptr{UInt32}(PE.hx.c + PE.hx.out + 4i)
+yield!(PE::PEngine) = unsafe_store!(hword(PE, 13), UInt32(1))
+# what a slot's rings hold, in each ring array: (the live array, its copy, first element, elements)
+function ringspans(PE::PEngine, r)
+    M = PE.M; sl = [aidx(l) + 1 for l in 0:NL-1 if isattn(l) && !isfull(l)]
+    live = [M.ring; [M.kc[i] for i in sl]; [M.vc[i] for i in sl]]
+    SNAPB[] === nothing && (SNAPB[] = [similar(a) for a in live])
+    nc = length(M.ring); ns = length(sl); s = Tuple{Any,Any,Int,Int}[]
+    for (i, a) in enumerate(live)
+        b = SNAPB[][i]
+        if i <= nc
+            push!(s, (a, b, r * NE * CRING, NE * CRING))           # [slot][channel][ring position]
+        elseif i <= nc + ns
+            push!(s, (a, b, r * (RING ÷ 32) * 64 * CHUNK ÷ 2, (RING ÷ 32) * 64 * CHUNK ÷ 2))   # keys: [row group][head][chunk][lane]
+        else
+            push!(s, (a, b, r * (RING ÷ 8) * 16 * CHUNK ÷ 2, (RING ÷ 8) * 16 * CHUNK ÷ 2))     # values: [position chunk][head, group][lane]
         end
-        up!(K.seen, sb)
     end
-    A = kargs(K, PE.hx, a, ib, lg, nr, mode, PE.nwg, npos; stops, start, sample, penalty)
+    s
+end
+function ringcopy!(PE::PEngine, r, save::Bool)
+    for (a, b, o, n) in ringspans(PE, r)
+        save ? copyto!(b, o + 1, a, o + 1, n) : copyto!(a, o + 1, b, o + 1, n)
+    end
+    AMDGPU.synchronize()
+end
+function ringzero!(PE::PEngine, r)
+    z = zeros(UInt16, NE * CRING)
+    GC.@preserve z begin
+        for rg in PE.M.ring; copyto!(rg, r * NE * CRING + 1, z, 1, length(z)); end
+        AMDGPU.synchronize()
+    end
+end
+# k free units in a row for slot i: the units of idle conversations are given up, oldest first, only when it takes that
+function carve!(i, k)
+    S = SLOTS[]; held(u) = any(s -> s !== S[i] && s.units > 0 && s.unit <= u < s.unit + s.units, S)
+    busy(u) = any(s -> s !== S[i] && s.rq !== nothing && s.unit <= u < s.unit + s.units, S)
+    starts = [u for u in 0:NR-k if !any(busy, u:u+k-1)]
+    isempty(starts) && return false
+    cost(u) = sum(sum(s.used for s in S if s !== S[i] && s.units > 0 && s.unit <= v < s.unit + s.units; init = 0.0) for v in u:u+k-1)
+    u = starts[argmin([cost(u) for u in starts])]
+    for s in S
+        (s !== S[i] && s.units > 0 && s.unit < u + k && u < s.unit + s.units) && (s.units = 0; s.cached = Int[])
+    end
+    S[i].unit = u; S[i].units = k; true
+end
+function place!(PE::PEngine, q::Rq, H)
+    S = SLOTS[]; n = length(q.ids); need = cld(n + q.nnew, 32) * 32; i = 0; start = 0
+    for (j, s) in enumerate(S)
+        c = length(s.cached)
+        if s.rq === nothing && c > start && c < n && s.units * UNIT >= need && view(q.ids, 1:c) == s.cached
+            i = j; start = c
+        end
+    end
+    r = i - 1
+    if i > 0
+        ringcopy!(PE, r, false)
+    else
+        idle = [j for j in eachindex(S) if S[j].rq === nothing]
+        isempty(idle) && return false
+        sort!(idle; by = j -> (isempty(S[j].cached) ? 0 : 1, S[j].used)); i = idle[1]; r = i - 1; k = cld(need, UNIT)
+        k > NR && (q.err = "the prompt and its tokens take $need positions: the cache holds $MAXCTX"; q.done = true; return true)
+        if S[i].units < k || S[i].units > k
+            carve!(i, k) || return false
+        end
+        S[i].cached = Int[]; ringzero!(PE, r)
+    end
+    s = S[i]; s.rq = q; s.used = time(); q.resumed = start
+    H.apos[i] = start; H.lim[i] = q.snap > start && q.snap < n ? q.snap : n; H.nem[i] = 0
+    H.sp[4r+1:4r+4] = Float32[q.sample[1], q.sample[2], q.sample[3], q.penalty]; H.si[2r+1:2r+2] = Int32[q.stops[1], q.stops[2]]
+    x = (q.seed + 0x9e3779b97f4a7c15) * 0xbf58476d1ce4e5b9; H.rng[i] = (x ⊻ (x >> 31)) | 1
+    if q.penalty != 1.0                                    # the bits of what the slot has seen so far: its prompt
+        sb = zeros(UInt32, SEENW)
+        for t in q.ids; sb[t>>5+1] |= UInt32(1) << (t & 31); end
+        GC.@preserve sb begin copyto!(PE.K.seen, r * SEENW + 1, sb, 1, SEENW); AMDGPU.synchronize() end
+    end
+    outp = Ptr{Int32}(PE.hx.c + PE.hx.tok) + 4r * PE.maxgen
+    for j in 1:q.nnew; unsafe_store!(outp, Int32(-1), j); end
+    unsafe_store!(hword(PE, 16 + r), UInt32(start))
+    q.slot = r                                             # (last: the chat's task starts reading the slot's tokens)
+    true
+end
+# One dispatch over the slots as they stand. Returns the prefill and decode seconds.
+function dispatch!(PE::PEngine, H, mode; lg = nothing)
+    K = PE.K; S = SLOTS[]; rq = zeros(Int32, 5NR); inp = Int32[]; npre = 0; rem = 0; smp = false; pen = false
+    for (i, s) in enumerate(S)
+        r = i - 1; q = s.rq
+        if q === nothing
+            H.apos[i] = 0; H.lim[i] = 0; H.nem[i] = 0; continue
+        end
+        rq[5r+1:5r+5] = Int32[length(inp), length(q.ids), q.nnew, r * PE.maxgen, s.unit * UNIT]
+        append!(inp, Int32.(q.ids))
+        npre += (H.lim[i] - H.apos[i]) ÷ PE.npos + 5; rem = max(rem, q.nnew - H.nem[i])
+        smp |= q.sample[1] > 0; pen |= q.penalty != 1.0
+    end
+    nphase = (npre + rem + 3) * 340
+    DPMLOCK[] && dpm!("high")                              # the clocks up for the dispatch
+    a = AMDGPU.zeros(UInt64, 3 + 2nphase); ah = zeros(UInt64, 3 + 2nphase); ah[1] = typemax(UInt64); ah[4:2:end] .= typemax(UInt64); up!(a, ah)
+    up!(K.bar, [UInt32[0, 0, 0, NLRUN[]]; zeros(UInt32, 60)]); up!(K.rq, rq); up!(K.nem, H.nem); up!(K.apos, H.apos); up!(K.lim, H.lim)
+    up!(K.sp, H.sp); up!(K.si, H.si); up!(K.rng, H.rng)
+    ib = dev(isempty(inp) ? Int32[0] : inp)
+    A = kargs(K, PE.hx, a, ib, lg, NR, mode, PE.nwg, PE.npos; smp, pen)
     k_req!(ROCBackend(), Int(WGS))(A; ndrange = Int(WGS) * PE.nwg)
     AMDGPU.synchronize()
-    LASTREQ[] = (reqs, mode, start, sample[1] > 0)
     hz = PE.hz; ah = Array(a); wall = (ah[2] - ah[1]) / hz; iv = Tuple{Float64,Float64}[]
-    ah[3] == 0 && (ah[3] = ah[2])                         # (cancelled during the prefill)
-    tpre = (ah[3] - ah[1]) / hz; tdec = (ah[2] - ah[3]) / hz; LASTACCT[] = ah
+    ah[3] == 0 && (ah[3] = ah[2])
+    LASTACCT[] = ah
     for s in 0:nphase-1
         b = ah[4+2s]; e = ah[5+2s]; b == typemax(UInt64) && continue
         push!(iv, ((b - ah[1]) / hz, (e - ah[1]) / hz))
     end
-    ins = union_len(iv)
-    res = (ins, wall - ins, wall)
+    ins = union_len(iv); LASTRES[] = (ins, wall - ins, wall)
     AMDGPU.unsafe_free!(a); AMDGPU.unsafe_free!(ib)
     DPMLOCK[] && dpm!("auto")                              # and back down while the model waits
+    copyto!(H.apos, Array(K.apos)); copyto!(H.nem, Array(K.nem)); copyto!(H.rng, Array(K.rng))
     ab = Array(K.bar)[3]
     ab != 0 && error("persistent kernel aborted (a wait passed 10 s): $ab")
-    toks = [[Int(unsafe_load(Ptr{Int32}(PE.hx.c + PE.hx.tok), ooff[r] + i)) for i in 1:reqs[r][2]] for r in 1:nr]
-    toks, res, tpre, tdec
+    (ah[3] - ah[1]) / hz, (ah[2] - ah[3]) / hz
 end
-# ---- the prompt cache: a conversation's next turn starts with this turn's prompt, up to the position flashd names (snap).
-# The arena's rows below a position stay as they are until a request starts over at position 0, so a resumed request needs
-# only what the rings hold at that position: the conv inputs and the sliding-attention rows. The prompt runs in two
-# dispatches, up to the snapshot and from it, and between them the rings are copied. One snapshot: the last conversation's.
-if !isdefined(Main, :SNAP)
-    const SNAP = Ref{Any}(nothing)                         # (the prompt ids up to the snapshot)
-    const SNAPB = Ref{Any}(nothing)                        # the rings' copies, allocated once
+# after a dispatch: a prompt at its snapshot gets its rings copied and goes on; a finished or cancelled request leaves its slot
+function settle!(PE::PEngine, H)
+    S = SLOTS[]
+    for (i, s) in enumerate(S)
+        q = s.rq; q === nothing && continue
+        r = i - 1
+        if !q.cancelled && H.apos[i] == H.lim[i] && H.lim[i] < length(q.ids)
+            ringcopy!(PE, r, true); s.cached = q.ids[1:H.lim[i]]; q.snapped = H.lim[i]; H.lim[i] = length(q.ids)
+        end
+        if q.cancelled || (H.apos[i] >= length(q.ids) && H.nem[i] >= q.nnew)
+            q.done = true; s.rq = nothing; s.used = time()
+        end
+    end
 end
-function ringcopy!(PE::PEngine, save::Bool)
-    M = PE.M; live = [M.ring; [M.kc[aidx(l)+1] for l in 0:NL-1 if isattn(l) && !isfull(l)]; [M.vc[aidx(l)+1] for l in 0:NL-1 if isattn(l) && !isfull(l)]]
-    SNAPB[] === nothing && (SNAPB[] = [similar(a) for a in live])
-    for (a, b) in zip(live, SNAPB[])
-        save ? copyto!(b, a) : copyto!(a, b)
-    end
-    AMDGPU.synchronize()
+struct HostState
+    apos::Vector{Int32}; lim::Vector{Int32}; nem::Vector{Int32}; sp::Vector{Float32}; si::Vector{Int32}; rng::Vector{UInt64}
 end
-function cached_request!(PE::PEngine, ids, nnew, stops, snap, cancel, sample, seed, penalty)
-    s = SNAP[]; n = length(ids); start = 0
-    if s !== nothing && length(s) < n && view(ids, 1:length(s)) == s
-        start = length(s); ringcopy!(PE, false)
+HostState() = HostState(zeros(Int32, NR), zeros(Int32, NR), zeros(Int32, NR), zeros(Float32, 4NR), fill(Int32(-1), 2NR), ones(UInt64, NR))
+# The scheduler: what is waiting joins between dispatches, and a dispatch is told to end (word 13) when something is waiting.
+function sched_loop(PE::PEngine, H)
+    while !SCHEDSTOP[]
+        worked = false
+        lock(GLK) do
+            lock(SLK) do
+                keep = Rq[]
+                for q in PENDING
+                    q.cancelled && (q.done = true; continue)
+                    place!(PE, q, H) || push!(keep, q)
+                end
+                empty!(PENDING); append!(PENDING, keep)
+            end
+            for (i, s) in enumerate(SLOTS[])                # (cancelled while no dispatch ran)
+                s.rq !== nothing && s.rq.cancelled && settle!(PE, H)
+            end
+            if any(s -> s.rq !== nothing, SLOTS[])
+                unsafe_store!(hword(PE, 13), UInt32(0))
+                lock(SLK) do
+                    # (a request still waiting for a slot can't join until a request ends: no need to stop for it)
+                    any(s -> s.rq === nothing, SLOTS[]) && !isempty(PENDING) && yield!(PE)
+                end
+                try
+                    dispatch!(PE, H, 0)
+                    settle!(PE, H)
+                catch e
+                    msg = sprint(showerror, e); println("dispatch: ", msg); flush(stdout)
+                    for s in SLOTS[]
+                        if s.rq !== nothing
+                            s.rq.err = msg; s.rq.done = true; s.rq = nothing; s.units = 0; s.cached = Int[]
+                        end
+                    end
+                end
+                worked = true
+            end
+        end
+        worked || sleep(0.002)
     end
-    RESUMED[] = start; tp0 = 0.0; snapped = 0
-    if snap > start && snap < n                            # up to the snapshot, then a copy of the rings
-        _, _, tp0, _ = request!(PE, [(ids[1:snap], 0)], 0; stops, ctl = false, start)
-        unsafe_load(cancel) == 0 && (ringcopy!(PE, true); SNAP[] = ids[1:snap]; snapped = snap)
-        start = snap
-    end
-    if unsafe_load(cancel) != 0
-        return [Int[]], (0.0, 0.0, 1.0), tp0, 0.0, RESUMED[], snapped
-    end
-    toks, res, tp, td = request!(PE, [(ids, nnew)], 0; stops, ctl = false, start, sample, seed, penalty)
-    toks, res, tp0 + tp, td, RESUMED[], snapped
 end
-if !isdefined(Main, :RESUMED)
-    const RESUMED = Ref(0)                                 # the positions the current chat took from the cache
+# Up to NR requests at once, alone on the GPU (the commands gen, gen2, kl and the tests' scoring). mode 0: greedy; mode 1: score
+# one request's input (the logits of every position into lg). Returns each request's tokens, (instruction, idle, wall) seconds,
+# and the prefill and decode seconds. Every slot's conversation is dropped.
+function request!(PE::PEngine, reqs, mode::Int; lg = nothing, stops = (-1, -1), sample = (0.0, 0.0, 1.0), seed = UInt64(1), penalty = 1.0)
+    nr = length(reqs); 1 <= nr <= NR || error("$nr requests: at most $NR at once")
+    b = sum(cld(length(i) + g, 32) * 32 for (i, g) in reqs); b <= MAXCTX || error("requests of $b positions: the cache holds $MAXCTX")
+    lock(GLK) do
+        any(s -> s.rq !== nothing, SLOTS[]) && error("chats are running")
+        H = HostState(); unsafe_store!(hword(PE, 13), UInt32(0)); o = 0; S = SLOTS[]
+        for s in S; s.units = 0; s.cached = Int[]; end
+        rbs = Int[]
+        qs = map(enumerate(reqs)) do (j, (ids, g))
+            isempty(ids) && error("a request with no input tokens")
+            g <= PE.maxgen || error("$g tokens: the output holds $(PE.maxgen)")
+            q = Rq(ids, g; stops, sample, seed, penalty); r = j - 1; s = S[j]
+            ringzero!(PE, r); s.rq = q; q.slot = r
+            H.lim[j] = length(ids); H.sp[4r+1:4r+4] = Float32[sample[1], sample[2], sample[3], penalty]; H.si[2r+1:2r+2] = Int32[stops[1], stops[2]]
+            x = (seed + 0x9e3779b97f4a7c15) * 0xbf58476d1ce4e5b9; H.rng[j] = (x ⊻ (x >> 31)) | 1
+            if penalty != 1.0
+                sb = zeros(UInt32, SEENW); for t in ids; sb[t>>5+1] |= UInt32(1) << (t & 31); end
+                GC.@preserve sb begin copyto!(PE.K.seen, r * SEENW + 1, sb, 1, SEENW); AMDGPU.synchronize() end
+            end
+            q
+        end
+        # (the regions here are by position, not whole units: a request may be shorter than a unit and these run alone)
+        tp, td = dispatch_at!(PE, H, mode, reqs; lg)
+        toks = [[Int(unsafe_load(Ptr{Int32}(PE.hx.c + PE.hx.tok) + 4(r - 1) * PE.maxgen, i)) for i in 1:reqs[r][2]] for r in 1:nr]
+        for s in S; s.rq = nothing; end
+        LASTREQ[] = (reqs, mode, 0, sample[1] > 0)
+        toks, LASTRES[], tp, td
+    end
+end
+function dispatch_at!(PE, H, mode, reqs; lg)
+    S = SLOTS[]; b = 0; tp = 0.0; td = 0.0
+    for (j, (ids, g)) in enumerate(reqs)
+        S[j].unit = b ÷ UNIT; b += cld(length(ids) + g, UNIT) * UNIT
+    end
+    b <= MAXCTX || error("requests take more than the arena's $NR units")
+    p, d = dispatch!(PE, H, mode; lg); (tp + p, td + d)
 end
 function union_len(iv)                                     # total length of a set of intervals
     isempty(iv) && return 0.0
@@ -1373,8 +1534,14 @@ if !isdefined(Main, :PK)
     const PK = Ref{Any}(nothing)                           # the persistent kernel engine
 end
 function pinit()
-    t0 = time(); PK[] === nothing || (foreach(a -> a isa ROCArray && AMDGPU.unsafe_free!(a), (getfield(PK[].K, f) for f in fieldnames(typeof(PK[].K)))); AMDGPU.HIP.hipHostFree(PK[].hx.c))
+    t0 = time()
+    if SCHEDTASK[] !== nothing                             # the scheduler of the engine being replaced
+        SCHEDSTOP[] = true; wait(SCHEDTASK[]); SCHEDSTOP[] = false
+    end
+    PK[] === nothing || (foreach(a -> a isa ROCArray && AMDGPU.unsafe_free!(a), (getfield(PK[].K, f) for f in fieldnames(typeof(PK[].K)))); AMDGPU.HIP.hipHostFree(PK[].hx.c))
     PK[] = PEngine(SRV[].M)
+    SLOTS[] = [Slot(0, 0, Int[], 0.0, nothing) for _ in 1:NR]; empty!(PENDING)
+    SCHEDTASK[] = Threads.@spawn Base.invokelatest(sched_loop, PK[], HostState())
     # (the first dispatch compiles nothing more: the occupancy query compiled the same kernel)
     @printf("persistent kernel: %d workgroups, %d positions a prefill forward, clock %.2f MHz, compiled in %.0f s\n", PK[].nwg, PK[].npos, PK[].hz / 1e6, time() - t0); flush(stdout)
 end
@@ -1402,7 +1569,7 @@ end
 # "chat N ID ..." runs the request and streams "tok ID" lines as the kernel writes them to host memory, then
 # "done ngen ended nprompt run_ms first_ms 0 0". Any other first line is one of handle's commands.
 function session(c, lk)
-    stops = (-1, -1); snap = 0; sample = (0.0, 0, 1.0); seed = UInt64(1); penalty = 1.0
+    stops = (-1, -1); snap = 0; sample = (0.0, 0.0, 1.0); seed = UInt64(1); penalty = 1.0
     while !eof(c)
         line = readline(c); a = split(line); isempty(a) && continue
         if a[1] in ("timings", "cancel_on_eof")
@@ -1412,58 +1579,61 @@ function session(c, lk)
         elseif a[1] == "snap"
             snap = parse(Int, a[2])
         elseif a[1] == "sample"                            # sample SEED TEMP TOPK TOPP
-            seed = parse(UInt64, a[2]); sample = (parse(Float64, a[3]), parse(Int, a[4]), parse(Float64, a[5]))
+            seed = parse(UInt64, a[2]); sample = (parse(Float64, a[3]), parse(Float64, a[4]), parse(Float64, a[5]))
         elseif a[1] == "penalty"                           # penalty P: repetition penalty (flashd sends it only when it isn't 1)
             penalty = parse(Float64, a[2])
         elseif a[1] == "img"
         elseif a[1] == "info"
             println(c, "info ", MAXCTX, " 0")
         elseif a[1] == "chat"
-            lock(() -> chat(c, parse(Int, a[2]), parse.(Int, a[3:end]), stops, snap, sample, seed, penalty), lk); return
+            chat(c, parse(Int, a[2]), parse.(Int, a[3:end]), stops, snap, sample, seed, penalty); return
         else
             lock(() -> handle(c, line), lk); return
         end
     end
 end
-function chat(c, nnew, ids, stops, snap = 0, sample = (0.0, 0, 1.0), seed = UInt64(1), penalty = 1.0)
+function chat(c, nnew, ids, stops, snap = 0, sample = (0.0, 0.0, 1.0), seed = UInt64(1), penalty = 1.0)
     PE = PK[]; nnew = clamp(nnew, 1, min(PE.maxgen, MAXCTX - length(ids)))
-    outp = Ptr{Int32}(PE.hx.c + PE.hx.tok)
-    for i in 1:nnew; unsafe_store!(outp, Int32(-1), i); end
-    hw(i) = Ptr{UInt32}(PE.hx.c + PE.hx.out + 4i)         # host words: 13 cancel, 14 the prompt positions run
-    for i in 12:15; unsafe_store!(hw(i), UInt32(0)); end
-    t0 = time(); job = Threads.@spawn cached_request!(PE, ids, nnew, stops, snap, hw(13), sample, seed, penalty)
+    q = Rq(ids, nnew; stops, sample, seed, penalty, snap)
+    t0 = time(); lock(() -> push!(PENDING, q), SLK); yield!(PE)
     n = 0; t1 = 0.0; ended = 0; pr = 0; tp = 0.0; gone = false
-    # a write to a client that has gone fails: the request is cancelled, and this still waits for the kernel (the
-    # lock is held until it stops, so no request starts under it)
+    # a write to a client that has gone fails: the request is cancelled
+    cancel() = (q.cancelled = true; yield!(PE))
     say(a...) = gone || try
         println(c, a...)
     catch
-        gone = true; unsafe_store!(hw(13), UInt32(1))
+        gone = true; cancel()
     end
+    # cancel_on_eof: flashd closes its side when the client goes; the slot leaves at the next forward
+    @async try
+        eof(c) && !q.done && cancel()
+    catch
+        cancel()
+    end
+    while q.slot < 0 && !q.done; sleep(0.002); end
+    isempty(q.err) || (say("error: ", q.err); return)
+    r = q.slot; outp = Ptr{Int32}(PE.hx.c + PE.hx.tok) + 4r * PE.maxgen
     function progress()                                    # "prog ran total cached", at most one every 500 ms
         n == 0 || return
-        ran = Int(unsafe_load(hw(14))); now = time()
-        (ran > pr && now - tp >= 0.5) && (say("prog ", ran, " ", length(ids), " ", RESUMED[]); pr = ran; tp = now)
+        ran = Int(unsafe_load(hword(PE, 16 + r))); now = time()
+        (ran > pr && now - tp >= 0.5) && (say("prog ", ran, " ", length(ids), " ", q.resumed); pr = ran; tp = now)
     end
-    pump() = while n < nnew
+    pump() = while n < nnew && ended == 0
         t = unsafe_load(outp, n + 1); t < 0 && break
         n += 1; n == 1 && (t1 = time()); say("tok ", t); (t == stops[1] || t == stops[2]) && (ended = 1)
     end
-    # cancel_on_eof: flashd closes its side when the client goes; the kernel stops at its next check (a forward at
-    # decode, a layer in a prefill)
-    @async try
-        eof(c) && !istaskdone(job) && unsafe_store!(hw(13), UInt32(1))
-    catch
-        unsafe_store!(hw(13), UInt32(1))
+    while !q.done && n < nnew && ended == 0
+        progress(); pump(); gone || try flush(c) catch; gone = true; cancel() end; sleep(0.003)
     end
-    while !istaskdone(job); progress(); pump(); gone || try flush(c) catch; gone = true end; sleep(0.005); end
-    res = fetch(job); pump()
+    pump(); t2 = time()
+    isempty(q.err) || (say("error: ", q.err); return)
     gone || try
-        @printf(c, "done %d %d %d %.1f %.1f %d %d\n", n, ended, length(ids), 1e3(time() - t0), 1e3(t1 - t0), res[5], res[6]); flush(c)
+        @printf(c, "done %d %d %d %.1f %.1f %d %d\n", n, ended, length(ids), 1e3(t2 - t0), 1e3(t1 - t0), q.resumed, q.snapped); flush(c)
     catch
     end
-    @printf("chat: %d prompt, %d out, %d cached, prefill %.2f tok/s, decode %.2f tok/s, idle time %.1f%%%s\n", length(ids), n,
-            res[5], (length(ids) - res[5]) / max(res[3], 1e-9), max(n - 1, 0) / max(res[4], 1e-9), idlepct(res[2]), unsafe_load(hw(13)) != 0 ? " (cancelled)" : ""); flush(stdout)
+    idle = LASTRES[]
+    @printf("chat: %d prompt, %d out, %d cached, slot %d, prefill %.2f tok/s, decode %.2f tok/s, idle time %.1f%%%s\n", length(ids), n, q.resumed, r,
+            (length(ids) - q.resumed) / max(t1 - t0, 1e-9), max(n - 1, 0) / max(t2 - t1, 1e-9), idlepct(idle), q.cancelled ? " (cancelled)" : ""); flush(stdout)
 end
 function handle(c, line)
     a = split(line); s = SRV[]
