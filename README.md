@@ -10,3 +10,5 @@ Models:
   (`Qwen3.8-Flash-Next-DFlash2-Q4_K_M.gguf`)
 
 State, measurements and open work: [PLAN.md](PLAN.md).
+
+`lfm3-1.7b.jl`: [LiquidAI/LFM3-1.7B-Base](https://huggingface.co/LiquidAI/LFM3-1.7B-Base) in BF16 on an RX 7700 XT, KernelAbstractions over AMDGPU.jl (`julia --project=env/amd -t 12 lfm3-1.7b.jl --model DIR --serve SOCK`). `test/lfm3-ref.jl` makes its reference data, `test/lfm3-desktop.jl` watches the desktop on the same card during a request.
