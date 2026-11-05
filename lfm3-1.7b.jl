@@ -1199,7 +1199,7 @@ if !isdefined(Main, :SLOTS)
     const SLOTS = Ref{Vector{Slot}}(Slot[])
     const PENDING = Rq[]; const SLK = ReentrantLock()      # requests waiting for a slot
     const GLK = ReentrantLock()                            # the GPU: a dispatch, or a command that needs it alone
-    const SCHEDSTOP = Ref(false); const SCHEDTASK = Ref{Any}(nothing)
+    const SCHEDSTOP = Ref(false); const SCHEDTASK = Ref{Any}(nothing); const SCHEDW = Ref{Any}(nothing)
     const SNAPB = Ref{Any}(nothing)                        # the rings' copies, allocated once
     const LASTRES = Ref((0.0, 0.0, 1.0))                   # the last dispatch's (instruction, idle, wall) seconds
 end
@@ -1299,7 +1299,6 @@ function dispatch!(PE::PEngine, H, mode; lg = nothing)
         smp |= q.sample[1] > 0; pen |= q.penalty != 1.0
     end
     nphase = (npre + rem + 3) * 340
-    DPMLOCK[] && dpm!("high")                              # the clocks up for the dispatch
     a = AMDGPU.zeros(UInt64, 3 + 2nphase); ah = zeros(UInt64, 3 + 2nphase); ah[1] = typemax(UInt64); ah[4:2:end] .= typemax(UInt64); up!(a, ah)
     up!(K.bar, [UInt32[0, 0, 0, NLRUN[]]; zeros(UInt32, 60)]); up!(K.rq, rq); up!(K.nem, H.nem); up!(K.apos, H.apos); up!(K.lim, H.lim)
     up!(K.sp, H.sp); up!(K.si, H.si); up!(K.rng, H.rng)
@@ -1316,7 +1315,6 @@ function dispatch!(PE::PEngine, H, mode; lg = nothing)
     end
     ins = union_len(iv); LASTRES[] = (ins, wall - ins, wall)
     AMDGPU.unsafe_free!(a); AMDGPU.unsafe_free!(ib)
-    DPMLOCK[] && dpm!("auto")                              # and back down while the model waits
     copyto!(H.apos, Array(K.apos)); copyto!(H.nem, Array(K.nem)); copyto!(H.rng, Array(K.rng))
     ab = Array(K.bar)[3]
     ab != 0 && error("persistent kernel aborted (a wait passed 10 s): $ab")
@@ -1340,10 +1338,61 @@ struct HostState
     apos::Vector{Int32}; lim::Vector{Int32}; nem::Vector{Int32}; sp::Vector{Float32}; si::Vector{Int32}; rng::Vector{UInt64}
 end
 HostState() = HostState(zeros(Int32, NR), zeros(Int32, NR), zeros(Int32, NR), zeros(Float32, 4NR), fill(Int32(-1), 2NR), ones(UInt64, NR))
+# ---- the display watchdog: the card also runs the desktop. While a dispatch runs this reads the rings' fences (debugfs, through
+# sudo) and the logs. A ring with work pending standing still for WSTALL seconds (the driver resets at 10), a stuck page flip, a
+# failed KWin commit or a reset ends the dispatch at the next forward and holds the slots for WPAUSE seconds. Chats wait; their
+# tokens are unchanged, since a slot resumes at the forward it stopped at.
+const WSTALL, WPAUSE = 3.0, 30.0
+if !isdefined(Main, :WPAUSED)
+    const WPAUSED = Ref(0.0)                               # no dispatch before this time
+    const WTRIPS = Ref(0)
+    const WDISPATCH = Ref(false)                           # a dispatch is running
+end
+function watch_trip!(PE::PEngine, why)
+    WPAUSED[] = time() + WPAUSE; WTRIPS[] += 1; yield!(PE)
+    println("display watchdog: ", why, ": the slots hold for $(Int(WPAUSE)) s"); flush(stdout)
+end
+function watch_loop(PE::PEngine)
+    dri = try
+        first(d for d in readlines(`sudo -n sh -c 'ls -d /sys/kernel/debug/dri/*/'`) if occursin("gfx_0.0.0", read(`sudo -n sh -c "cat $(d)amdgpu_fence_info 2>/dev/null; true"`, String)))
+    catch e
+        println("display watchdog: no access to the rings' fences (", sprint(showerror, e), "): logs only"); flush(stdout); ""
+    end
+    last = Dict{String,Tuple{UInt64,Float64}}(); since = ""; tl = 0.0
+    bad = "ring .*timeout|GPU reset|GPU Hang|flip_done|commit wait"
+    while !SCHEDSTOP[]
+        if !WDISPATCH[] || time() < WPAUSED[]
+            empty!(last); since = ""; sleep(0.25); continue
+        end
+        isempty(since) && (since = strip(read(`date '+%Y-%m-%d %H:%M:%S'`, String)))
+        now = time()
+        if !isempty(dri)
+            for m in eachmatch(r"--- ring \d+ \(((?:gfx|comp)[^)]*)\) ---\nLast signaled fence\s+0x([0-9a-f]+)\nLast emitted\s+0x([0-9a-f]+)", read(`sudo -n cat $(dri)amdgpu_fence_info`, String))
+                s = parse(UInt64, m[2], base = 16); e = parse(UInt64, m[3], base = 16); a = get(last, m[1], (s, now))
+                if s != a[1] || s == e
+                    last[m[1]] = (s, now)
+                else
+                    last[m[1]] = a
+                    now - a[2] > WSTALL && (watch_trip!(PE, "$(m[1]) stood still with work pending"); break)
+                end
+            end
+        end
+        if now - tl > 1.0
+            tl = now
+            k = read(pipeline(ignorestatus(`journalctl -k --since $since`), ignorestatus(`rg -i $bad`)), String)
+            u = read(pipeline(ignorestatus(`journalctl --user --since $since`), ignorestatus(`rg -c "Atomic commit failed"`)), String)
+            (!isempty(k) || !isempty(strip(u))) && time() >= WPAUSED[] && (watch_trip!(PE, isempty(k) ? "KWin's commits failed" : first(split(k, '\n'))); since = "")
+        end
+        sleep(0.25)
+    end
+end
 # The scheduler: what is waiting joins between dispatches, and a dispatch is told to end (word 13) when something is waiting.
 function sched_loop(PE::PEngine, H)
     while !SCHEDSTOP[]
         worked = false
+        if time() < WPAUSED[]                              # the display watchdog holds the slots
+            sleep(0.05); continue
+        end
         lock(GLK) do
             lock(SLK) do
                 keep = Rq[]
@@ -1363,9 +1412,10 @@ function sched_loop(PE::PEngine, H)
                     any(s -> s.rq === nothing, SLOTS[]) && !isempty(PENDING) && yield!(PE)
                 end
                 try
-                    dispatch!(PE, H, 0)
+                    WDISPATCH[] = true; dispatch!(PE, H, 0); WDISPATCH[] = false
                     settle!(PE, H)
                 catch e
+                    WDISPATCH[] = false
                     msg = sprint(showerror, e); println("dispatch: ", msg); flush(stdout)
                     for s in SLOTS[]
                         if s.rq !== nothing
@@ -1434,13 +1484,6 @@ end
 if !isdefined(Main, :LASTACCT)
     const LASTACCT = Ref{Vector{UInt64}}(UInt64[])        # the phase times of the last request, for profiling
     const LASTREQ = Ref{Any}(nothing)                     # the last request's (reqs, mode)
-end
-# the card's performance level (sysfs power_dpm_force_performance_level of its PCI device): forced high for a request's
-# dispatch, auto between requests; where the file isn't writable the level stays as it is
-dpmfile() = (b = AMDGPU.HIP.properties(AMDGPU.device()).pciBusID; "/sys/bus/pci/devices/0000:" * string(b, base = 16, pad = 2) * ":00.0/power_dpm_force_performance_level")
-dpm!(lv) = try write(dpmfile(), lv) catch end
-if !isdefined(Main, :DPMLOCK)
-    const DPMLOCK = Ref(true)                              # dpm on | off
 end
 if !isdefined(Main, :DYNCLAIM)
     const DYNCLAIM = Ref(true)                             # dyn 0 | 1
@@ -1536,18 +1579,18 @@ end
 function pinit()
     t0 = time()
     if SCHEDTASK[] !== nothing                             # the scheduler of the engine being replaced
-        SCHEDSTOP[] = true; wait(SCHEDTASK[]); SCHEDSTOP[] = false
+        SCHEDSTOP[] = true; wait(SCHEDTASK[]); wait(SCHEDW[]); SCHEDSTOP[] = false
     end
     PK[] === nothing || (foreach(a -> a isa ROCArray && AMDGPU.unsafe_free!(a), (getfield(PK[].K, f) for f in fieldnames(typeof(PK[].K)))); AMDGPU.HIP.hipHostFree(PK[].hx.c))
     PK[] = PEngine(SRV[].M)
     SLOTS[] = [Slot(0, 0, Int[], 0.0, nothing) for _ in 1:NR]; empty!(PENDING)
     SCHEDTASK[] = Threads.@spawn Base.invokelatest(sched_loop, PK[], HostState())
+    SCHEDW[] = Threads.@spawn Base.invokelatest(watch_loop, PK[])
     # (the first dispatch compiles nothing more: the occupancy query compiled the same kernel)
     @printf("persistent kernel: %d workgroups, %d positions a prefill forward, clock %.2f MHz, compiled in %.0f s\n", PK[].nwg, PK[].npos, PK[].hz / 1e6, time() - t0); flush(stdout)
 end
 function serve(dir, sock)
     M, g = load_engine(dir)
-    dpm!("auto")                                          # (a previous engine killed mid-request left it forced high)
     SRV[] = (M = M, g = g, vocab = vocabulary(dir), file = abspath(@__FILE__))
     pinit()
     lk = ReentrantLock()
@@ -1645,8 +1688,6 @@ function handle(c, line)
     elseif a[1] == "kl"
         n = parse(Int, a[2]); ids = Int.(reinterpret(Int32, read(replace(a[3], ".logits.bf16" => ".ids"))))
         kl(c, PK[], ids, a[3], n)
-    elseif a[1] == "dpm"                                 # dpm 0 | 1: lock the clocks high for each request
-        DPMLOCK[] = a[2] == "1"; println(c, "dpm ", DPMLOCK[])
     elseif a[1] == "dyn"                                 # dyn 0 | 1: wavefronts claim matrix items, or a fixed share each
         DYNCLAIM[] = a[2] == "1"; println(c, "dyn ", DYNCLAIM[])
     elseif a[1] == "nwg"                                 # nwg N: the workgroups the kernel uses
