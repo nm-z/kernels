@@ -1,6 +1,6 @@
 # lfm3-1.7b.jl: LFM3-1.7B-Base (lfm3: 13 gated short-conv, 6 full-attention and 5 sliding-attention layers, hidden 2048)
 # in BF16 on engi's Radeon RX 7700 XT (gfx1101, wave32, 12 GB GDDR6), KernelAbstractions over AMDGPU.jl. One cooperative
-# persistent kernel runs a whole request: the prefill (positions in blocks of 8) then the decode loop.
+# persistent kernel runs a whole request: the prefill (positions in blocks of 16) then the decode loop.
 # Model: LiquidAI/LFM3-1.7B-Base (model.safetensors, every tensor BF16).
 # Reports only: prefill tok/s, decode tok/s, idle time %.
 #   julia --project=env/amd -t 12 lfm3-1.7b.jl --model DIR --serve SOCK
@@ -89,7 +89,7 @@ const HD, NH, NKV = 128, 16, 4
 const NEPS, SCALE, LOG2E = 1.0f-5, Float32(128.0^-0.5), Float32(log2(MathConstants.e))
 const WIN, RING = 256, 288                                 # the sliding window; its ring (a window + a block, 9 row groups)
 const CRING = 16                                           # a conv layer's ring of inputs: 7 taps + a block
-const NPOS = 8                                             # positions a prefill forward
+const NPOS = 16                                             # positions a prefill forward
 const MAXCTX = 262144                                      # positions in the cache, shared by the requests of a dispatch
 const NR = 2                                               # requests at once
 const MAXGEN = 8192
@@ -136,29 +136,39 @@ const V4F = NTuple{4,VecElement{Float32}}
 end
 # P floats of x as one scalar load: invariant, so with a uniform address it is a load into SGPRs. It can't move above the
 # barrier that orders it after x was written, because the base comes through fresh, an opaque copy each phase.
-for P in (1, 2, 4, 8)
+for P in (1, 2, 4, 8, 16)
     ir = """
-        define <$P x float> @xv(ptr addrspace(1) %p) #0 {
-            %v = load <$P x float>, ptr addrspace(1) %p, align 4, !invariant.load !0
-            ret <$P x float> %v
+        define <$P x i32> @xv(ptr addrspace(1) %p) #0 {
+            %v = load <$P x i32>, ptr addrspace(1) %p, align 4, !invariant.load !0
+            ret <$P x i32> %v
         }
         attributes #0 = { alwaysinline }
         !0 = !{}
         """
     @eval @inline function xv(p::LP{Float32}, ::Val{$P})
-        v = Base.llvmcall(($ir, "xv"), NTuple{$P,VecElement{Float32}}, Tuple{LP{Float32}}, p)
+        v = Base.llvmcall(($ir, "xv"), NTuple{$P,VecElement{UInt32}}, Tuple{LP{Float32}}, p)
         ntuple(i -> v[i].value, Val($P))
     end
 end
 @inline fresh(p::LP{T}) where {T} = reinterpret(LP{T}, Base.llvmcall("""
     %r = call i64 asm sideeffect "; fresh \$0", "=s,0"(i64 %0)
     ret i64 %r""", Int64, Tuple{Int64}, reinterpret(Int64, p)))
-@inline fmav(a::NTuple{P,Float32}, w::Float32, x::NTuple{P,Float32}) where {P} = ntuple(p -> fma(w, x[p], a[p]), Val(P))
+# v_dot2_f32_bf16: a pair of BF16 weights on a pair of BF16 x, added to a Float32 sum, one instruction
+@inline dot2(a::UInt32, b::UInt32, c::Float32) = Base.llvmcall(("""
+    declare float @llvm.amdgcn.fdot2.f32.bf16(<2 x bfloat>, <2 x bfloat>, float, i1 immarg)
+    define float @d2(i32 %a, i32 %b, float %c) #0 {
+        %x = bitcast i32 %a to <2 x bfloat>
+        %y = bitcast i32 %b to <2 x bfloat>
+        %r = call float @llvm.amdgcn.fdot2.f32.bf16(<2 x bfloat> %x, <2 x bfloat> %y, float %c, i1 false)
+        ret float %r
+    }
+    attributes #0 = { alwaysinline }
+    """, "d2"), Float32, Tuple{UInt32,UInt32,Float32}, a, b, c)
+@inline dot2v(a::NTuple{P,Float32}, w::UInt32, x::NTuple{P,UInt32}) where {P} = ntuple(p -> dot2(w, x[p], a[p]), Val(P))
 # one wavefront: nch chunks of W (a chunk every cs bytes) against x (at a chunk's first element), the P sums of its lanes
 @inline function gchunk(acc::NTuple{P,Float32}, w::NTuple{4,UInt32}, x::LP{Float32}) where {P}
     Base.Cartesian.@nexprs 4 i -> begin
-        acc = fmav(acc, reinterpret(Float32, w[i] << 16), xv(x, Val(P))); x += 4P
-        acc = fmav(acc, reinterpret(Float32, w[i] & 0xffff0000), xv(x, Val(P))); x += 4P
+        acc = dot2v(acc, w[i], xv(x, Val(P))); x += 4P
     end
     acc
 end
@@ -169,11 +179,11 @@ const LOADS = 4                                            # chunks a wavefront'
     while n >= Int32(LOADS)
         w = ldg(q, cs, lo, Val(LOADS)); q += LOADS * cs; n -= Int32(LOADS)
         Base.Cartesian.@nexprs 4 g -> begin
-            acc = gchunk(acc, w[g], xq); xq += 32P
+            acc = gchunk(acc, w[g], xq); xq += 16P
         end
     end
     while n > Int32(0)
-        acc = gchunk(acc, ld128(q, lo), xq); xq += 32P; q += cs; n -= Int32(1)
+        acc = gchunk(acc, ld128(q, lo), xq); xq += 16P; q += cs; n -= Int32(1)
     end
     acc
 end
@@ -309,7 +319,7 @@ end
 @inline itemat(gw::Int32, base::Int32, NW::Int32) = base <= gw ? gw : gw + cld(base - gw, NW) * NW
 
 # ---- sums of squares: two banks per position, fixed point (2^-32), so the sum doesn't depend on who adds first ----
-const BSSQ = 8                                             # positions a bank
+const BSSQ = 16                                            # positions a bank
 @inline sq0!(A::KR, b, p) = st!(A.ssq, Int64(0), Int64(b) * BSSQ + p)
 @inline function sqadd!(A::KR, b, p, lane, s::Float32)
     t = KI.sub_group_reduce(+, s)
@@ -319,6 +329,10 @@ end
 @inline rinv(A::KR, b, p) = rsq(Float32(ld(A.ssq, Int64(b) * BSSQ + p)) * Float32(2.0^-32 / NE) + NEPS)
 
 # ---- phases (every workgroup calls each one; the work is spread over wavefronts) ----
+# a BF16 value at a byte offset; x's element k at position p of P: x for a GEMV is pairs, [k / 2][p], so a pair is one
+# dword for the dot product
+@inline stb!(b::LP{Float32}, v::Float32, o) = unsafe_store!(reinterpret(LP{UInt16}, b + o), (reinterpret(UInt32, v) >> 16) % UInt16)
+@inline stx!(A::KR, v::Float32, k::Int32, P, p) = stb!(A.xt, v, (Int64(k >> Int32(1)) * P + p) * 4 + (k & Int32(1)) * 2)
 # partial sums of matrix slot j0 + m - 1 of the group j0 ..: floats before it in part
 @inline function pof(A::KR, l, j0, m, P)
     o = Int64(0)
@@ -340,7 +354,7 @@ end
 # the items (32 rows, one K slice) of the matrices j0 .. of layer l, over every wavefront
 @inline function mat_item!(A::KR, W::LP{UInt8}, o::Int64, nc, ns, rows, G, sl, lane, xp::LP{Float32}, ::Val{P}) where {P}
     c0 = sl * Int32(CKS); nch = min(Int32(CKS), nc - c0)
-    acc = gemv(W + (Int64(G) * nc + c0) * CHUNK, (lane % UInt32) << 4, Int64(CHUNK), nch, xp + 4 * P * 8 * Int64(c0), Val(P))
+    acc = gemv(W + (Int64(G) * nc + c0) * CHUNK, (lane % UInt32) << 4, Int64(CHUNK), nch, xp + 16 * P * Int64(c0), Val(P))
     r = G * LANES + lane
     for p in 1:P
         st!(A.part, acc[p], o + (Int64(sl) * P + (p - 1)) * rows + r)
@@ -360,8 +374,10 @@ end
                 mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(2))
             elseif P == Int32(4)
                 mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(4))
-            else
+            elseif P == Int32(8)
                 mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(8))
+            else
+                mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(16))
             end
             did = true; g += NW
         end
@@ -422,7 +438,7 @@ end
         if G == Int32(0) && lane == Int32(0)
             sq0!(A, 0, p); st!(A.best, UInt64(0), q)
         end
-        st!(A.xt, bf(bf(ld(A.x, Int64(k) * P + p) * rs) * ld(w, k)), Int64(k) * Np + q)
+        stx!(A, bf(bf(ld(A.x, Int64(k) * P + p) * rs) * ld(w, k)), k, Np, q)
         g += NW
     end
     done!(A, seq, t0, true)
@@ -476,7 +492,7 @@ end
             s = 0.0f0
             for i in 1:6; s += w[i] * win[i]; end
             s += w[7] * h
-            st!(A.xt, bf(C * bf(s)), Int64(k) * P + p)
+            stx!(A, bf(C * bf(s)), k, P, p)
             st!(rg, (reinterpret(UInt32, h) >> 16) % UInt16, (Int64(r) * NE + k) * CRING + (pos & Int32(CRING - 1)))
             win = (win[2], win[3], win[4], win[5], win[6], h)
         end
@@ -492,7 +508,7 @@ end
     while g < n
         p = g ÷ Int32(NFF ÷ 32); G = g - p * Int32(NFF ÷ 32); k = G * LANES + lane
         a = bf(psum(A, Int64(0), ns, rows, P, p, k)); b = bf(psum(A, ou, ns, rows, P, p, k))
-        st!(A.xt, bf(bf(a * sigm(a)) * b), Int64(k) * P + p)
+        stx!(A, bf(bf(a * sigm(a)) * b), k, P, p)
         g += NW
     end
     done!(A, seq, t0, true)
@@ -569,7 +585,7 @@ end
                 o = (Int64(row >> Int32(5)) * 64 + j * Int32(16) + (c >> Int32(3))) * CHUNK + Int64(row & Int32(31)) * 16 + Int64(c & Int32(7)) * 2
                 unsafe_store!(reinterpret(LP{UInt16}, kc + o), (reinterpret(UInt32, y) >> 16) % UInt16)
             else
-                st!(A.qh, y, ((Int64(p) * 4 + (h >> Int32(2))) * 128 + c) * 4 + (h & Int32(3)))
+                stb!(A.qh, y, ((Int64(p) * 4 + (h >> Int32(2))) * 64 + (c >> Int32(1))) * 16 + (h & Int32(3)) * 4 + (c & Int32(1)) * 2)
             end
         end
         did = true; i += A.nwg
@@ -594,11 +610,12 @@ end
         g = itemat(gw, base, NW)
         while g < base + n
             it = g - base; j = it & Int32(3); gi = it >> Int32(2); G = G0 + gi; row = G * LANES + lane
-            acc = gemv(kc + (Int64(G) * 64 + j * Int32(16)) * CHUNK, lo, Int64(CHUNK), Int32(16), qb + ((Int64(p) * 4 + j) * 128) * 16, Val(4))
+            acc = gemv(kc + (Int64(G) * 64 + j * Int32(16)) * CHUNK, lo, Int64(CHUNK), Int32(16), qb + ((Int64(p) * 4 + j) * 64) * 16, Val(4))
             ts = full ? row - rb : ring_t(amax, row - rb)
             vis = ts >= Int32(0) && ts <= pos && (full || pos - ts < Int32(WIN))
-            e = ntuple(i -> vis ? exp2f(bf(bf(acc[i]) * SCALE) * LOG2E) : 0.0f0, Val(4))
-            st4!(A.eb + ((Int64(p) * 4 + j) * ERW + G * LANES) * 16 + lo, e)
+            e = ntuple(i -> vis ? bf(exp2f(bf(bf(acc[i]) * SCALE) * LOG2E)) : 0.0f0, Val(4))
+            eo = ((Int64(p) * 4 + j) * (ERW ÷ 2) + G * Int32(16) + (lane >> Int32(1))) * 16 + (lane & Int32(1)) * 2
+            Base.Cartesian.@nexprs 4 i -> stb!(A.eb, e[i], eo + (i - 1) * 4)
             se = ntuple(i -> KI.sub_group_reduce(+, e[i]), Val(4))
             lane == Int32(0) && st4!(A.es + ((Int64(p) * 4 + j) * EGW + gi) * 16, se)
             did = true; g += NW
@@ -634,7 +651,7 @@ end
         while g < base + n
             it = g - base; sl = it >> Int32(4); jg = it & Int32(15); j = jg >> Int32(2); Gc = jg & Int32(3)
             c0 = sl * Int32(CKS); nch = min(Int32(CKS), ntk - c0); tk = tk0 + c0
-            acc = gemv(vc + (Int64(tk) * 16 + jg) * CHUNK, lo, Int64(16 * CHUNK), nch, ebf + ((Int64(p) * 4 + j) * ERW + Int64(tk) * 8) * 16, Val(4))
+            acc = gemv(vc + (Int64(tk) * 16 + jg) * CHUNK, lo, Int64(16 * CHUNK), nch, ebf + ((Int64(p) * 4 + j) * (ERW ÷ 2) + Int64(tk) * 4) * 16, Val(4))
             st4!(A.pv + (((Int64(p) * 4 + j) * PVS + sl) * 128 + Gc * LANES) * 16 + lo, acc)
             did = true; g += NW
         end
@@ -654,7 +671,7 @@ end
         for sl in Int32(0):nsv-Int32(1)
             s += ld(b, Int64(sl) * 128 * 4)
         end
-        st!(A.xt, bf(bf(s / ld(A.et, Int64(p) * 16 + h)) * ld(A.gh, Int64(p) * NH + h)), (Int64(h) * HD + c) * P + p)
+        stx!(A, bf(bf(s / ld(A.et, Int64(p) * 16 + h)) * ld(A.gh, Int64(p) * NH + h)), h * Int32(HD) + c, P, p)
         did = true; g += NW
     end
     done!(A, seq, t0, did)
@@ -689,8 +706,10 @@ end
             head_item!(A, W, nc, g, lane, xp, pf, gen, Val(2))
         elseif Np == Int32(4)
             head_item!(A, W, nc, g, lane, xp, pf, gen, Val(4))
-        else
+        elseif Np == Int32(8)
             head_item!(A, W, nc, g, lane, xp, pf, gen, Val(8))
+        else
+            head_item!(A, W, nc, g, lane, xp, pf, gen, Val(16))
         end
         did = true; g += NW
     end
@@ -799,7 +818,7 @@ end
     gbar!(A)
     seq, false
 end
-@inline bigblock(n::Int32, npos::Int32) = n >= npos ? npos : n >= Int32(4) ? Int32(4) : n >= Int32(2) ? Int32(2) : Int32(1)
+@inline bigblock(n::Int32, npos::Int32) = n >= npos ? npos : n >= Int32(8) ? Int32(8) : n >= Int32(4) ? Int32(4) : n >= Int32(2) ? Int32(2) : Int32(1)
 # the requests (up to NR), one dispatch: each request's prefill (or scoring) in forwards of a block of positions, then the
 # decode steps of all of them together, a position a request a forward. One call of fwd! (one copy of the forward in the
 # kernel): each loop turn picks the next forward.
@@ -934,7 +953,7 @@ function KBuf(M::Model, npos)
     KBuf(ktable(M), z(NE * npos), z(NE * npos), z(NFF * npos),
         z(max(6144 * 4, 3104 * 4, 2 * 7680 * 4, 2048 * 15) * npos),
         z(npos * NKV * HD * 4), z(npos * 2 * 64 * 2), dev(rftab()), z(npos * NH), z(npos * NH),
-        z(npos * NKV * PVS * HD * 4), z(npos * NKV * ERW * 4), z(npos * NKV * EGW * 4),
+        z(npos * NKV * PVS * HD * 4), z(npos * NKV * (ERW ÷ 2) * 4), z(npos * NKV * EGW * 4),
         AMDGPU.zeros(UInt32, 64), AMDGPU.zeros(Int64, 2 * BSSQ), AMDGPU.zeros(UInt64, npos),
         zi(5NR), zi(npos), zi(npos), zi(npos), zi(NR), zi(NR))
 end
@@ -1101,7 +1120,7 @@ function prof(io, PE::PEngine)
     for (inp, ngen) in reqs
         a = 0; n = length(inp)
         while a < n
-            P = n - a >= PE.npos ? PE.npos : n - a >= 4 ? 4 : n - a >= 2 ? 2 : 1
+            P = n - a >= PE.npos ? PE.npos : n - a >= 8 ? 8 : n - a >= 4 ? 4 : n - a >= 2 ? 2 : 1
             fw!(mode == 1 || (a + P == n && ngen > 0), mode == 0); a += P
         end
     end
