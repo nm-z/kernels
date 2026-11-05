@@ -289,6 +289,7 @@ struct KR
     pen::Float32; seen::LP{UInt32}                         # any slot penalizes (1: none); a bit a vocabulary row, a slot
     sp::LP{Float32}; si::LP{Int32}                         # a slot's (temperature, top_k, top_p, penalty); its stop tokens
     apos::LP{Int32}; lim::LP{Int32}                        # a slot's next prompt position; where its prompt stops for now (a snapshot)
+    flow::Int32; part2::LP{Float32}; flg::LP{UInt32}       # dataflow (below): on; the sums of a matrix step that overlaps its producer; a slice's x items done
 end
 const SEENW = NV ÷ 32                                      # words of a request's seen-token bits
 const TABV = (NL + 1) * 8 * 4                              # where the vector addresses start in the table
@@ -322,7 +323,9 @@ const TOUT = Int64(1_000_000_000)                          # 10 s of the 100 MHz
     if tid() == Int32(0)
         g = ldmono(A.bar + 4)
         if atadd(A.bar, UInt32(1)) == UInt32(A.nwg - 1)
-            stmono(A.bar, UInt32(0)); stmono(A.bar + 128, UInt32(0)); atadd(A.bar + 4, UInt32(1))
+            stmono(A.bar, UInt32(0)); stmono(A.bar + 128, UInt32(0))
+            for f in Int32(0):Int32(15); stmono(A.flg + 4f, UInt32(0)); end
+            atadd(A.bar + 4, UInt32(1))
         else
             t0 = memtime()
             while ldacq(A.bar + 4) == g
@@ -399,13 +402,43 @@ end
         m == nm && return false, W, rows, nc, ns, Int32(0), o
     end
 end
-@inline function mat_ph!(A::KR, l::Int32, j0::Int32, nm::Int32, seq::Int32, P::Int32)
-    t0 = memtime(); did = false; lane = lanei(); gw = waveid(); NW = nwv(A); xp = fresh(A.xt); dyn = A.dyn != Int32(0)
+# Dataflow: a matrix step doesn't wait at a grid barrier for the step that makes its x. Each item of that step adds to its K
+# slice's counter (the barrier before it zeroed them) and a wavefront waits only for the slices of its items, so a matrix
+# starts on a slice as soon as that slice is ready. A step whose sums overlap a producer still reading sums (conv, activation)
+# writes the second buffer. Steps that need a whole result (a norm's sum of squares, what follows a matrix) keep the barrier.
+@inline function xdone!(A::KR, sl::Int32, lane::Int32)
+    A.flow == Int32(0) && return
+    fence_rel()
+    lane == Int32(0) && atadd(A.flg + 4sl, UInt32(1))
+    return
+end
+@inline function xready!(A::KR, sl::Int32, need::Int32)
+    tw = memtime()
+    while rdf(reinterpret(Int32, ldacq(A.flg + 4sl))) < need
+        memtime() - tw > TOUT && (atadd(A.bar + 8, UInt32(1)); break)
+        aborted(A) && break
+        ssleep()
+    end
+    fence_acq(); dcinv()
+end
+@generated function withpart2(A::KR)
+    f = [:(A.$(n == :part ? :part2 : n)) for n in fieldnames(KR)]
+    quote
+        $(Expr(:meta, :inline))
+        KR($(f...))
+    end
+end
+@inline function mat_ph!(A::KR, l::Int32, j0::Int32, nm::Int32, seq::Int32, P::Int32, need::Int32)
+    t0 = memtime(); did = false; lane = lanei(); gw = waveid(); NW = nwv(A); xp = fresh(A.xt); dyn = A.dyn != Int32(0); okm = UInt32(0); flow = A.flow != Int32(0)
     g = dyn ? claim(A, lane) : gw
     while true
         ok, W, rows, nc, ns, it, o = matof(A, l, j0, nm, g, P)
         ok || break
         G = it ÷ ns; sl = it - G * ns
+        if flow && (okm >> sl) & UInt32(1) == UInt32(0)    # (okm: the slices this wavefront has seen ready)
+            xready!(A, sl, need); okm |= UInt32(1) << sl; xp = fresh(A.xt)
+            did || (t0 = memtime())
+        end
         if P == Int32(1)
             mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(1))
         elseif P == Int32(2)
@@ -477,6 +510,7 @@ end
             sq0!(A, 0, p); st!(A.best, UInt64(0), q)
         end
         stx!(A, bf(bf(ld(A.x, Int64(k) * P + p) * rs) * ld(w, k)), k, Np, q)
+        xdone!(A, G >> Int32(4), lane)
         g += NW
     end
     done!(A, seq, t0, true)
@@ -534,6 +568,7 @@ end
             st!(rg, (reinterpret(UInt32, h) >> 16) % UInt16, (Int64(r) * NE + k) * CRING + (pos & Int32(CRING - 1)))
             win = (win[2], win[3], win[4], win[5], win[6], h)
         end
+        xdone!(A, g >> Int32(4), lane)
         g += NW
     end
     done!(A, seq, t0, true)
@@ -547,6 +582,7 @@ end
         p = g ÷ Int32(NFF ÷ 32); G = g - p * Int32(NFF ÷ 32); k = G * LANES + lane
         a = bf(psum(A, Int64(0), ns, rows, P, p, k)); b = bf(psum(A, ou, ns, rows, P, p, k))
         stx!(A, bf(bf(a * sigm(a)) * b), k, P, p)
+        xdone!(A, G >> Int32(4), lane)
         g += NW
     end
     done!(A, seq, t0, true)
@@ -710,6 +746,7 @@ end
             s += ld(b, Int64(sl) * 128 * 4)
         end
         stx!(A, bf(bf(s / ld(A.et, Int64(p) * 16 + h)) * ld(A.gh, Int64(p) * NH + h)), h * Int32(HD) + c, P, p)
+        xdone!(A, h >> Int32(2), lane)
         did = true; g += NW
     end
     done!(A, seq, t0, did)
@@ -743,6 +780,10 @@ end
 @inline function head_ph!(A::KR, seq::Int32, P::Int32, pf::Int32)
     t0 = memtime(); did = false; lane = lanei(); gw = waveid(); NW = nwv(A); gen = A.mode == Int32(0); xp = fresh(A.xt); Np = P - pf
     W, rows, nc, _ = mat(A, HEADL, Int32(0)); n = rows >> Int32(5); dyn = A.dyn != Int32(0); g = dyn ? claim(A, lane) : gw
+    if A.flow != Int32(0) && g < n                         # (the whole K a wavefront: every slice)
+        for f in Int32(0):Int32(3); xready!(A, f, Int32(16) * Np); end
+        xp = fresh(A.xt); t0 = memtime()
+    end
     if gen && A.temp > 0.0f0                               # the sampler's histogram and list start empty
         i = WGS * wgid() + tid(); i < Int32(NR) * HBINS && st!(A.hs, UInt32(0), i)
     end
@@ -928,10 +969,11 @@ end
     l = Int32(0); i = Int32(0)
     while l <= HEADL
         kind, j0, nm, vn = lstep(l, i)
+        sb = A.flow != Int32(0) && (kind == S_MAT || kind == S_HEAD)   # dataflow: this step waits for its x slice by slice
         (smp && l == HEADL && i >= Int32(2)) && (kind = S_HIST + i - Int32(2))
-        gbar!(A)
+        sb || gbar!(A)
         if kind == S_MAT
-            mat_ph!(A, l, j0, nm, seq, P)
+            (j0 == Int32(1) || j0 == Int32(4) || j0 == Int32(7)) ? mat_ph!(withpart2(A), l, j0, nm, seq, P, j0 == Int32(1) && !isattn(l) ? Int32(16) : Int32(16) * P) : mat_ph!(A, l, j0, nm, seq, P, Int32(16) * P)
         elseif kind == S_PRE
             if l == HEADL
                 pre_ph!(A, fvec(A, HEADL, 0), seq, P, pfirst)
@@ -939,7 +981,7 @@ end
                 pre_ph!(A, fvec(A, l, vn), seq, P, Int32(0))
             end
         elseif kind == S_SSQ
-            ssq_ph!(A, l, j0, seq, P)
+            ssq_ph!(withpart2(A), l, j0, seq, P)
         elseif kind == S_NORM
             norm_ph!(A, fvec(A, l, vn), seq, P)
         elseif kind == S_CONV
@@ -1111,6 +1153,7 @@ struct KBuf
     bar::ROCVector{UInt32}; ssq::ROCVector{Int64}; best::ROCVector{UInt64}
     sl::ROCVector{Float32}; hs::ROCVector{UInt32}; th::ROCVector{Float32}; cn::ROCVector{UInt32}; cd::ROCVector{Int32}; rng::ROCVector{UInt64}; seen::ROCVector{UInt32}
     sp::ROCVector{Float32}; si::ROCVector{Int32}; apos::ROCVector{Int32}; lim::ROCVector{Int32}
+    part2::ROCVector{Float32}; flg::ROCVector{UInt32}
     rq::ROCVector{Int32}; tok::ROCVector{Int32}; posr::ROCVector{Int32}; posa::ROCVector{Int32}; tks::ROCVector{Int32}; nem::ROCVector{Int32}
 end
 function KBuf(M::Model, npos)
@@ -1122,6 +1165,7 @@ function KBuf(M::Model, npos)
         AMDGPU.zeros(UInt32, 64), AMDGPU.zeros(Int64, 2 * BSSQ), AMDGPU.zeros(UInt64, npos),
         z(NR * NV), AMDGPU.zeros(UInt32, NR * HBINS), z(NR), AMDGPU.zeros(UInt32, NR), zi(NR * SCAND), AMDGPU.zeros(UInt64, NR), AMDGPU.zeros(UInt32, NR * SEENW),
         z(4NR), zi(2NR), zi(NR), zi(NR),
+        z(max(6144 * 4, 3104 * 4, 2 * 7680 * 4, 2048 * 15) * npos), AMDGPU.zeros(UInt32, 16),
         zi(5NR), zi(npos), zi(npos), zi(npos), zi(NR), zi(NR))
 end
 struct PEngine
@@ -1166,7 +1210,8 @@ function kargs(K::KBuf, hx::HostX, acct, inp, lg, nreq, mode, nwg, npos; smp = f
        Int32(nreq), Int32(mode), Int32(nwg), Int32(npos),
        smp ? 1.0f0 : 0.0f0, Int32(DYNCLAIM[] ? 1 : 0),
        lp(Float32, K.sl), lp(UInt32, K.hs), lp(Float32, K.th), lp(UInt32, K.cn), lp(Int32, K.cd), lp(UInt64, K.rng),
-       pen ? 1.1f0 : 1.0f0, lp(UInt32, K.seen), lp(Float32, K.sp), lp(Int32, K.si), lp(Int32, K.apos), lp(Int32, K.lim))
+       pen ? 1.1f0 : 1.0f0, lp(UInt32, K.seen), lp(Float32, K.sp), lp(Int32, K.si), lp(Int32, K.apos), lp(Int32, K.lim),
+       Int32(DFLOW[] ? 1 : 0), lp(Float32, K.part2), lp(UInt32, K.flg))
 end
 # The card also runs the desktop: a kernel holding every wave slot starves the graphics ring until its timeout resets it
 # (gfx_0.0.0 timeout, GPU Hang, at 108 of 108 workgroups). The cap leaves the graphics shaders their room.
@@ -1485,6 +1530,9 @@ if !isdefined(Main, :LASTACCT)
     const LASTACCT = Ref{Vector{UInt64}}(UInt64[])        # the phase times of the last request, for profiling
     const LASTREQ = Ref{Any}(nothing)                     # the last request's (reqs, mode)
 end
+if !isdefined(Main, :DFLOW)
+    const DFLOW = Ref(true)                                # flow 0 | 1
+end
 if !isdefined(Main, :DYNCLAIM)
     const DYNCLAIM = Ref(true)                             # dyn 0 | 1
 end
@@ -1688,6 +1736,8 @@ function handle(c, line)
     elseif a[1] == "kl"
         n = parse(Int, a[2]); ids = Int.(reinterpret(Int32, read(replace(a[3], ".logits.bf16" => ".ids"))))
         kl(c, PK[], ids, a[3], n)
+    elseif a[1] == "flow"                                # flow 0 | 1: matrix steps wait for their x slice by slice, or at a grid barrier
+        DFLOW[] = a[2] == "1"; println(c, "flow ", DFLOW[])
     elseif a[1] == "dyn"                                 # dyn 0 | 1: wavefronts claim matrix items, or a fixed share each
         DYNCLAIM[] = a[2] == "1"; println(c, "dyn ", DYNCLAIM[])
     elseif a[1] == "nwg"                                 # nwg N: the workgroups the kernel uses
