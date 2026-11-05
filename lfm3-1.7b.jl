@@ -173,6 +173,21 @@ end
     acc
 end
 @inline ldg(q::LP{UInt8}, cs::Int64, lo::UInt32, ::Val{L}) where {L} = ntuple(i -> ld128(q + (i - 1) * cs, lo), Val(L))
+# The value mix, where a row a position can't see meets a score of 0 in the same pair as a row it can. v_dot2_f32_bf16 is not
+# exactly rounded, so what such a row holds (a later row of a prefill block, an earlier request's row) reached the sum, by up
+# to a BF16 step of a logit. Exact multiply-adds here: a hidden row can't reach it, and a position's output doesn't depend on
+# the block it ran in or the request before it.
+@inline fma2v(a::NTuple{P,Float32}, w::UInt32, x::NTuple{P,UInt32}) where {P} = ntuple(p -> fma(reinterpret(Float32, w & 0xffff0000), reinterpret(Float32, x[p] & 0xffff0000), fma(reinterpret(Float32, w << 16), reinterpret(Float32, x[p] << 16), a[p])), Val(P))
+@inline function gemvx(W::LP{UInt8}, lo::UInt32, cs::Int64, nch::Int32, x::LP{Float32}, ::Val{P}) where {P}
+    acc = ntuple(_ -> 0.0f0, Val(P)); q = W; xq = x
+    for _ in Int32(1):nch
+        w = ld128(q, lo); q += cs
+        Base.Cartesian.@nexprs 4 i -> begin
+            acc = fma2v(acc, w[i], xv(xq, Val(P))); xq += 4P
+        end
+    end
+    acc
+end
 const LOADS = 4                                            # chunks a wavefront's load group: loads in flight together
 @inline function gemv(W::LP{UInt8}, lo::UInt32, cs::Int64, nch::Int32, x::LP{Float32}, ::Val{P}) where {P}
     acc = ntuple(_ -> 0.0f0, Val(P)); q = W; xq = x; n = nch
@@ -268,6 +283,10 @@ struct KR
     inp::LP{Int32}; rq::LP{Int32}; tok::LP{Int32}; posr::LP{Int32}; posa::LP{Int32}; tks::LP{Int32}; nem::LP{Int32}
     out::LP{Int32}; hf::LP{UInt32}
     nreq::Int32; mode::Int32; nwg::Int32; npos::Int32; stp1::Int32; stp2::Int32
+    a0::Int32                                              # the first position to run (a resumed prompt; one request)
+    temp::Float32; topk::Int32; topp::Float32              # sampling (temp 0: the argmax)
+    dyn::Int32                                             # wavefronts claim matrix items (0: a fixed share each)
+    sl::LP{Float32}; hs::LP{UInt32}; th::LP{Float32}; cn::LP{UInt32}; cd::LP{Int32}; rng::LP{UInt64}
 end
 const TABV = (NL + 1) * 8 * 4                              # where the vector addresses start in the table
 const ERW = MAXCTX + NR * RING + 32                        # rows of a score buffer (the arena, then the rings)
@@ -300,7 +319,7 @@ const TOUT = Int64(1_000_000_000)                          # 10 s of the 100 MHz
     if tid() == Int32(0)
         g = ldmono(A.bar + 4)
         if atadd(A.bar, UInt32(1)) == UInt32(A.nwg - 1)
-            stmono(A.bar, UInt32(0)); atadd(A.bar + 4, UInt32(1))
+            stmono(A.bar, UInt32(0)); stmono(A.bar + 128, UInt32(0)); atadd(A.bar + 4, UInt32(1))
         else
             t0 = memtime()
             while ldacq(A.bar + 4) == g
@@ -360,28 +379,42 @@ end
         st!(A.part, acc[p], o + (Int64(sl) * P + (p - 1)) * rows + r)
     end
 end
-@inline function mat_ph!(A::KR, l::Int32, j0::Int32, nm::Int32, seq::Int32, P::Int32)
-    t0 = memtime(); did = false; lane = lanei(); gw = waveid(); NW = nwv(A); xp = fresh(A.xt)
-    base = Int32(0); o = Int64(0)
-    for m in Int32(0):nm-Int32(1)
+# Dynamic dispatch of a phase's items: a wavefront claims its next item from a counter the barrier zeroes, so one held up (a
+# slow load, a desktop shader sharing its SIMD) takes fewer and the others more, or (dyn 0) each takes every NW-th.
+@inline function claim(A::KR, lane::Int32)
+    v = Int32(0)
+    lane == Int32(0) && (v = reinterpret(Int32, atadd(A.bar + 128, UInt32(1))))
+    rdf(v)
+end
+# (the matrix of the group j0 .. holding item g: found, its table entry, the item within it, the floats before its sums)
+@inline function matof(A::KR, l::Int32, j0::Int32, nm::Int32, g::Int32, P::Int32)
+    base = Int32(0); o = Int64(0); m = Int32(0)
+    while true
         W, rows, nc, ns = mat(A, l, j0 + m); n = (rows >> Int32(5)) * ns
-        g = itemat(gw, base, NW)
-        while g < base + n
-            it = g - base; G = it ÷ ns; sl = it - G * ns
-            if P == Int32(1)
-                mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(1))
-            elseif P == Int32(2)
-                mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(2))
-            elseif P == Int32(4)
-                mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(4))
-            elseif P == Int32(8)
-                mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(8))
-            else
-                mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(16))
-            end
-            did = true; g += NW
+        g < base + n && return true, W, rows, nc, ns, g - base, o
+        base += n; o += Int64(ns) * P * rows; m += Int32(1)
+        m == nm && return false, W, rows, nc, ns, Int32(0), o
+    end
+end
+@inline function mat_ph!(A::KR, l::Int32, j0::Int32, nm::Int32, seq::Int32, P::Int32)
+    t0 = memtime(); did = false; lane = lanei(); gw = waveid(); NW = nwv(A); xp = fresh(A.xt); dyn = A.dyn != Int32(0)
+    g = dyn ? claim(A, lane) : gw
+    while true
+        ok, W, rows, nc, ns, it, o = matof(A, l, j0, nm, g, P)
+        ok || break
+        G = it ÷ ns; sl = it - G * ns
+        if P == Int32(1)
+            mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(1))
+        elseif P == Int32(2)
+            mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(2))
+        elseif P == Int32(4)
+            mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(4))
+        elseif P == Int32(8)
+            mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(8))
+        else
+            mat_item!(A, W, o, nc, ns, rows, G, sl, lane, xp, Val(16))
         end
-        base += n; o += Int64(ns) * P * rows
+        did = true; g = dyn ? claim(A, lane) : g + NW
     end
     done!(A, seq, t0, did)
 end
@@ -651,7 +684,7 @@ end
         while g < base + n
             it = g - base; sl = it >> Int32(4); jg = it & Int32(15); j = jg >> Int32(2); Gc = jg & Int32(3)
             c0 = sl * Int32(CKS); nch = min(Int32(CKS), ntk - c0); tk = tk0 + c0
-            acc = gemv(vc + (Int64(tk) * 16 + jg) * CHUNK, lo, Int64(16 * CHUNK), nch, ebf + ((Int64(p) * 4 + j) * (ERW ÷ 2) + Int64(tk) * 4) * 16, Val(4))
+            acc = gemvx(vc + (Int64(tk) * 16 + jg) * CHUNK, lo, Int64(16 * CHUNK), nch, ebf + ((Int64(p) * 4 + j) * (ERW ÷ 2) + Int64(tk) * 4) * 16, Val(4))
             st4!(A.pv + (((Int64(p) * 4 + j) * PVS + sl) * 128 + Gc * LANES) * 16 + lo, acc)
             did = true; g += NW
         end
@@ -686,6 +719,7 @@ end
     acc = gemv(W + Int64(G) * nc * CHUNK, (lane % UInt32) << 4, Int64(CHUNK), nc, xp, Val(N)); r = G * LANES + lane
     for q in 0:N-1
         v = bf(acc[q+1])
+        (gen && A.temp > 0.0f0) && st!(A.sl, v, Int64(q) * NV + r)
         if gen
             ks = ordk(v)
             if ks >= (ld(A.best, q) >> 32) % UInt32
@@ -698,7 +732,13 @@ end
 end
 @inline function head_ph!(A::KR, seq::Int32, P::Int32, pf::Int32)
     t0 = memtime(); did = false; lane = lanei(); gw = waveid(); NW = nwv(A); gen = A.mode == Int32(0); xp = fresh(A.xt); Np = P - pf
-    W, rows, nc, _ = mat(A, HEADL, Int32(0)); n = rows >> Int32(5); g = gw
+    W, rows, nc, _ = mat(A, HEADL, Int32(0)); n = rows >> Int32(5); dyn = A.dyn != Int32(0); g = dyn ? claim(A, lane) : gw
+    if gen && A.temp > 0.0f0                               # the sampler's histogram and list start empty
+        i = WGS * wgid() + tid(); i < Int32(NR) * HBINS && st!(A.hs, UInt32(0), i)
+    end
+    if gen && A.temp > 0.0f0 && wgid() == Int32(0)
+        t = tid(); t < Int32(NR) && st!(A.cn, UInt32(0), t)
+    end
     while g < n
         if Np == Int32(1)
             head_item!(A, W, nc, g, lane, xp, pf, gen, Val(1))
@@ -711,23 +751,117 @@ end
         else
             head_item!(A, W, nc, g, lane, xp, pf, gen, Val(16))
         end
-        did = true; g += NW
+        did = true; g = dyn ? claim(A, lane) : g + NW
     end
     done!(A, seq, t0, did)
 end
 @inline isstop(A::KR, t) = t == A.stp1 || t == A.stp2
+@inline function tok_out!(A::KR, ix::Int32, r::Int32)       # request r's next token (its last at a stop token)
+    st!(A.tks, ix, r); n = ld(A.nem, r)
+    st!(A.out, ix, ld(A.rq, 5r + Int32(3)) + n)
+    st!(A.nem, isstop(A, ix) ? ld(A.rq, 5r + Int32(2)) : n + Int32(1), r)
+end
 # a request's next token (its last at a stop token), a lane a position
 @inline function tok_ph!(A::KR, seq::Int32, P::Int32, pf::Int32)
     (wgid() == Int32(0) && tid() < P - pf) || return
     t0 = memtime(); q = tid()
-    ix = reinterpret(Int32, ~(ld(A.best, q) % UInt32)); r = ld(A.posr, pf + q); st!(A.tks, ix, r); n = ld(A.nem, r)
-    st!(A.out, ix, ld(A.rq, 5r + Int32(3)) + n)
-    st!(A.nem, isstop(A, ix) ? ld(A.rq, 5r + Int32(2)) : n + Int32(1), r)
+    tok_out!(A, reinterpret(Int32, ~(ld(A.best, q) % UInt32)), ld(A.posr, pf + q))
     done!(A, seq, t0, true)
 end
 
+# ---- sampling: temperature, top-k, top-p, as flashd's sample line asks. The head's phase also keeps the logits (sl); a
+# histogram below each position's maximum finds the k-th largest without sorting 128000 rows; the rows at or above it go
+# into a short list; one lane a position sorts that list in shared memory and draws. A row more than 22 temperatures below
+# the maximum has a probability under 3e-10, so the histogram stops there. The draw depends on the seed alone: the list's
+# order (who appended first) does not reach the sort.
+const SMARGIN, HBINS, SCAND, SKMAX = 22.0f0, Int32(256), Int32(128), Int32(64)
+@inline function bestv(A::KR, q::Int32)                    # a position's maximum, from the argmax's order-preserving code
+    u = reinterpret(UInt32, rdf(reinterpret(Int32, (ld(A.best, q) >> 32) % UInt32)))
+    reinterpret(Float32, u >> 31 != UInt32(0) ? u & 0x7fffffff : ~u)
+end
+@inline function hist_ph!(A::KR, seq::Int32, P::Int32, pf::Int32)
+    t0 = memtime(); lane = lanei(); gw = waveid(); NW = nwv(A); Np = P - pf; nq = Int32(NV ÷ 32); w = A.temp * SMARGIN / Float32(HBINS)
+    g = gw; did = false
+    while g < nq * Np
+        q = g ÷ nq; r = (g - q * nq) * LANES + lane; mx = bestv(A, q)
+        d = (mx - ld(A.sl, Int64(q) * NV + r)) / w
+        if d < Float32(HBINS)
+            atadd(A.hs + 4 * (Int64(q) * HBINS + unsafe_trunc(Int32, d)), UInt32(1))
+        end
+        did = true; g += NW
+    end
+    done!(A, seq, t0, did)
+end
+@inline function thr_ph!(A::KR, seq::Int32, P::Int32, pf::Int32)
+    (wgid() == Int32(0) && tid() < P - pf) || return
+    t0 = memtime(); q = tid(); w = A.temp * SMARGIN / Float32(HBINS); k = min(A.topk, SKMAX); c = Int32(0); b = Int32(0)
+    while b < HBINS - Int32(1)
+        c += reinterpret(Int32, ld(A.hs, Int64(q) * HBINS + b))
+        if c >= k
+            # (more than the list holds: the bin before, so what arrives first never decides what is listed)
+            (c > SCAND && b > Int32(0)) && (b -= Int32(1))
+            break
+        end
+        b += Int32(1)
+    end
+    st!(A.th, unordf(ld(A.best, q)) - Float32(b + Int32(1)) * w, q)
+    done!(A, seq, t0, true)
+end
+@inline function unordf(k::UInt64)                         # (a lane's own maximum)
+    u = (k >> 32) % UInt32
+    reinterpret(Float32, u >> 31 != UInt32(0) ? u & 0x7fffffff : ~u)
+end
+@inline function cand_ph!(A::KR, seq::Int32, P::Int32, pf::Int32)
+    t0 = memtime(); lane = lanei(); gw = waveid(); NW = nwv(A); Np = P - pf; nq = Int32(NV ÷ 32)
+    g = gw; did = false
+    while g < nq * Np
+        q = g ÷ nq; r = (g - q * nq) * LANES + lane
+        if ld(A.sl, Int64(q) * NV + r) > ld(A.th, q)
+            i = reinterpret(Int32, atadd(A.cn + 4q, UInt32(1)))
+            i < SCAND && st!(A.cd, r, Int64(q) * SCAND + i)
+        end
+        did = true; g += NW
+    end
+    done!(A, seq, t0, did)
+end
+@inline function stok_ph!(A::KR, lds2, seq::Int32, P::Int32, pf::Int32)
+    (wgid() == Int32(0) && tid() < P - pf) || return
+    t0 = memtime(); q = tid(); n = min(reinterpret(Int32, ld(A.cn, q)), SCAND); o = Int(q) * 2 * Int(SCAND)
+    i = Int32(0)
+    while i < n                                            # insertion sort: the value down, the row up on a tie
+        r = ld(A.cd, Int64(q) * SCAND + i); v = ld(A.sl, Int64(q) * NV + r); j = i
+        while j > Int32(0)
+            vp = @inbounds lds2[o+2Int(j)-1]; rp = reinterpret(Int32, @inbounds lds2[o+2Int(j)])
+            (vp > v || (vp == v && rp < r)) && break
+            @inbounds lds2[o+2Int(j)+1] = vp; @inbounds lds2[o+2Int(j)+2] = reinterpret(Float32, rp); j -= Int32(1)
+        end
+        @inbounds lds2[o+2Int(j)+1] = v; @inbounds lds2[o+2Int(j)+2] = reinterpret(Float32, r); i += Int32(1)
+    end
+    k = min(n, min(A.topk, SKMAX)); mx = @inbounds lds2[o+1]; s = 0.0f0; i = Int32(0); m = Int32(0)
+    while i < k                                            # the top k, then as many as reach top_p of them
+        s += exp2f((@inbounds(lds2[o+2Int(i)+1]) - mx) / A.temp * LOG2E); i += Int32(1)
+    end
+    c = 0.0f0; i = Int32(0)
+    while i < k
+        c += exp2f((@inbounds(lds2[o+2Int(i)+1]) - mx) / A.temp * LOG2E); i += Int32(1); m = i
+        c >= A.topp * s && break
+    end
+    rq = ld(A.posr, pf + q); x = ld(A.rng, rq)              # xorshift64*
+    x ⊻= x >> 12; x ⊻= x << 25; x ⊻= x >> 27; st!(A.rng, x, rq)
+    u = Float32(((x * 0x106689d45497fdb5) >> 40) % UInt32) * Float32(2.0^-24) * c
+    c2 = 0.0f0; i = Int32(0); ix = reinterpret(Int32, @inbounds lds2[o+2])
+    while i < m
+        c2 += exp2f((@inbounds(lds2[o+2Int(i)+1]) - mx) / A.temp * LOG2E)
+        if u < c2
+            ix = reinterpret(Int32, @inbounds lds2[o+2Int(i)+2]); break
+        end
+        i += Int32(1)
+    end
+    tok_out!(A, ix, rq)
+    done!(A, seq, t0, true)
+end
 # ---- the forward as a step program: each phase once in the kernel ----
-const S_PRE, S_MAT, S_CONV, S_SSQ, S_NORM, S_ACT, S_APREP, S_SCORE, S_VMIX, S_ACOMB, S_HEAD, S_TOK = Int32.(1:12)
+const S_PRE, S_MAT, S_CONV, S_SSQ, S_NORM, S_ACT, S_APREP, S_SCORE, S_VMIX, S_ACOMB, S_HEAD, S_TOK, S_HIST, S_THR, S_CAND, S_STOK = Int32.(1:16)
 # step i of layer l: (kind, first matrix slot, matrices, the vector a norm reads)
 @inline function lstep(l::Int32, i::Int32)
     if l == HEADL
@@ -759,7 +893,7 @@ const S_PRE, S_MAT, S_CONV, S_SSQ, S_NORM, S_ACT, S_APREP, S_SCORE, S_VMIX, S_AC
     i == Int32(8) && return S_SSQ, Int32(7), Int32(0), Int32(0)
     return S_NORM, Int32(0), Int32(0), Int32(3)                     # post_ffn_norm
 end
-@inline nsteps(l::Int32, gen::Bool) = l == HEADL ? (gen ? Int32(3) : Int32(2)) : isattn(l) ? Int32(15) : Int32(12)
+@inline nsteps(l::Int32, gen::Bool, smp::Bool) = l == HEADL ? (gen ? (smp ? Int32(6) : Int32(3)) : Int32(2)) : isattn(l) ? Int32(15) : Int32(12)
 # A cancel (host word 13 set by the host): workgroup 0 posts the decision for this check (bar word 19); after the next
 # barrier every workgroup reads it (stopped).
 @inline function cancelq!(A::KR)
@@ -769,13 +903,14 @@ end
 end
 @inline stopped(A::KR) = rdf(reinterpret(Int32, ldmono(A.bar + 76))) != Int32(0)
 # head: the head over positions pfirst .. P - 1; pre: a prefill forward (a block of one request; a cancel check a layer)
-@inline function fwd!(A::KR, lds, P::Int32, seq::Int32, head::Bool, pfirst::Int32, pre::Bool)
-    gen = A.mode == Int32(0)
+@inline function fwd!(A::KR, lds, lds2, P::Int32, seq::Int32, head::Bool, pfirst::Int32, pre::Bool)
+    gen = A.mode == Int32(0); smp = gen && A.temp > 0.0f0
     emb_ph!(A, seq, P); seq += Int32(1)
     nlr = rdf(reinterpret(Int32, ldacq(A.bar + 12))); nl = nlr == Int32(0) ? Int32(NL) : nlr   # bar[3]: layers to run (0: all), for debugging
     l = Int32(0); i = Int32(0); pchk = false
     while l <= HEADL
         kind, j0, nm, vn = lstep(l, i)
+        (smp && l == HEADL && i >= Int32(2)) && (kind = S_HIST + i - Int32(2))
         gbar!(A)
         (pchk && stopped(A)) && return seq, true
         chk = pre && i == Int32(0) && l < HEADL
@@ -804,13 +939,21 @@ end
             vmix_ph!(A, l, seq, P, pre)
         elseif kind == S_ACOMB
             acomb_ph!(A, l, seq, P, pre)
+        elseif kind == S_HIST
+            hist_ph!(A, seq, P, pfirst)
+        elseif kind == S_THR
+            thr_ph!(A, seq, P, pfirst)
+        elseif kind == S_CAND
+            cand_ph!(A, seq, P, pfirst)
+        elseif kind == S_STOK
+            stok_ph!(A, lds2, seq, P, pfirst)
         elseif kind == S_HEAD
             head_ph!(A, seq, P, pfirst)
         else
             tok_ph!(A, seq, P, pfirst)
         end
         seq += Int32(1); pchk = chk; i += Int32(1)
-        if i == nsteps(l, gen)
+        if i == nsteps(l, gen, smp)
             i = Int32(0)
             l = l < nl - Int32(1) ? l + Int32(1) : l < HEADL ? (head ? HEADL : HEADL + Int32(1)) : HEADL + Int32(1)
         end
@@ -823,9 +966,9 @@ end
 # decode steps of all of them together, a position a request a forward. One call of fwd! (one copy of the forward in the
 # kernel): each loop turn picks the next forward.
 @kernel unsafe_indices = true function k_req!(A)
-    lds = @localmem Float32 (132,)
+    lds = @localmem Float32 (132,); lds2 = @localmem Float32 (512,)
     tid() == Int32(0) && umin64(A.acct, memtime())
-    seq = Int32(0); r = Int32(0); a = Int32(0); prefill = true; pdone = Int32(0); stop = false
+    seq = Int32(0); r = Int32(0); a = A.a0; prefill = true; pdone = A.a0; stop = false
     while true
         cancelq!(A); gbar!(A)                              # a cancel check each forward
         stopped(A) && break
@@ -838,7 +981,7 @@ end
             P = bigblock(ninp - a, A.npos)
             head = A.mode == Int32(1) || (a + P == ninp && ngen > Int32(0)); pfirst = A.mode == Int32(1) ? Int32(0) : P - Int32(1)
             setpos_ph!(A, r, a, P); gbar!(A)
-            seq, stop = fwd!(A, lds, P, seq, head, pfirst, true)
+            seq, stop = fwd!(A, lds, lds2, P, seq, head, pfirst, true)
             stop && break
             # the prompt positions run so far, for the host's progress lines (host counter word 14)
             pdone += P; (wgid() == Int32(0) && tid() == Int32(0)) && strel_sys(A.hf + 56, UInt32(pdone))
@@ -852,7 +995,7 @@ end
             end
             P == Int32(0) && break
             setpos_ph!(A, Int32(-1), Int32(0), P); gbar!(A)
-            seq, stop = fwd!(A, lds, P, seq, true, Int32(0), false)
+            seq, stop = fwd!(A, lds, lds2, P, seq, true, Int32(0), false)
             stop && break
         end
     end
@@ -946,6 +1089,7 @@ struct KBuf
     qh::ROCVector{Float32}; rc::ROCVector{Float32}; rf::ROCVector{Float32}; gh::ROCVector{Float32}; et::ROCVector{Float32}; pv::ROCVector{Float32}
     eb::ROCVector{Float32}; es::ROCVector{Float32}
     bar::ROCVector{UInt32}; ssq::ROCVector{Int64}; best::ROCVector{UInt64}
+    sl::ROCVector{Float32}; hs::ROCVector{UInt32}; th::ROCVector{Float32}; cn::ROCVector{UInt32}; cd::ROCVector{Int32}; rng::ROCVector{UInt64}
     rq::ROCVector{Int32}; tok::ROCVector{Int32}; posr::ROCVector{Int32}; posa::ROCVector{Int32}; tks::ROCVector{Int32}; nem::ROCVector{Int32}
 end
 function KBuf(M::Model, npos)
@@ -955,6 +1099,7 @@ function KBuf(M::Model, npos)
         z(npos * NKV * HD * 4), z(npos * 2 * 64 * 2), dev(rftab()), z(npos * NH), z(npos * NH),
         z(npos * NKV * PVS * HD * 4), z(npos * NKV * (ERW ÷ 2) * 4), z(npos * NKV * EGW * 4),
         AMDGPU.zeros(UInt32, 64), AMDGPU.zeros(Int64, 2 * BSSQ), AMDGPU.zeros(UInt64, npos),
+        z(NR * NV), AMDGPU.zeros(UInt32, NR * HBINS), z(NR), AMDGPU.zeros(UInt32, NR), zi(NR * SCAND), AMDGPU.zeros(UInt64, NR),
         zi(5NR), zi(npos), zi(npos), zi(npos), zi(NR), zi(NR))
 end
 struct PEngine
@@ -989,14 +1134,16 @@ function occupancy(k, A)
     nb = Ref{Cint}(0); AMDGPU.HIP.hipModuleOccupancyMaxActiveBlocksPerMultiprocessor(nb, kf.kern.kernel.fun, WGS, 0)
     Int(nb[]) * KI.multiprocessor_count(b)
 end
-function kargs(K::KBuf, hx::HostX, acct, inp, lg, nreq, mode, nwg, npos; stops = (-1, -1))
+function kargs(K::KBuf, hx::HostX, acct, inp, lg, nreq, mode, nwg, npos; stops = (-1, -1), start = 0, sample = (0.0, 0, 1.0))
     KR(lp(Int64, K.tab), lp(Float32, K.x), lp(Float32, K.o), lp(Float32, K.xt), lp(Float32, K.part),
        lp(Float32, K.qh), lp(Float32, K.rc), lp(Float32, K.rf), lp(Float32, K.gh), lp(Float32, K.et), lp(Float32, K.pv),
        lp(Float32, K.eb), lp(Float32, K.es), lg === nothing ? lp(Float32, K.x) : lp(Float32, lg),
        lp(UInt32, K.bar), lp(UInt64, acct), lp(Int64, K.ssq), lp(UInt64, K.best),
        lp(Int32, inp), lp(Int32, K.rq), lp(Int32, K.tok), lp(Int32, K.posr), lp(Int32, K.posa), lp(Int32, K.tks), lp(Int32, K.nem),
        lp(Int32, hx.c + hx.tok), lp(UInt32, hx.c + hx.out),
-       Int32(nreq), Int32(mode), Int32(nwg), Int32(npos), Int32(stops[1]), Int32(stops[2]))
+       Int32(nreq), Int32(mode), Int32(nwg), Int32(npos), Int32(stops[1]), Int32(stops[2]), Int32(start),
+       Float32(sample[1]), Int32(sample[2]), Float32(sample[3]), Int32(DYNCLAIM[] ? 1 : 0),
+       lp(Float32, K.sl), lp(UInt32, K.hs), lp(Float32, K.th), lp(UInt32, K.cn), lp(Int32, K.cd), lp(UInt64, K.rng))
 end
 # The card also runs the desktop: a kernel holding every wave slot starves the graphics ring until its timeout resets it
 # (gfx_0.0.0 timeout, GPU Hang, at 108 of 108 workgroups). The cap leaves the graphics shaders their room.
@@ -1014,7 +1161,7 @@ end
 # request's input (the logits of every position into lg). Returns each request's tokens, (instruction, idle, wall)
 # seconds, and the prefill and decode seconds.
 # (ctl: zero the progress and cancel words 12 .. 15 too; chat zeroes them itself, before it can see an EOF)
-function request!(PE::PEngine, reqs, mode::Int; lg = nothing, stops = (-1, -1), ctl = true)
+function request!(PE::PEngine, reqs, mode::Int; lg = nothing, stops = (-1, -1), ctl = true, start = 0, sample = (0.0, 0, 1.0), seed = UInt64(1))
     K = PE.K; npos = PE.npos; nr = length(reqs)
     1 <= nr <= NR || error("$nr requests: at most $NR at once")
     rb = Int32[]; b = 0
@@ -1026,17 +1173,22 @@ function request!(PE::PEngine, reqs, mode::Int; lg = nothing, stops = (-1, -1), 
     sum(last, reqs) <= PE.maxgen || error("$(sum(last, reqs)) tokens: the output holds $(PE.maxgen)")
     inp = Int32.(vcat(first.(reqs)...)); ioff = cumsum([0; length.(first.(reqs))]); ooff = cumsum([0; last.(reqs)])
     rq = Int32.(vcat([[ioff[r], length(reqs[r][1]), reqs[r][2], ooff[r], rb[r]] for r in 1:nr]...))
-    nphase = (sum(cld(length(i), 1) for (i, _) in reqs) + maximum(last, reqs) + 2) * 340
+    nphase = (sum((length(i) - start) ÷ npos + 5 for (i, _) in reqs) + maximum(last, reqs) + 2) * 340
     for i in 1:(ctl ? 8 : 6); unsafe_store!(Ptr{UInt64}(PE.hx.c + PE.hx.out), 0, i); end   # the counters
     DPMLOCK[] && dpm!("high")                              # the clocks up for the request
     a = AMDGPU.zeros(UInt64, 3 + 2nphase); ah = zeros(UInt64, 3 + 2nphase); ah[1] = typemax(UInt64); ah[4:2:end] .= typemax(UInt64); up!(a, ah)
     up!(K.bar, [UInt32[0, 0, 0, NLRUN[]]; zeros(UInt32, 60)]); up!(K.rq, rq); up!(K.nem, zeros(Int32, NR))
-    for rg in PE.rings; fill!(rg, 0x0000); end             # a request starts from zero state
+    # a request starts from zero state, a resumed one from its snapshot (restored by resume!)
+    if start == 0
+        SNAP[] = nothing
+        for rg in PE.rings; fill!(rg, 0x0000); end
+    end
     ib = dev(inp)
-    A = kargs(K, PE.hx, a, ib, lg, nr, mode, PE.nwg, npos; stops)
+    up!(K.rng, UInt64[(x = (seed + UInt64(i) * 0x9e3779b97f4a7c15) * 0xbf58476d1ce4e5b9; (x ⊻ (x >> 31)) | 1) for i in 1:NR])
+    A = kargs(K, PE.hx, a, ib, lg, nr, mode, PE.nwg, npos; stops, start, sample)
     k_req!(ROCBackend(), Int(WGS))(A; ndrange = Int(WGS) * PE.nwg)
     AMDGPU.synchronize()
-    LASTREQ[] = (reqs, mode)
+    LASTREQ[] = (reqs, mode, start, sample[1] > 0)
     hz = PE.hz; ah = Array(a); wall = (ah[2] - ah[1]) / hz; iv = Tuple{Float64,Float64}[]
     ah[3] == 0 && (ah[3] = ah[2])                         # (cancelled during the prefill)
     tpre = (ah[3] - ah[1]) / hz; tdec = (ah[2] - ah[3]) / hz; LASTACCT[] = ah
@@ -1052,6 +1204,42 @@ function request!(PE::PEngine, reqs, mode::Int; lg = nothing, stops = (-1, -1), 
     ab != 0 && error("persistent kernel aborted (a wait passed 10 s): $ab")
     toks = [[Int(unsafe_load(Ptr{Int32}(PE.hx.c + PE.hx.tok), ooff[r] + i)) for i in 1:reqs[r][2]] for r in 1:nr]
     toks, res, tpre, tdec
+end
+# ---- the prompt cache: a conversation's next turn starts with this turn's prompt, up to the position flashd names (snap).
+# The arena's rows below a position stay as they are until a request starts over at position 0, so a resumed request needs
+# only what the rings hold at that position: the conv inputs and the sliding-attention rows. The prompt runs in two
+# dispatches, up to the snapshot and from it, and between them the rings are copied. One snapshot: the last conversation's.
+if !isdefined(Main, :SNAP)
+    const SNAP = Ref{Any}(nothing)                         # (the prompt ids up to the snapshot)
+    const SNAPB = Ref{Any}(nothing)                        # the rings' copies, allocated once
+end
+function ringcopy!(PE::PEngine, save::Bool)
+    M = PE.M; live = [M.ring; [M.kc[aidx(l)+1] for l in 0:NL-1 if isattn(l) && !isfull(l)]; [M.vc[aidx(l)+1] for l in 0:NL-1 if isattn(l) && !isfull(l)]]
+    SNAPB[] === nothing && (SNAPB[] = [similar(a) for a in live])
+    for (a, b) in zip(live, SNAPB[])
+        save ? copyto!(b, a) : copyto!(a, b)
+    end
+    AMDGPU.synchronize()
+end
+function cached_request!(PE::PEngine, ids, nnew, stops, snap, cancel, sample, seed)
+    s = SNAP[]; n = length(ids); start = 0
+    if s !== nothing && length(s) < n && view(ids, 1:length(s)) == s
+        start = length(s); ringcopy!(PE, false)
+    end
+    RESUMED[] = start; tp0 = 0.0; snapped = 0
+    if snap > start && snap < n                            # up to the snapshot, then a copy of the rings
+        _, _, tp0, _ = request!(PE, [(ids[1:snap], 0)], 0; stops, ctl = false, start)
+        unsafe_load(cancel) == 0 && (ringcopy!(PE, true); SNAP[] = ids[1:snap]; snapped = snap)
+        start = snap
+    end
+    if unsafe_load(cancel) != 0
+        return [Int[]], (0.0, 0.0, 1.0), tp0, 0.0, RESUMED[], snapped
+    end
+    toks, res, tp, td = request!(PE, [(ids, nnew)], 0; stops, ctl = false, start, sample, seed)
+    toks, res, tp0 + tp, td, RESUMED[], snapped
+end
+if !isdefined(Main, :RESUMED)
+    const RESUMED = Ref(0)                                 # the positions the current chat took from the cache
 end
 function union_len(iv)                                     # total length of a set of intervals
     isempty(iv) && return 0.0
@@ -1075,6 +1263,9 @@ dpmfile() = (b = AMDGPU.HIP.properties(AMDGPU.device()).pciBusID; "/sys/bus/pci/
 dpm!(lv) = try write(dpmfile(), lv) catch end
 if !isdefined(Main, :DPMLOCK)
     const DPMLOCK = Ref(true)                              # dpm on | off
+end
+if !isdefined(Main, :DYNCLAIM)
+    const DYNCLAIM = Ref(true)                             # dyn 0 | 1
 end
 if !isdefined(Main, :NLRUN)
     const NLRUN = Ref(0)                                   # layers the kernel runs (0: all), for debugging
@@ -1114,11 +1305,11 @@ function prof(io, PE::PEngine)
         for l in 0:NL-1, i in 0:(isattn(l) ? 14 : 11)
             k = lstep(Int32(l), Int32(i)); push!(seqk, k[1] == S_MAT ? "mat$(k[2])" : kn[k[1]])
         end
-        head && (push!(seqk, "pre"); push!(seqk, "head"); gen && push!(seqk, "tok"))
+        head && (push!(seqk, "pre"); push!(seqk, "head"); gen && (smp ? append!(seqk, ["hist", "thr", "cand", "stok"]) : push!(seqk, "tok")))
     end
-    reqs, mode = LASTREQ[]
+    reqs, mode, start, smp = LASTREQ[]
     for (inp, ngen) in reqs
-        a = 0; n = length(inp)
+        a = start; n = length(inp)
         while a < n
             P = n - a >= PE.npos ? PE.npos : n - a >= 8 ? 8 : n - a >= 4 ? 4 : n - a >= 2 ? 2 : 1
             fw!(mode == 1 || (a + P == n && ngen > 0), mode == 0); a += P
@@ -1194,30 +1385,34 @@ end
 # "chat N ID ..." runs the request and streams "tok ID" lines as the kernel writes them to host memory, then
 # "done ngen ended nprompt run_ms first_ms 0 0". Any other first line is one of handle's commands.
 function session(c, lk)
-    stops = (-1, -1)
+    stops = (-1, -1); snap = 0; sample = (0.0, 0, 1.0); seed = UInt64(1)
     while !eof(c)
         line = readline(c); a = split(line); isempty(a) && continue
         if a[1] in ("timings", "cancel_on_eof")
             println(c, "ok: ", line)
         elseif a[1] == "stop"
             v = parse.(Int, a[2:end]); stops = (length(v) >= 1 ? v[1] : -1, length(v) >= 2 && v[2] != 0xffffffff ? v[2] : -1)
-        elseif a[1] in ("sample", "img", "snap")
+        elseif a[1] == "snap"
+            snap = parse(Int, a[2])
+        elseif a[1] == "sample"                            # sample SEED TEMP TOPK TOPP
+            seed = parse(UInt64, a[2]); sample = (parse(Float64, a[3]), parse(Int, a[4]), parse(Float64, a[5]))
+        elseif a[1] == "img"
         elseif a[1] == "info"
             println(c, "info ", MAXCTX, " 0")
         elseif a[1] == "chat"
-            lock(() -> chat(c, parse(Int, a[2]), parse.(Int, a[3:end]), stops), lk); return
+            lock(() -> chat(c, parse(Int, a[2]), parse.(Int, a[3:end]), stops, snap, sample, seed), lk); return
         else
             lock(() -> handle(c, line), lk); return
         end
     end
 end
-function chat(c, nnew, ids, stops)
+function chat(c, nnew, ids, stops, snap = 0, sample = (0.0, 0, 1.0), seed = UInt64(1))
     PE = PK[]; nnew = clamp(nnew, 1, min(PE.maxgen, MAXCTX - length(ids)))
     outp = Ptr{Int32}(PE.hx.c + PE.hx.tok)
     for i in 1:nnew; unsafe_store!(outp, Int32(-1), i); end
     hw(i) = Ptr{UInt32}(PE.hx.c + PE.hx.out + 4i)         # host words: 13 cancel, 14 the prompt positions run
     for i in 12:15; unsafe_store!(hw(i), UInt32(0)); end
-    t0 = time(); job = Threads.@spawn request!(PE, [(ids, nnew)], 0; stops, ctl = false)
+    t0 = time(); job = Threads.@spawn cached_request!(PE, ids, nnew, stops, snap, hw(13), sample, seed)
     n = 0; t1 = 0.0; ended = 0; pr = 0; tp = 0.0; gone = false
     # a write to a client that has gone fails: the request is cancelled, and this still waits for the kernel (the
     # lock is held until it stops, so no request starts under it)
@@ -1229,7 +1424,7 @@ function chat(c, nnew, ids, stops)
     function progress()                                    # "prog ran total cached", at most one every 500 ms
         n == 0 || return
         ran = Int(unsafe_load(hw(14))); now = time()
-        (ran > pr && now - tp >= 0.5) && (say("prog ", ran, " ", length(ids), " 0"); pr = ran; tp = now)
+        (ran > pr && now - tp >= 0.5) && (say("prog ", ran, " ", length(ids), " ", RESUMED[]); pr = ran; tp = now)
     end
     pump() = while n < nnew
         t = unsafe_load(outp, n + 1); t < 0 && break
@@ -1245,11 +1440,11 @@ function chat(c, nnew, ids, stops)
     while !istaskdone(job); progress(); pump(); gone || try flush(c) catch; gone = true end; sleep(0.005); end
     res = fetch(job); pump()
     gone || try
-        @printf(c, "done %d %d %d %.1f %.1f 0 0\n", n, ended, length(ids), 1e3(time() - t0), 1e3(t1 - t0)); flush(c)
+        @printf(c, "done %d %d %d %.1f %.1f %d %d\n", n, ended, length(ids), 1e3(time() - t0), 1e3(t1 - t0), res[5], res[6]); flush(c)
     catch
     end
-    @printf("chat: %d prompt, %d out, prefill %.2f tok/s, decode %.2f tok/s, idle time %.1f%%%s\n", length(ids), n,
-            length(ids) / res[3], max(n - 1, 0) / max(res[4], 1e-9), idlepct(res[2]), unsafe_load(hw(13)) != 0 ? " (cancelled)" : ""); flush(stdout)
+    @printf("chat: %d prompt, %d out, %d cached, prefill %.2f tok/s, decode %.2f tok/s, idle time %.1f%%%s\n", length(ids), n,
+            res[5], (length(ids) - res[5]) / max(res[3], 1e-9), max(n - 1, 0) / max(res[4], 1e-9), idlepct(res[2]), unsafe_load(hw(13)) != 0 ? " (cancelled)" : ""); flush(stdout)
 end
 function handle(c, line)
     a = split(line); s = SRV[]
@@ -1263,6 +1458,8 @@ function handle(c, line)
         kl(c, PK[], ids, a[3], n)
     elseif a[1] == "dpm"                                 # dpm 0 | 1: lock the clocks high for each request
         DPMLOCK[] = a[2] == "1"; println(c, "dpm ", DPMLOCK[])
+    elseif a[1] == "dyn"                                 # dyn 0 | 1: wavefronts claim matrix items, or a fixed share each
+        DYNCLAIM[] = a[2] == "1"; println(c, "dyn ", DYNCLAIM[])
     elseif a[1] == "nwg"                                 # nwg N: the workgroups the kernel uses
         NWGMAX[] = parse(Int, a[2]); pinit(); println(c, "nwg ", PK[].nwg)
     elseif a[1] == "prof"                                # the last request's time by phase kind

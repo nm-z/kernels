@@ -62,7 +62,11 @@ findfirst(==("<|im_end|>"), tokens) == 124901 || error("<|im_end|> is not id 124
 open(out, "w") do io
     wstr(t) = (write(io, UInt64(ncodeunits(t))); write(io, t))
     key(k, ty) = (wstr(k); write(io, UInt32(ty)))
-    write(io, "GGUF", UInt32(3), UInt64(0), UInt64(9))
+    write(io, "GGUF", UInt32(3), UInt64(0), UInt64(12))
+    # flashd's defaults when a client sends no sampling (the vendor names none; greedy repeats itself until the token limit)
+    key("general.sampling.temp", 6); write(io, Float32(0.7))
+    key("general.sampling.top_k", 6); write(io, Float32(50))
+    key("general.sampling.top_p", 6); write(io, Float32(0.9))
     key("general.architecture", 8); wstr("lfm3")
     key("tokenizer.ggml.model", 8); wstr("gpt2")
     key("tokenizer.ggml.pre", 8); wstr("lfm3")
@@ -70,7 +74,8 @@ open(out, "w") do io
     key("tokenizer.ggml.token_type", 9); write(io, UInt32(5), UInt64(NV)); write(io, types)
     key("tokenizer.ggml.merges", 9); write(io, UInt32(8), UInt64(length(merges))); foreach(wstr, merges)
     key("tokenizer.ggml.bos_token_id", 4); write(io, UInt32(124894))
-    key("tokenizer.ggml.eos_token_id", 4); write(io, UInt32(124900))
+    # (flashd stops on <|im_end|> by name and on this: a base model also ends text with <|endoftext|>)
+    key("tokenizer.ggml.eos_token_id", 4); write(io, UInt32(124895))
     key("tokenizer.chat_template", 8); wstr(template)
 end
 println("$(count(==(Int32(1)), types)) vocabulary tokens, $(count(t -> t == 3 || t == 4, types)) added, $(length(merges)) merges, $(filesize(out)) bytes")
