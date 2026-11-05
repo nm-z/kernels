@@ -1,4 +1,4 @@
-Requirements:
+**Requirements:**
 - one Julia file per model arch
 - prompt caching
 - prompt prefixes
