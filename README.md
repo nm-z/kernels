@@ -4,11 +4,11 @@ Requirements:
 - prompt prefixes
 - KV caching
 - max concurrent requests
-- model's native:
-        - attn mechanism[s]
-        - sampling
-        - max ctx length
-        - chat template
-        - image encoder (if applicable)
+- model's native: </br>
+	- attn mechanism[s] </br>
+	- sampling </br>
+	- max ctx length </br>
+	- chat template </br>
+	- image encoder (if applicable) </br>
 - one exe run per request
 - every kernel dynamically dispatched
