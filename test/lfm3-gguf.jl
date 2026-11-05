@@ -51,7 +51,13 @@ while true
 end
 # (the generation tag only marks the assistant's text for training masks; flashd's Jinja renders the same text through an
 # if that is always true, with the same whitespace control)
-template = replace(read(joinpath(dir, "chat_template.jinja"), String), "{%- generation -%}" => "{%- if true -%}", "{%- endgeneration -%}" => "{%- endif -%}")
+# The vendor's template writes an empty <think></think> into each earlier assistant turn, and the model reads that as "this
+# conversation doesn't think": after the first turn it closes the tag at once and gives short stock answers, on the vendor's
+# own code too. Earlier turns are written without the empty tag here; a turn's real thinking, when kept, stays.
+template = replace(read(joinpath(dir, "chat_template.jinja"), String), "{%- generation -%}" => "{%- if true -%}", "{%- endgeneration -%}" => "{%- endif -%}",
+    "{{- \"<think></think>\" -}}\n        {%- endif -%}\n        {%- set _cfm_tag" => "{%- endif -%}\n        {%- set _cfm_tag",
+    "{%- set content = \"<think></think>\" + content -%}\n" => "")
+occursin("{{- \"<think></think>\" -}}\n        {%- endif -%}\n        {%- set _cfm_tag", template) && error("the template's empty think tag is still there")
 findfirst(==("<|im_end|>"), tokens) == 124901 || error("<|im_end|> is not id 124900")
 open(out, "w") do io
     wstr(t) = (write(io, UInt64(ncodeunits(t))); write(io, t))
