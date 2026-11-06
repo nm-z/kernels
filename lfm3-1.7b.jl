@@ -12,7 +12,7 @@ const HELP = """
   \e[1m-n N\e[0m   states: sequences that end where one of nate's replies begins   \e[2m1\e[0m
   \e[1m-r N\e[0m   rollouts: continuations sampled from each state, one pane each   \e[2m4\e[0m
 
-  \e[33mwhat nate wrote\e[0m    \e[36mcontinuation\e[0m    \e[31mjev score\e[0m
+  \e[38;2;255;122;0mclaude\e[0m    \e[38;2;0;174;107mnate\e[0m    \e[38;2;0;184;217mnlfm\e[0m    \e[38;2;242;40;60mjev\e[0m
 """
 basename(PROGRAM_FILE) == "nlfm" && any(in(("-h", "--help")), ARGS) && (print(HELP); exit())
 
@@ -2872,8 +2872,9 @@ function drive(R::Run)                                          # states one aft
     end
 end
 
-# ---- the terminal: a yellow nate line, then one pane a rollout (cyan, streaming), its jev score on the pane's last line (red)
-const Y = "\e[33m"; const C = "\e[36m"; const G = "\e[32m"; const R = "\e[31m"; const W = "\e[37m"; const Z = "\e[0m"
+# ---- the terminal: the state's text colored by who wrote it (claude orange, nate green), nate's actual reply (green), then one pane a
+# rollout (cyan, streaming) with its jev score on the pane's last line (red)
+const CJ = "\e[38;2;242;40;60m"; const CC = "\e[38;2;255;122;0m"; const CL = "\e[38;2;0;184;217m"; const CU = "\e[38;2;0;174;107m"; const Z = "\e[0m"
 squeeze(t) = strip(replace(t, r"\n[ \t]*(\n[ \t]*)+" => "\n"))
 function wrap(t, w)                                             # lines of at most w characters (tabs as spaces, no empty lines)
     out = String[]
@@ -2885,7 +2886,16 @@ function wrap(t, w)                                             # lines of at mo
     end
     out
 end
-const TTY = Ref{Union{Nothing,IOStream}}(nothing); const LASTROW = Ref(1)              # the terminal itself: withkey pipes stdout to mask the key, so the TUI draws on /dev/tty
+function turns(ctx)                                             # (color, text) a turn, from the state's tokens
+    out = Tuple{String,String}[]
+    for seg in split(text(ctx), "<|im_start|>")
+        isempty(seg) && continue
+        i = findfirst('\n', seg); role = i === nothing ? seg : seg[1:i-1]; body = i === nothing ? "" : replace(seg[i+1:end], "<|im_end|>" => "")
+        isempty(strip(body)) || push!(out, (role == "assistant" ? CC : CU, body))
+    end
+    out
+end
+const TTY = Ref{Union{Nothing,IOStream}}(nothing); const LASTROW = Ref(1)   # withkey pipes stdout to mask the key: the TUI draws on /dev/tty
 function ttysize()                                             # rows, cols by TIOCGWINSZ
     ws = zeros(UInt16, 4); r = ccall(:ioctl, Cint, (Cint, Culong, Ptr{UInt16}), fd(TTY[]), 0x5413, ws)
     r == 0 && ws[1] > 0 && ws[2] > 0 ? (Int(ws[1]), Int(ws[2])) : (24, 80)
@@ -2904,11 +2914,14 @@ function tui(Rn::Run)
     print(T, "\e[?25l"); try
         for s in Rn.samples
             print(T, "\e[2J"); at(1, 1)
-            nl = wrap("nate: " * squeeze(text(cut(s.actual))), cols); nl = nl[1:min(4, length(nl))]
-            for l in nl; println(T, Y, l, Z); end
-            top = length(nl) + 2; ph = max(3, (rows - top - (nr - 1)) ÷ nr); pw = (cols - (nc - 1)) ÷ nc
+            ctxl = [(c, l) for (c, t) in turns(s.ctx) for l in wrap(squeeze(t), cols)]   # the state, its last rows
+            ch = max(2, rows ÷ 3); ctxl = ctxl[max(1, end - ch + 1):end]
+            for (c, l) in ctxl; println(T, c, l, Z); end
+            nl = wrap(squeeze(text(cut(s.actual))), cols); nl = nl[1:min(4, length(nl))]
+            for l in nl; println(T, CU, l, Z); end
+            top = length(ctxl) + length(nl) + 2; ph = max(3, (rows - top - (nr - 1)) ÷ nr); pw = (cols - (nc - 1)) ÷ nc
             box(k) = (top + ((k - 1) ÷ nc) * (ph + 1), 1 + ((k - 1) % nc) * (pw + 1)); LASTROW[] = top + nr * (ph + 1) - 2
-            for k in 1:n; r0, c0 = box(k); at(r0, c0); print(T, W, rname(k), " ", setting(k)[1], Z); end
+            for k in 1:n; r0, c0 = box(k); at(r0, c0); print(T, rname(k), " ", setting(k)[1]); end
             seen = zeros(Int, n); fin = falses(n); scored = false
             while !scored
                 todo, scored = lock(Rn.cond) do
@@ -2919,12 +2932,12 @@ function tui(Rn::Run)
                 for k in todo
                     P = s.panes[k]; seen[k] = length(P.toks); fin[k] = P.done; r0, c0 = box(k)
                     ls = wrap(text(cut(P.toks)) * (isempty(P.err) ? "" : "\n" * P.err), pw)
-                    paint(r0 + 1, c0, ph - 2, pw, ls, C)
+                    paint(r0 + 1, c0, ph - 2, pw, ls, CL)
                 end
                 scored || continue
                 for k in 1:n
                     r0, c0 = box(k); at(r0 + ph - 1, c0)
-                    print(T, R, "jev ", isnan(s.scores[k]) ? first(s.jerr, pw - 4) : string(round(s.scores[k]; digits = 2)), Z)
+                    print(T, CJ, "jev ", isnan(s.scores[k]) ? first(s.jerr, pw - 4) : string(round(s.scores[k]; digits = 2)), Z)
                 end
                 flush(T)
             end
@@ -2946,19 +2959,20 @@ function arena(args)
     try TTY[] = open("/dev/tty", "w") catch; end
     TTY[] === nothing || return tui(Rn)
     for s in Rn.samples                                        # not a terminal: the lines in order
-        println(Y, "nate: ", squeeze(text(cut(s.actual))), Z)
+        for (c, t) in turns(s.ctx); println(c, squeeze(t), Z); end
+        println(CU, squeeze(text(cut(s.actual))), Z)
         for k in 1:NROLL[]
             P = s.panes[k]
             lock(Rn.cond) do
                 while !P.done; wait(Rn.cond); end
             end
-            println(C, squeeze(text(cut(P.toks))), isempty(P.err) ? "" : R * P.err, Z)
+            println(CL, squeeze(text(cut(P.toks))), isempty(P.err) ? "" : CJ * P.err, Z)
         end
         lock(Rn.cond) do
             while !s.scored; wait(Rn.cond); end
         end
         for k in 1:NROLL[]
-            println(R, "jev ", rname(k), " ", isnan(s.scores[k]) ? s.jerr : string(round(s.scores[k]; digits = 2)), Z)
+            println(CJ, "jev ", rname(k), " ", isnan(s.scores[k]) ? s.jerr : string(round(s.scores[k]; digits = 2)), Z)
         end
         flush(stdout)
     end
