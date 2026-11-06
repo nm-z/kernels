@@ -11,7 +11,7 @@ nlfm: continue sequences from nate's transcripts and score the continuations aga
 
   nlfm [options]
 
-  \e[1m-n N\e[0m         states: sequences cut where nate's reply begins                        \e[2m1\e[0m
+  \e[1m-n N\e[0m         states: sequences that end where one of nate's replies begins          \e[2m1\e[0m
   \e[1m-r N\e[0m         rollouts: continuations sampled from each state, one pane each          \e[2m4\e[0m
   \e[1m--seed N\e[0m     replay a draw
   \e[1m--data DIR\e[0m   tokenized transcripts                                                   \e[2m~/models/lfm3-data\e[0m
