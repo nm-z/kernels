@@ -13,8 +13,9 @@ function help()
     """
   nlfm [options]
 
-  \e[1m-n N\e[0m   states: sequences that end where one of nate's replies begins
-  \e[1m-r N\e[0m   rollouts: continuations sampled from each state, one pane each
+  \e[1m-c N\e[0m   continuations: user turns filled per transcript, in order, one prefix   \e[2mall\e[0m
+  \e[1m-s N\e[0m   slots: transcripts in flight at once, one pane each
+  \e[1m-q N\e[0m   queue: transcripts a slot works through
   \e[1m-t T\e[0m   temperature   \e[2m$t\e[0m
   \e[1m-k K\e[0m   top-k         \e[2m$k\e[0m
   \e[1m-p P\e[0m   top-p         \e[2m$p\e[0m
@@ -2799,98 +2800,125 @@ function train(args)
 end
 
 
-# ---- the arena, in the terminal: N random conversation states from the transcripts; for each, the reply nate actually gave
-# (yellow), the model's reply under 4 sampling settings streamed from the engine one after another (cyan), then Jev's similarity
-# score for each (red; jev-1.13 through OpenCode Zen, 4 Score questions in one request), the best marked green. 2 s between states.
-#   nlfm [-n STATES] [-r ROLLOUTS] [--seed S] [--data DIR] [--model DIR] [--sock SOCK]   (~/.local/bin/nlfm -> this file; the shebang runs it under withkey)
+# ---- nlfm: fill in nate's replies. A slot takes a transcript and walks its user turns in order on one growing prefix: at each,
+# nlfm continues the prefix (its fill), never seeing nate's real reply; the prefix then gets the fill, then claude's real next turn,
+# and so on. Jev scores each fill against the real reply (jev-1.13 through OpenCode Zen). -s slots run transcripts at once, one
+# pane each; -q transcripts a slot; -c user turns a transcript (0: all). The engine snapshots each prompt, so the next continues
+# from the cached prefix.
+#   nlfm [-c N] [-s N] [-q N] [--seed S] [--data DIR] [--model DIR] [--sock SOCK]   (~/.local/bin/nlfm -> this file; the shebang runs it under withkey)
 using HTTP, JSON3
-const SAMP = Ref((0.1, 50, 1.0))                                 # temp, top-k, top-p for every rollout (-t -k -p)
-const NSAMP = Ref(1); const NROLL = Ref(1); const NGEN = 96; const IM_END = 124900
+const SAMP = Ref((0.1, 50, 1.0))                               # temp, top-k, top-p for every continuation (-t -k -p set the defaults)
+const NCONT = Ref(0); const NSLOT = Ref(1); const NQ = Ref(1); const NGEN = 128; const IM_END = 124900; const PMAX = 60000
 const LEVELS = ["unrelated to what nate said, or not a sentence", "nate's voice, but a different subject", "the same subject, a different point",
                 "the same point in different words", "the same reply: meaning and nearly the words"]
-setting(k) = ("temp $(SAMP[][1]) top-k $(SAMP[][2]) top-p $(SAMP[][3])", SAMP[]...)
-rname(k) = string('A' + (k - 1) % 26, k > 26 ? string(k) : "")
+const CJ = "\e[38;2;242;40;60m"; const CC = "\e[38;2;255;122;0m"; const CL = "\e[38;2;0;184;217m"; const CU = "\e[38;2;0;174;107m"; const Z = "\e[0m"
 
-mutable struct Pane; toks::Vector{Int}; done::Bool; err::String; end
-mutable struct Sample
-    i::Int; t::Int; ex::Int; held::Bool; ctx::Vector{Int}; actual::Vector{Int}; panes::Vector{Pane}
-    scores::Vector{Float64}; conf::Vector{Float64}; best::Int; jerr::String; scored::Bool
-end
-struct Run; id::String; seed::UInt32; samples::Vector{Sample}; cond::Threads.Condition; end
+mutable struct Entry; col::String; txt::String; end             # one line of a pane's log (txt may hold newlines)
+mutable struct Slot; i::Int; log::Vector{Entry}; done::Bool; end
+struct Run; seed::UInt32; slots::Vector{Slot}; cond::Threads.Condition; end
 const CFG = Dict{String,String}()
-D = nothing; VOCAB = nothing; NAMES = String[]
+D = nothing; VOCAB = nothing
 
 cut(t) = (i = findfirst(==(IM_END), t); i === nothing ? t : t[1:i-1])
 text(ids) = detok(VOCAB, ids)
+squeeze(t) = strip(replace(t, r"\n[ \t]*(\n[ \t]*)+" => "\n"))
 notify_all(R) = lock(R.cond) do; notify(R.cond); end
-
-function pick(rng)                                             # any example whose context fits the engine comfortably
-    ok = [i for (i, e) in enumerate(D.ex) if e[3] - e[2] <= 1200 && e[4] - e[3] >= 3]
-    [ok[rand(rng, 1:length(ok))] for _ in 1:NSAMP[]]
+function say!(R::Run, S::Slot, col, txt)
+    e = Entry(col, txt); lock(R.cond) do; push!(S.log, e); end; notify_all(R); e
 end
-function newrun(seed::UInt32)
-    rng = MersenneTwister(seed); S = Sample[]; n = NROLL[]
-    for (k, i) in enumerate(pick(rng))
-        t, cs, rs, re = Int.(D.ex[i]); f = tfirst(D, t)
-        push!(S, Sample(k, t, i, D.tr[t+1][5] != 0, D.tok[f+cs+1:f+rs], D.tok[f+rs+1:f+re], [Pane(Int[], false, "") for _ in 1:n],
-                        fill(NaN, n), fill(NaN, n), 0, "", false))
+function turns(ids)                                             # (color, text) a turn, from tokens in the chat format
+    out = Tuple{String,String}[]
+    for seg in split(text(ids), "<|im_start|>")
+        isempty(seg) && continue
+        i = findfirst('\n', seg); role = i === nothing ? seg : seg[1:i-1]; body = i === nothing ? "" : replace(seg[i+1:end], "<|im_end|>" => "")
+        isempty(strip(body)) || push!(out, (role == "assistant" ? CC : CU, body))
     end
-    R = Run(string(seed, base = 16), seed, S, Threads.Condition()); errormonitor(@async drive(R)); R
+    out
 end
 
-function generate!(R::Run, s::Sample, k::Int)                   # one rollout: flashd's engine protocol on the socket
-    P = s.panes[k]; (_, temp, topk, topp) = setting(k)
+function generate!(R::Run, S::Slot, prefix::Vector{Int32}, seed)  # one continuation of the prefix, streamed into a cyan entry; the prompt snapshotted
+    e = say!(R, S, CL, ""); toks = Int[]; (temp, topk, topp) = SAMP[]
     try
         c = connect(CFG["sock"])
-        println(c, "stop ", IM_END); println(c, "sample ", (R.seed % 1000) * 7 + k, " ", temp, " ", topk, " ", topp)
-        println(c, "chat ", NGEN, " ", join(s.ctx, ' ')); flush(c)
+        println(c, "stop ", IM_END); println(c, "sample ", seed, " ", temp, " ", topk, " ", topp); println(c, "snap ", length(prefix) - 1)
+        println(c, "chat ", NGEN, " ", join(prefix, ' ')); flush(c)
         while !eof(c)
             l = readline(c)
             if startswith(l, "tok ")
                 t = parse(Int, l[5:end]); t == IM_END && break
-                lock(R.cond) do; push!(P.toks, t); end; notify_all(R)
+                push!(toks, t); lock(R.cond) do; e.txt = text(toks); end; notify_all(R)
             elseif startswith(l, "error")
-                P.err = l; break
+                say!(R, S, CJ, l); break
             elseif startswith(l, "done")
                 break
             end
         end
         close(c)
-    catch e
-        P.err = sprint(showerror, e)
+    catch x
+        say!(R, S, CJ, sprint(showerror, x))
     end
-    lock(R.cond) do; P.done = true; end; notify_all(R)
+    toks
 end
 
-function judge!(s::Sample)
-    n = length(s.panes); tail = last(text(s.ctx), 2000)
-    cands = Dict(rname(k) => text(cut(s.panes[k].toks)) for k in 1:n)
-    state = Dict("conversation_so_far_tail" => tail, "what_nate_actually_replied" => text(cut(s.actual)), "candidate_replies" => cands)
-    qs = Dict(rname(k) => Dict("type" => "score", "criteria" => LEVELS,
-                               "instructions" => "How close is candidate reply $(rname(k)) to what nate actually replied, as the next message in this conversation?") for k in 1:n)
+function judge(prefix::Vector{Int32}, actual::Vector{Int32}, fill::Vector{Int})   # Jev: how close the fill is to the real reply; (score, confidence) or an error string
+    state = Dict("conversation_so_far_tail" => last(text(prefix), 2000), "what_nate_actually_replied" => text(cut(actual)), "candidate_reply" => text(fill))
+    qs = Dict("fill" => Dict("type" => "score", "criteria" => LEVELS, "instructions" => "How close is the candidate reply to what nate actually replied, as the next message in this conversation?"))
     body = JSON3.write(Dict("model" => "jev-1.13", "state" => state, "questions" => qs))
     try
         r = HTTP.post("https://opencode.ai/zen/v1/systemone", ["authorization" => "Bearer " * ENV["KEY_OPENCODE_ZEN"], "content-type" => "application/json"], body; request_timeout = 30, retry = false)
-        a = JSON3.read(r.body)["answers"]
-        for k in 1:n; x = a[rname(k)]; s.scores[k] = x["score"]; s.conf[k] = x["confidence"]; end
-        s.best = argmax([(s.scores[k], s.conf[k]) for k in 1:n])
-    catch e
-        s.jerr = sprint(showerror, e)
-    end
-    s.scored = true
-end
-
-function drive(R::Run)                                          # states one after another, 2 s apart; a state's rollouts at once
-    for s in R.samples
-        ts = [Threads.@spawn generate!(R, s, k) for k in 1:length(s.panes)]; foreach(wait, ts)
-        judge!(s); notify_all(R); sleep(2)
+        a = JSON3.read(r.body)["answers"]["fill"]; (Float64(a["score"]), Float64(a["confidence"]))
+    catch x
+        sprint(showerror, x)
     end
 end
 
-# ---- the terminal: the state's text colored by who wrote it (claude orange, nate green), nate's actual reply (green), then one pane a
-# rollout (cyan, streaming) with its jev score on the pane's last line (red)
-const CJ = "\e[38;2;242;40;60m"; const CC = "\e[38;2;255;122;0m"; const CL = "\e[38;2;0;184;217m"; const CU = "\e[38;2;0;174;107m"; const Z = "\e[0m"
-squeeze(t) = strip(replace(t, r"\n[ \t]*(\n[ \t]*)+" => "\n"))
+function walk!(R::Run, S::Slot, t::Int, exs, seed)              # one transcript: its user turns in order on one growing prefix
+    f = tfirst(D, t); _, cs0, rs0, _ = Int.(exs[1]); prefix = D.tok[f+cs0+1:f+rs0]
+    for (c, x) in turns(prefix); say!(R, S, c, x); end
+    scores = Float64[]
+    for (j, e) in enumerate(exs)
+        _, _, rs, re = Int.(e)
+        length(prefix) > PMAX && (say!(R, S, CJ, "prefix past $PMAX tokens: stopping this transcript"); break)
+        fill = generate!(R, S, prefix, seed + j)
+        actual = D.tok[f+rs+1:f+re]
+        say!(R, S, CU, text(cut(actual)))
+        v = judge(prefix, actual, fill)
+        say!(R, S, CJ, v isa String ? "jev " * v : "jev " * string(round(v[1]; digits = 2))); v isa String || push!(scores, v[1])
+        j == length(exs) && break
+        between = D.tok[f+re+1:f+Int(exs[j+1][3])]            # from the end of nate's real reply to the start of the next: claude's turns
+        for (c, x) in turns(between); say!(R, S, c, x); end
+        prefix = vcat(prefix, Int32.(fill), Int32(IM_END), between)
+    end
+    isempty(scores) || say!(R, S, CJ, "jev mean $(round(sum(scores) / length(scores); digits = 2)) over $(length(scores))")
+end
+
+function drive(R::Run, order)                                   # slot i takes transcripts i, i+s, i+2s, ... up to q of them
+    bytr = Dict{Int,Vector{NTuple{4,UInt32}}}()
+    for e in D.ex; e[4] - e[3] >= 3 && push!(get!(bytr, Int(e[1]), NTuple{4,UInt32}[]), e); end
+    for S in R.slots
+        Threads.@spawn try
+            for qi in 1:NQ[]
+                k = (qi - 1) * NSLOT[] + S.i; k > length(order) && break
+                t = order[k]; exs = sort(bytr[t]; by = e -> e[3]); NCONT[] > 0 && (exs = exs[1:min(NCONT[], end)])
+                qi == 1 || say!(R, S, "", "")
+                say!(R, S, "", "transcript $t: $(length(exs)) of $(length(bytr[t])) user turns")
+                walk!(R, S, t, exs, (R.seed % 1000) * 1000 + k * 100)
+            end
+        catch x
+            say!(R, S, CJ, sprint(showerror, x))
+        finally
+            lock(R.cond) do; S.done = true; end; notify_all(R)
+        end
+    end
+end
+
+# ---- the terminal: one pane a slot, its log's tail, wrapped; withkey pipes stdout to mask the key, so the TUI draws on /dev/tty
+const TTY = Ref{Union{Nothing,IOStream}}(nothing); const LASTROW = Ref(1)
+function ttysize()                                             # rows, cols by TIOCGWINSZ
+    ws = zeros(UInt16, 4); r = ccall(:ioctl, Cint, (Cint, Culong, Ptr{UInt16}), fd(TTY[]), 0x5413, ws)
+    r == 0 && ws[1] > 0 && ws[2] > 0 ? (Int(ws[1]), Int(ws[2])) : (24, 80)
+end
+at(r, c) = print(TTY[], "\e[", r, ";", c, "H")
 function wrap(t, w)                                             # lines of at most w characters (tabs as spaces, no empty lines)
     out = String[]
     for l in split(replace(t, '\t' => "    "), '\n')
@@ -2901,63 +2929,37 @@ function wrap(t, w)                                             # lines of at mo
     end
     out
 end
-function turns(ctx)                                             # (color, text) a turn, from the state's tokens
-    out = Tuple{String,String}[]
-    for seg in split(text(ctx), "<|im_start|>")
-        isempty(seg) && continue
-        i = findfirst('\n', seg); role = i === nothing ? seg : seg[1:i-1]; body = i === nothing ? "" : replace(seg[i+1:end], "<|im_end|>" => "")
-        isempty(strip(body)) || push!(out, (role == "assistant" ? CC : CU, body))
+function paint(r0, c0, h, w, log)                               # the last h wrapped lines of the log in a box at (r0, c0)
+    v = Tuple{String,String}[]
+    for e in Iterators.reverse(log)
+        ls = wrap(squeeze(e.txt), w); isempty(ls) && isempty(strip(e.txt)) && (ls = [""])
+        for l in Iterators.reverse(ls); pushfirst!(v, (e.col, l)); end
+        length(v) >= h && break
     end
-    out
-end
-const TTY = Ref{Union{Nothing,IOStream}}(nothing); const LASTROW = Ref(1)   # withkey pipes stdout to mask the key: the TUI draws on /dev/tty
-function ttysize()                                             # rows, cols by TIOCGWINSZ
-    ws = zeros(UInt16, 4); r = ccall(:ioctl, Cint, (Cint, Culong, Ptr{UInt16}), fd(TTY[]), 0x5413, ws)
-    r == 0 && ws[1] > 0 && ws[2] > 0 ? (Int(ws[1]), Int(ws[2])) : (24, 80)
-end
-at(r, c) = print(TTY[], "\e[", r, ";", c, "H")
-function paint(r0, c0, h, w, lines, col)                       # the last h lines of `lines` in a box at (r0, c0), the rest blank
-    v = length(lines) > h ? lines[end-h+1:end] : lines
+    length(v) > h && (v = v[end-h+1:end])
     for i in 1:h
-        at(r0 + i - 1, c0); l = i <= length(v) ? v[i] : ""
-        print(TTY[], col, l, Z, " "^max(0, w - length(l)))
+        at(r0 + i - 1, c0)
+        if i <= length(v); c, l = v[i]; print(TTY[], c, l, Z, " "^max(0, w - length(l))) else print(TTY[], " "^w) end
     end
 end
-function tui(Rn::Run)
-    T = TTY[]; rows, cols = ttysize(); n = NROLL[]
+function tui(R::Run)
+    T = TTY[]; rows, cols = ttysize(); n = NSLOT[]
     nc = n <= 2 ? n : n <= 6 ? 2 : n <= 12 ? 3 : 4; nr = cld(n, nc)
-    print(T, "\e[?25l"); try
-        for s in Rn.samples
-            print(T, "\e[2J"); at(1, 1)
-            ctxl = [(c, l) for (c, t) in turns(s.ctx) for l in wrap(squeeze(t), cols)]   # the state, its last rows
-            ch = max(2, rows ÷ 3); ctxl = ctxl[max(1, end - ch + 1):end]
-            for (c, l) in ctxl; println(T, c, l, Z); end
-            nl = wrap(squeeze(text(cut(s.actual))), cols); nl = nl[1:min(4, length(nl))]
-            for l in nl; println(T, CU, l, Z); end
-            top = length(ctxl) + length(nl) + 2; ph = max(3, (rows - top - (nr - 1)) ÷ nr); pw = (cols - (nc - 1)) ÷ nc
-            box(k) = (top + ((k - 1) ÷ nc) * (ph + 1), 1 + ((k - 1) % nc) * (pw + 1)); LASTROW[] = top + nr * (ph + 1) - 2
-            for k in 1:n; r0, c0 = box(k); at(r0, c0); print(T, rname(k), " ", setting(k)[1]); end
-            seen = zeros(Int, n); fin = falses(n); scored = false
-            while !scored
-                todo, scored = lock(Rn.cond) do
-                    quiet(k) = length(s.panes[k].toks) == seen[k] && (!s.panes[k].done || fin[k])
-                    while all(quiet, 1:n) && !s.scored; wait(Rn.cond); end
-                    ([k for k in 1:n if !quiet(k)], s.scored)
+    ph = (rows - (nr - 1)) ÷ nr; pw = (cols - (nc - 1)) ÷ nc
+    box(k) = (1 + ((k - 1) ÷ nc) * (ph + 1), 1 + ((k - 1) % nc) * (pw + 1)); LASTROW[] = nr * (ph + 1) - 1
+    print(T, "\e[?25l\e[2J"); try
+        last = Dict{Int,Tuple{Int,String}}()
+        while true
+            alldone = lock(R.cond) do
+                changed(S) = (length(S.log), isempty(S.log) ? "" : S.log[end].txt) != get(last, S.i, (0, ""))
+                while !any(changed, R.slots) && !all(S -> S.done, R.slots); wait(R.cond); end
+                for S in R.slots
+                    changed(S) || continue
+                    last[S.i] = (length(S.log), isempty(S.log) ? "" : S.log[end].txt); r0, c0 = box(S.i); paint(r0, c0, ph, pw, S.log)
                 end
-                for k in todo
-                    P = s.panes[k]; seen[k] = length(P.toks); fin[k] = P.done; r0, c0 = box(k)
-                    ls = wrap(text(cut(P.toks)) * (isempty(P.err) ? "" : "\n" * P.err), pw)
-                    paint(r0 + 1, c0, ph - 2, pw, ls, CL)
-                end
-                scored || continue
-                for k in 1:n
-                    r0, c0 = box(k); at(r0 + ph - 1, c0)
-                    print(T, CJ, "jev ", isnan(s.scores[k]) ? first(s.jerr, pw - 4) : string(round(s.scores[k]; digits = 2)), Z)
-                end
-                flush(T)
+                all(S -> S.done, R.slots)
             end
-            flush(T)
-            s === last(Rn.samples) || sleep(2)
+            flush(T); alldone && break
         end
     finally
         print(T, "\e[?25h"); at(min(rows, LASTROW[] + 1), 1); flush(T)
@@ -2967,30 +2969,27 @@ end
 function arena(args)
     arg(ks, d) = (i = findfirst(in(ks), args); i === nothing ? d : args[i+1])
     CFG["sock"] = arg(("--sock",), "/run/user/1000/lfm3.sock"); CFG["model"] = arg(("--model",), expanduser("~/models/lfm3-1.7b-nate"))
-    NSAMP[] = parse(Int, arg(("-n", "--n"), "1")); NROLL[] = parse(Int, arg(("-r", "-o", "--rollouts"), "1"))
-    seed = UInt32(parse(Int, arg(("--seed",), string(rand(UInt32)))))
-    SAMP[] = sampling()
+    NCONT[] = parse(Int, arg(("-c",), "0")); NSLOT[] = parse(Int, arg(("-s",), "1")); NQ[] = parse(Int, arg(("-q",), "1"))
+    seed = UInt32(parse(Int, arg(("--seed",), string(rand(UInt32))))); SAMP[] = sampling()
     global D = Data(arg(("--data",), expanduser("~/models/lfm3-data"))); global VOCAB = vocabulary(CFG["model"])
-    Rn = newrun(seed)
+    ts = unique(Int(e[1]) for e in D.ex if e[4] - e[3] >= 3); order = shuffle(MersenneTwister(seed), ts)
+    R = Run(seed, [Slot(i, Entry[], false) for i in 1:NSLOT[]], Threads.Condition())
+    drive(R, order)
     try TTY[] = open("/dev/tty", "w") catch; end
-    TTY[] === nothing || return tui(Rn)
-    for s in Rn.samples                                        # not a terminal: the lines in order
-        for (c, t) in turns(s.ctx); println(c, squeeze(t), Z); end
-        println(CU, squeeze(text(cut(s.actual))), Z)
-        for k in 1:NROLL[]
-            P = s.panes[k]
-            lock(Rn.cond) do
-                while !P.done; wait(Rn.cond); end
+    TTY[] === nothing || return tui(R)
+    seen = zeros(Int, NSLOT[])                                 # not a terminal: each slot's finished lines, prefixed by its number
+    while true
+        lines, alldone = lock(R.cond) do
+            while all(S -> length(S.log) - 1 <= seen[S.i], R.slots) && !all(S -> S.done, R.slots); wait(R.cond); end
+            out = String[]
+            for S in R.slots
+                upto = S.done ? length(S.log) : length(S.log) - 1
+                for e in S.log[seen[S.i]+1:upto]; push!(out, string(NSLOT[] > 1 ? "$(S.i) " : "", e.col, squeeze(e.txt), Z)); end
+                seen[S.i] = max(seen[S.i], upto)
             end
-            println(CL, squeeze(text(cut(P.toks))), isempty(P.err) ? "" : CJ * P.err, Z)
+            (out, all(S -> S.done, R.slots))
         end
-        lock(Rn.cond) do
-            while !s.scored; wait(Rn.cond); end
-        end
-        for k in 1:NROLL[]
-            println(CJ, "jev ", rname(k), " ", isnan(s.scores[k]) ? s.jerr : string(round(s.scores[k]; digits = 2)), Z)
-        end
-        flush(stdout)
+        foreach(println, lines); flush(stdout); alldone && break
     end
 end
 
