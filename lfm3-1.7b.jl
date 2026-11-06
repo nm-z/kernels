@@ -13,7 +13,7 @@ function help()
     """
   nlfm [options]
 
-  \e[1m-c N\e[0m   continuations: user turns filled per transcript, in order, one prefix   \e[2mall\e[0m
+  \e[1m-c N\e[0m   continuations: continuations per transcript
   \e[1m-s N\e[0m   slots: transcripts in flight at once, one pane each
   \e[1m-q N\e[0m   queue: transcripts a slot works through
   \e[1m-t T\e[0m   temperature   \e[2m$t\e[0m
