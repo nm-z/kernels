@@ -7,19 +7,12 @@
 #   julia --project=env/amd -t 12 lfm3-1.7b.jl --model DIR --serve SOCK
 # nlfm --help answers before the packages load (7 s)
 const HELP = """
-nlfm: continue sequences from nate's transcripts and score the continuations against what nate wrote
-
   nlfm [options]
 
-  \e[1m-n N\e[0m         states: sequences that end where one of nate's replies begins          \e[2m1\e[0m
-  \e[1m-r N\e[0m         rollouts: continuations sampled from each state, one pane each          \e[2m4\e[0m
-  \e[1m--seed N\e[0m     replay a draw
-  \e[1m--data DIR\e[0m   tokenized transcripts                                                   \e[2m~/models/lfm3-data\e[0m
-  \e[1m--model DIR\e[0m  model directory                                                         \e[2m~/models/lfm3-1.7b-nate\e[0m
-  \e[1m--sock PATH\e[0m  engine socket                                                           \e[2m/run/user/1000/lfm3.sock\e[0m
-  \e[1m-h\e[0m           help
+  \e[1m-n N\e[0m   states: sequences that end where one of nate's replies begins   \e[2m1\e[0m
+  \e[1m-r N\e[0m   rollouts: continuations sampled from each state, one pane each   \e[2m4\e[0m
 
-  \e[33mwhat nate wrote\e[0m    \e[36mcontinuation\e[0m    \e[31mjev score\e[0m    \e[32mjev's pick\e[0m
+  \e[33mwhat nate wrote\e[0m    \e[36mcontinuation\e[0m    \e[31mjev score\e[0m
 """
 basename(PROGRAM_FILE) == "nlfm" && any(in(("-h", "--help")), ARGS) && (print(HELP); exit())
 
@@ -2879,7 +2872,7 @@ function drive(R::Run)                                          # states one aft
     end
 end
 
-# ---- the terminal: a yellow nate line, then one pane a rollout (cyan, streaming), its jev score on the pane's last line (red, green for the best)
+# ---- the terminal: a yellow nate line, then one pane a rollout (cyan, streaming), its jev score on the pane's last line (red)
 const Y = "\e[33m"; const C = "\e[36m"; const G = "\e[32m"; const R = "\e[31m"; const W = "\e[37m"; const Z = "\e[0m"
 squeeze(t) = strip(replace(t, r"\n[ \t]*(\n[ \t]*)+" => "\n"))
 function wrap(t, w)                                             # lines of at most w characters (tabs as spaces, no empty lines)
@@ -2931,7 +2924,7 @@ function tui(Rn::Run)
                 scored || continue
                 for k in 1:n
                     r0, c0 = box(k); at(r0 + ph - 1, c0)
-                    print(T, k == s.best ? G : R, "jev ", isnan(s.scores[k]) ? first(s.jerr, pw - 4) : string(round(s.scores[k]; digits = 2)), Z)
+                    print(T, R, "jev ", isnan(s.scores[k]) ? first(s.jerr, pw - 4) : string(round(s.scores[k]; digits = 2)), Z)
                 end
                 flush(T)
             end
@@ -2965,7 +2958,7 @@ function arena(args)
             while !s.scored; wait(Rn.cond); end
         end
         for k in 1:NROLL[]
-            println(k == s.best ? G : R, "jev ", rname(k), " ", isnan(s.scores[k]) ? s.jerr : string(round(s.scores[k]; digits = 2)), Z)
+            println(R, "jev ", rname(k), " ", isnan(s.scores[k]) ? s.jerr : string(round(s.scores[k]; digits = 2)), Z)
         end
         flush(stdout)
     end
