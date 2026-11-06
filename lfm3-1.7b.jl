@@ -21,9 +21,9 @@ nlfm [options]
 		\e[1m-k\e[0m <top-k>
 		\e[1m-p\e[0m <top-p>
 	defaults:
-		temp  $t
-		top-k $k
-		top-p $p
+		continuations 1    temp  $t
+		transcripts   1    top-k $k
+		concurrency   1    top-p $p
 	indicators:
 		\e[38;2;255;122;0mclaude\e[0m
 		\e[38;2;0;174;107mnate\e[0m
@@ -2811,12 +2811,12 @@ end
 # ---- nlfm: fill in nate's replies. A slot takes a transcript and walks its user turns in order on one growing prefix: at each,
 # nlfm continues the prefix (its fill), never seeing nate's real reply; the prefix then gets the fill, then claude's real next turn,
 # and so on. Jev scores each fill against the real reply (jev-1.13 through OpenCode Zen). -s slots run transcripts at once, one
-# pane each; -q transcripts a slot; -c user turns a transcript (0: all). The engine snapshots each prompt, so the next continues
+# pane each; -q transcripts a slot; -c user turns a transcript (0: all), 1 by default. The engine snapshots each prompt, so the next continues
 # from the cached prefix.
 #   nlfm [-c N] [-s N] [-q N] [--seed S] [--data DIR] [--model DIR] [--sock SOCK]   (~/.local/bin/nlfm -> this file; the shebang runs it under withkey)
 using HTTP, JSON3
 const SAMP = Ref((0.1, 50, 1.0))                               # temp, top-k, top-p for every continuation (-t -k -p set the defaults)
-const NCONT = Ref(0); const NSLOT = Ref(1); const NQ = Ref(1); const NGEN = 128; const IM_END = 124900; const PMAX = 60000
+const NCONT = Ref(1); const NSLOT = Ref(1); const NQ = Ref(1); const NGEN = 128; const IM_END = 124900; const PMAX = 60000
 const LEVELS = ["unrelated to what nate said, or not a sentence", "nate's voice, but a different subject", "the same subject, a different point",
                 "the same point in different words", "the same reply: meaning and nearly the words"]
 const CJ = "\e[38;2;242;40;60m"; const CC = "\e[38;2;255;122;0m"; const CL = "\e[38;2;0;184;217m"; const CU = "\e[38;2;0;174;107m"; const Z = "\e[0m"
@@ -2977,7 +2977,7 @@ end
 function arena(args)
     arg(ks, d) = (i = findfirst(in(ks), args); i === nothing ? d : args[i+1])
     CFG["sock"] = arg(("--sock",), "/run/user/1000/lfm3.sock"); CFG["model"] = arg(("--model",), expanduser("~/models/lfm3-1.7b-nate"))
-    NCONT[] = parse(Int, arg(("-c",), "0")); NSLOT[] = parse(Int, arg(("-s",), "1")); NQ[] = parse(Int, arg(("-q",), "1"))
+    NCONT[] = parse(Int, arg(("-c",), "1")); NSLOT[] = parse(Int, arg(("-s",), "1")); NQ[] = parse(Int, arg(("-q",), "1"))
     seed = UInt32(parse(Int, arg(("--seed",), string(rand(UInt32))))); SAMP[] = sampling()
     global D = Data(arg(("--data",), expanduser("~/models/lfm3-data"))); global VOCAB = vocabulary(CFG["model"])
     ts = unique(Int(e[1]) for e in D.ex if e[4] - e[3] >= 3); order = shuffle(MersenneTwister(seed), ts)
