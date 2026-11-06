@@ -11,17 +11,24 @@ sampling() = isfile(SAMPF) ? (v = split(read(SAMPF, String)); (parse(Float64, v[
 function help()
     t, k, p = sampling()
     """
-  nlfm [options]
-
-  \e[1m-c N\e[0m   continuations per transcript
-  \e[1m-q N\e[0m   transcripts per slot
-  \e[1m-s N\e[0m   transcript processing concurrency
-  \e[1m-t T\e[0m   temperature
-  \e[1m-k K\e[0m   top-k
-  \e[1m-p P\e[0m   top-p
-
-  \e[38;2;255;122;0mclaude\e[0m    \e[38;2;0;174;107mnate\e[0m    \e[38;2;0;184;217mnlfm\e[0m    \e[38;2;242;40;60mjev\e[0m
-  temp $t  top-k $k  top-p $p
+nlfm [options]
+	processing:
+		\e[1m-c\e[0m <continuations> per transcript
+		\e[1m-q\e[0m <transcripts>   per slot
+		\e[1m-s\e[0m <concurrency>   of transcripts
+	sampling:
+		\e[1m-t\e[0m <temperature>
+		\e[1m-k\e[0m <top-k>
+		\e[1m-p\e[0m <top-p>
+	defaults:
+		temp  $t
+		top-k $k
+		top-p $p
+	indicators:
+		\e[38;2;255;122;0mclaude\e[0m
+		\e[38;2;0;174;107mnate\e[0m
+		\e[38;2;0;184;217mnlfm\e[0m
+		\e[38;2;242;40;60mjev\e[0m
 """
 end
 if basename(PROGRAM_FILE) == "nlfm"
