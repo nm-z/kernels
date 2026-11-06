@@ -2880,8 +2880,8 @@ function judge(prefix::Vector{Int32}, actual::Vector{Int32}, fill::Vector{Int}) 
     end
 end
 
-function walk!(R::Run, S::Slot, t::Int, exs, seed)              # one transcript: its user turns in order on one growing prefix
-    f = tfirst(D, t); _, cs0, rs0, _ = Int.(exs[1]); prefix = D.tok[f+cs0+1:f+rs0]
+function walk!(R::Run, S::Slot, t::Int, all, n, seed)           # one transcript: the first n of its user turns in order on one growing prefix
+    f = tfirst(D, t); _, cs0, rs0, _ = Int.(all[1]); prefix = D.tok[f+cs0+1:f+rs0]; exs = all[1:min(n, end)]
     for (c, x) in turns(prefix); say!(R, S, c, x); end
     scores = Float64[]
     for (j, e) in enumerate(exs)
@@ -2907,10 +2907,10 @@ function drive(R::Run, order)                                   # slot i takes t
         Threads.@spawn try
             for qi in 1:NQ[]
                 k = (qi - 1) * NSLOT[] + S.i; k > length(order) && break
-                t = order[k]; exs = sort(bytr[t]; by = e -> e[3]); exs = exs[1:min(NCONT[], end)]
+                t = order[k]; exs = sort(bytr[t]; by = e -> e[3])
                 qi == 1 || say!(R, S, "", "")
-                say!(R, S, "", "transcript $t: $(length(exs)) of $(length(bytr[t])) user turns")
-                walk!(R, S, t, exs, (R.seed % 1000) * 1000 + k * 100)
+                say!(R, S, "", "transcript $t: $(min(NCONT[], length(exs))) of $(length(exs)) user turns")
+                walk!(R, S, t, exs, NCONT[], (R.seed % 1000) * 1000 + k * 100)
             end
         catch x
             say!(R, S, CJ, sprint(showerror, x))
