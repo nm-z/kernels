@@ -1,3 +1,5 @@
 [deps]
 AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
+HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
+JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
