@@ -2830,6 +2830,7 @@ D = nothing; VOCAB = nothing
 cut(t) = (i = findfirst(==(IM_END), t); i === nothing ? t : t[1:i-1])
 text(ids) = detok(VOCAB, ids)
 squeeze(t) = strip(replace(t, r"\n[ \t]*(\n[ \t]*)+" => "\n"))
+commas(n) = replace(string(n), r"(?<=\d)(?=(\d{3})+$)" => ",")
 notify_all(R) = lock(R.cond) do; notify(R.cond); end
 function say!(R::Run, S::Slot, col, txt)
     e = Entry(col, txt); lock(R.cond) do; push!(S.log, e); end; notify_all(R); e
@@ -2868,13 +2869,13 @@ function generate!(R::Run, S::Slot, prefix::Vector{Int32}, seed)  # one continua
     toks
 end
 
-function judge(prefix::Vector{Int32}, actual::Vector{Int32}, fill::Vector{Int})   # Jev: how close the fill is to the real reply; (score, confidence) or an error string
-    state = Dict("conversation_so_far_tail" => last(text(prefix), 2000), "what_nate_actually_replied" => text(cut(actual)), "candidate_reply" => text(fill))
+function judge(prefix::Vector{Int32}, actual::Vector{Int32}, fill::Vector{Int})   # Jev: how close the fill is to the real reply; (score, confidence, input tokens) or an error string
+    state = Dict("conversation_so_far" => text(prefix), "what_nate_actually_replied" => text(cut(actual)), "candidate_reply" => text(fill))
     qs = Dict("fill" => Dict("type" => "score", "criteria" => LEVELS, "instructions" => "How close is the candidate reply to what nate actually replied, as the next message in this conversation?"))
     body = JSON3.write(Dict("model" => "jev-1.13", "state" => state, "questions" => qs))
     try
-        r = HTTP.post("https://opencode.ai/zen/v1/systemone", ["authorization" => "Bearer " * ENV["KEY_OPENCODE_ZEN"], "content-type" => "application/json"], body; request_timeout = 30, retry = false)
-        a = JSON3.read(r.body)["answers"]["fill"]; (Float64(a["score"]), Float64(a["confidence"]))
+        r = HTTP.post("https://opencode.ai/zen/v1/systemone", ["authorization" => "Bearer " * ENV["KEY_OPENCODE_ZEN"], "content-type" => "application/json", "TypeSafe-Danger-Zone-Long-Context" => "true"], body; request_timeout = 120, retry = false)
+        j = JSON3.read(r.body); a = j["answers"]["fill"]; (Float64(a["score"]), Float64(a["confidence"]), Int(j["usage"]["input_tokens"]))
     catch x
         sprint(showerror, x)
     end
@@ -2891,7 +2892,7 @@ function walk!(R::Run, S::Slot, t::Int, all, n, seed)           # one transcript
         actual = D.tok[f+rs+1:f+re]
         say!(R, S, CU, text(cut(actual)))
         v = judge(prefix, actual, fill)
-        say!(R, S, CJ, v isa String ? "jev " * v : "jev " * string(round(v[1]; digits = 2))); v isa String || push!(scores, v[1])
+        say!(R, S, CJ, v isa String ? "jev " * v : "jev $(round(v[1]; digits = 2))  $(commas(v[3])) tok"); v isa String || push!(scores, v[1])
         j == length(exs) && break
         between = D.tok[f+re+1:f+Int(exs[j+1][3])]            # from the end of nate's real reply to the start of the next: claude's turns
         for (c, x) in turns(between); say!(R, S, c, x); end
