@@ -2974,6 +2974,29 @@ function tui(R::Run)
     end
 end
 
+function stream(R::Run)                                         # one slot: its log straight to stdout as it grows, the terminal wraps; blank lines dropped
+    S = R.slots[1]; n = 0; sent = 0; nl = true                  # n entries printed, sent chars of the last, nl: at a line start
+    function emit(col, t)
+        print(col)
+        for ch in t
+            if ch == '\n'; nl && continue; nl = true else nl = false end
+            print(ch)
+        end
+    end
+    while true
+        work, alldone = lock(R.cond) do
+            while length(S.log) == n && (n == 0 || sizeof(S.log[n].txt) == sent) && !S.done; wait(R.cond); end
+            (copy(S.log), S.done)
+        end
+        if n > 0 && sizeof(work[n].txt) > sent; emit(work[n].col, work[n].txt[sent+1:end]); sent = sizeof(work[n].txt); end
+        for e in work[n+1:end]
+            n > 0 && (nl || print("\n"); nl = true); n += 1; emit(e.col, e.txt); sent = sizeof(e.txt)
+        end
+        print(Z); flush(stdout)
+        alldone && (nl || println(); break)
+    end
+end
+
 function arena(args)
     arg(ks, d) = (i = findfirst(in(ks), args); i === nothing ? d : args[i+1])
     CFG["sock"] = arg(("--sock",), "/run/user/1000/lfm3.sock"); CFG["model"] = arg(("--model",), expanduser("~/models/lfm3-1.7b-nate"))
@@ -2983,6 +3006,7 @@ function arena(args)
     ts = unique(Int(e[1]) for e in D.ex if e[4] - e[3] >= 3); order = shuffle(MersenneTwister(seed), ts)
     R = Run(seed, [Slot(i, Entry[], false) for i in 1:NSLOT[]], Threads.Condition())
     drive(R, order)
+    NSLOT[] == 1 && return stream(R)
     try TTY[] = open("/dev/tty", "w") catch; end
     TTY[] === nothing || return tui(R)
     seen = zeros(Int, NSLOT[])                                 # not a terminal: each slot's finished lines, prefixed by its number
