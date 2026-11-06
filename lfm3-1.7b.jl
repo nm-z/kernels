@@ -2897,6 +2897,8 @@ function handler(http::HTTP.Stream)
     try
         if endswith(p, "/events"); events(http)
         elseif endswith(p, "/"); page(http)
+        elseif endswith(p, ".ttf")                           # the page's pixel font, from arena/
+            f = joinpath(@__DIR__, "arena", basename(p)); HTTP.setstatus(http, isfile(f) ? 200 : 404); HTTP.setheader(http, "content-type" => "font/ttf"); HTTP.setheader(http, "cache-control" => "max-age=86400"); HTTP.startwrite(http); isfile(f) && write(http, read(f))
         else
             HTTP.setstatus(http, 302); HTTP.setheader(http, "location" => p * "/"); HTTP.startwrite(http)
         end
