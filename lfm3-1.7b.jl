@@ -1,3 +1,4 @@
+#!/usr/bin/env -S withkey "OpenCode Zen" -- julia --project=/home/nate/src/kernels/env/amd --startup-file=no -t 4,1
 # lfm3-1.7b.jl: LFM3-1.7B-Base (lfm3: 13 gated short-conv, 6 full-attention and 5 sliding-attention layers, hidden 2048)
 # in BF16 on engi's Radeon RX 7700 XT (gfx1101, wave32, 12 GB GDDR6), KernelAbstractions over AMDGPU.jl. One cooperative
 # persistent kernel runs a whole request: the prefill (positions in blocks of 16) then the decode loop.
@@ -2772,17 +2773,17 @@ function train(args)
 end
 
 
-# ---- the arena: https://nm-z.com/arena/ — 4 random conversation states from the transcripts, the model's reply in 4 panes (one
-# sampling setting each, streamed from the engine), the reply nate actually gave, and Jev's similarity score for each pane
-# (jev-1.13 through OpenCode Zen: 4 Score questions in one request); the best pane is highlighted. The page is four quadrants, a
-# blank page folded twice (arena/index.html); a sample's replies appear whole once scored, 2 s apart. The engine serves the model on SOCK.
-#   withkey "OpenCode Zen" -- julia --project=env/amd -t 4,1 lfm3-1.7b.jl --arena --data ~/models/lfm3-data --model DIR --sock SOCK [--listen 127.0.0.1:18650]
+# ---- the arena, in the terminal: N random conversation states from the transcripts; for each, the reply nate actually gave
+# (yellow), the model's reply under 4 sampling settings streamed from the engine one after another (cyan), then Jev's similarity
+# score for each (red; jev-1.13 through OpenCode Zen, 4 Score questions in one request), the best marked green. 2 s between states.
+#   nlfm-arena [-n STATES] [-r ROLLOUTS] [--seed S] [--data DIR] [--model DIR] [--sock SOCK]   (~/.local/bin/nlfm-arena -> this file; the shebang runs it under withkey)
 using HTTP, JSON3
-const PANES = [("A · temp 0.1 top-k 50", 0.1, 50, 1.0), ("B · temp 0.6 top-k 50", 0.6, 50, 1.0),
-               ("C · temp 0.7 top-k 20 top-p 0.95", 0.7, 20, 0.95), ("D · temp 1.0 top-p 0.9", 1.0, 0, 0.9)]
-const NSAMP = 4; const NGEN = 96; const IM_END = 124900          # 4 samples x 4 panes: 16 outcomes a load, then it stops
+const SETTINGS = [("temp 0.1 top-k 50", 0.1, 50, 1.0), ("temp 0.6 top-k 50", 0.6, 50, 1.0), ("temp 0.7 top-k 20 top-p 0.95", 0.7, 20, 0.95), ("temp 1.0 top-p 0.9", 1.0, 0, 0.9)]
+const NSAMP = Ref(1); const NROLL = Ref(4); const NGEN = 96; const IM_END = 124900
 const LEVELS = ["unrelated to what nate said, or not a sentence", "nate's voice, but a different subject", "the same subject, a different point",
                 "the same point in different words", "the same reply: meaning and nearly the words"]
+setting(k) = SETTINGS[(k - 1) % length(SETTINGS) + 1]       # rollout k's sampling; past 4 the settings repeat with other seeds
+rname(k) = string('A' + (k - 1) % 26, k > 26 ? string(k) : "")
 
 mutable struct Pane; toks::Vector{Int}; done::Bool; err::String; end
 mutable struct Sample
@@ -2790,33 +2791,29 @@ mutable struct Sample
     scores::Vector{Float64}; conf::Vector{Float64}; best::Int; jerr::String; scored::Bool
 end
 struct Run; id::String; seed::UInt32; samples::Vector{Sample}; cond::Threads.Condition; end
-const RUNS = Dict{String,Run}(); const RLK = ReentrantLock()
 const CFG = Dict{String,String}()
 D = nothing; VOCAB = nothing; NAMES = String[]
 
-esc(s) = replace(s, '&' => "&amp;", '<' => "&lt;", '>' => "&gt;")
-query(target) = (i = findfirst('?', target); i === nothing ? Dict{String,String}() : Dict(String(first(p)) => String(get(p, 2, "")) for p in (split(kv, '='; limit = 2) for kv in split(target[i+1:end], '&')) if !isempty(first(p))))
 cut(t) = (i = findfirst(==(IM_END), t); i === nothing ? t : t[1:i-1])
 text(ids) = detok(VOCAB, ids)
 notify_all(R) = lock(R.cond) do; notify(R.cond); end
 
 function pick(rng)                                             # any example whose context fits the engine comfortably
     ok = [i for (i, e) in enumerate(D.ex) if e[3] - e[2] <= 1200 && e[4] - e[3] >= 3]
-    [ok[rand(rng, 1:length(ok))] for _ in 1:NSAMP]
+    [ok[rand(rng, 1:length(ok))] for _ in 1:NSAMP[]]
 end
 function newrun(seed::UInt32)
-    rng = MersenneTwister(seed); S = Sample[]
+    rng = MersenneTwister(seed); S = Sample[]; n = NROLL[]
     for (k, i) in enumerate(pick(rng))
         t, cs, rs, re = Int.(D.ex[i]); f = tfirst(D, t)
-        push!(S, Sample(k, t, i, D.tr[t+1][5] != 0, D.tok[f+cs+1:f+rs], D.tok[f+rs+1:f+re], [Pane(Int[], false, "") for _ in PANES],
-                        fill(NaN, 4), fill(NaN, 4), 0, "", false))
+        push!(S, Sample(k, t, i, D.tr[t+1][5] != 0, D.tok[f+cs+1:f+rs], D.tok[f+rs+1:f+re], [Pane(Int[], false, "") for _ in 1:n],
+                        fill(NaN, n), fill(NaN, n), 0, "", false))
     end
-    R = Run(string(seed, base = 16), seed, S, Threads.Condition()); lock(RLK) do; RUNS[R.id] = R; end
-    errormonitor(@async drive(R)); R
+    R = Run(string(seed, base = 16), seed, S, Threads.Condition()); errormonitor(@async drive(R)); R
 end
 
-function generate!(R::Run, s::Sample, k::Int)                   # one pane: flashd's engine protocol on the socket
-    P = s.panes[k]; (_, temp, topk, topp) = PANES[k]
+function generate!(R::Run, s::Sample, k::Int)                   # one rollout: flashd's engine protocol on the socket
+    P = s.panes[k]; (_, temp, topk, topp) = setting(k)
     try
         c = connect(CFG["sock"])
         println(c, "stop ", IM_END); println(c, "sample ", (R.seed % 1000) * 7 + k, " ", temp, " ", topk, " ", topp)
@@ -2840,85 +2837,124 @@ function generate!(R::Run, s::Sample, k::Int)                   # one pane: flas
 end
 
 function judge!(s::Sample)
-    tail = text(s.ctx); tail = last(tail, 2000)
-    cands = Dict("ABCD"[k] => text(cut(s.panes[k].toks)) for k in 1:4)
+    n = length(s.panes); tail = last(text(s.ctx), 2000)
+    cands = Dict(rname(k) => text(cut(s.panes[k].toks)) for k in 1:n)
     state = Dict("conversation_so_far_tail" => tail, "what_nate_actually_replied" => text(cut(s.actual)), "candidate_replies" => cands)
-    qs = Dict(string(c) => Dict("type" => "score", "criteria" => LEVELS,
-                                "instructions" => "How close is candidate reply $c to what nate actually replied, as the next message in this conversation?") for c in "ABCD")
+    qs = Dict(rname(k) => Dict("type" => "score", "criteria" => LEVELS,
+                               "instructions" => "How close is candidate reply $(rname(k)) to what nate actually replied, as the next message in this conversation?") for k in 1:n)
     body = JSON3.write(Dict("model" => "jev-1.13", "state" => state, "questions" => qs))
     try
         r = HTTP.post("https://opencode.ai/zen/v1/systemone", ["authorization" => "Bearer " * ENV["KEY_OPENCODE_ZEN"], "content-type" => "application/json"], body; request_timeout = 30, retry = false)
         a = JSON3.read(r.body)["answers"]
-        for k in 1:4; x = a[string("ABCD"[k])]; s.scores[k] = x["score"]; s.conf[k] = x["confidence"]; end
-        s.best = argmax([(s.scores[k], s.conf[k]) for k in 1:4])
+        for k in 1:n; x = a[rname(k)]; s.scores[k] = x["score"]; s.conf[k] = x["confidence"]; end
+        s.best = argmax([(s.scores[k], s.conf[k]) for k in 1:n])
     catch e
         s.jerr = sprint(showerror, e)
     end
     s.scored = true
 end
 
-function drive(R::Run)                                          # samples one after another; a sample's 4 panes at once
+function drive(R::Run)                                          # states one after another, 2 s apart; a state's rollouts at once
     for s in R.samples
-        ts = [Threads.@spawn generate!(R, s, k) for k in 1:4]; foreach(wait, ts)
+        ts = [Threads.@spawn generate!(R, s, k) for k in 1:length(s.panes)]; foreach(wait, ts)
         judge!(s); notify_all(R); sleep(2)
     end
 end
 
-
-function page(http::HTTP.Stream)
-    HTTP.setstatus(http, 200); HTTP.setheader(http, "content-type" => "text/html; charset=utf-8"); HTTP.setheader(http, "cache-control" => "no-store")
-    HTTP.startwrite(http); write(http, read(joinpath(@__DIR__, "arena", "index.html")))
+# ---- the terminal: a yellow nate line, then one pane a rollout (cyan, streaming), its jev score on the pane's last line (red, green for the best)
+const Y = "\e[33m"; const C = "\e[36m"; const G = "\e[32m"; const R = "\e[31m"; const W = "\e[37m"; const Z = "\e[0m"
+squeeze(t) = strip(replace(t, r"\n[ \t]*(\n[ \t]*)+" => "\n"))
+function wrap(t, w)                                             # lines of at most w characters (tabs as spaces, no empty lines)
+    out = String[]
+    for l in split(replace(t, '\t' => "    "), '\n')
+        isempty(strip(l)) && continue
+        l = String(l)
+        while length(l) > w; push!(out, l[1:prevind(l, nextind(l, 0, w + 1))]); l = l[nextind(l, 0, w + 1):end]; end
+        push!(out, l)
+    end
+    out
 end
-
-function events(http::HTTP.Stream)                              # JSON lines: a sample's start, each pane's tokens as they come, then its scores; 2 s between samples
-    q = query(http.message.target)
-    seed = haskey(q, "seed") ? parse(UInt32, q["seed"]) : rand(UInt32)
-    R = newrun(seed)
-    HTTP.setstatus(http, 200); HTTP.setheader(http, "content-type" => "application/x-ndjson"); HTTP.setheader(http, "cache-control" => "no-store"); HTTP.setheader(http, "x-accel-buffering" => "no")
-    HTTP.startwrite(http)
-    send(e) = (write(http, JSON3.write(e) * "\n"); flush(http))
-    for s in R.samples
-        send(Dict("i" => s.i, "seed" => seed, "held" => s.held, "nate" => text(cut(s.actual))))
-        sent = zeros(Int, 4)
-        while true
-            out, fin = lock(R.cond) do
-                while all(k -> length(s.panes[k].toks) == sent[k], 1:4) && !s.scored; wait(R.cond); end
-                ([(k, s.panes[k].toks[sent[k]+1:end]) for k in 1:4 if length(s.panes[k].toks) > sent[k]], s.scored)
-            end
-            for (k, toks) in out; send(Dict("i" => s.i, "p" => k, "t" => text(toks))); sent[k] += length(toks); end
-            fin && break
-        end
-        send(Dict("i" => s.i, "scores" => [isnan(x) ? nothing : x for x in s.scores], "conf" => [isnan(x) ? nothing : x for x in s.conf], "best" => s.best, "error" => s.jerr))
+const TTY = Ref{Union{Nothing,IOStream}}(nothing); const LASTROW = Ref(1)              # the terminal itself: withkey pipes stdout to mask the key, so the TUI draws on /dev/tty
+function ttysize()                                             # rows, cols by TIOCGWINSZ
+    ws = zeros(UInt16, 4); r = ccall(:ioctl, Cint, (Cint, Culong, Ptr{UInt16}), fd(TTY[]), 0x5413, ws)
+    r == 0 && ws[1] > 0 && ws[2] > 0 ? (Int(ws[1]), Int(ws[2])) : (24, 80)
+end
+at(r, c) = print(TTY[], "\e[", r, ";", c, "H")
+function paint(r0, c0, h, w, lines, col)                       # the last h lines of `lines` in a box at (r0, c0), the rest blank
+    v = length(lines) > h ? lines[end-h+1:end] : lines
+    for i in 1:h
+        at(r0 + i - 1, c0); l = i <= length(v) ? v[i] : ""
+        print(TTY[], col, l, Z, " "^max(0, w - length(l)))
     end
 end
-
-function handler(http::HTTP.Stream)
-    p = first(split(http.message.target, '?'))
-    try
-        if endswith(p, "/events"); events(http)
-        elseif endswith(p, "/"); page(http)
-        elseif endswith(p, ".ttf")                           # the page's pixel font, from arena/
-            f = joinpath(@__DIR__, "arena", basename(p)); HTTP.setstatus(http, isfile(f) ? 200 : 404); HTTP.setheader(http, "content-type" => "font/ttf"); HTTP.setheader(http, "cache-control" => "max-age=86400"); HTTP.startwrite(http); isfile(f) && write(http, read(f))
-        else
-            HTTP.setstatus(http, 302); HTTP.setheader(http, "location" => p * "/"); HTTP.startwrite(http)
+function tui(Rn::Run)
+    T = TTY[]; rows, cols = ttysize(); n = NROLL[]
+    nc = n <= 2 ? n : n <= 6 ? 2 : n <= 12 ? 3 : 4; nr = cld(n, nc)
+    print(T, "\e[?25l"); try
+        for s in Rn.samples
+            print(T, "\e[2J"); at(1, 1)
+            nl = wrap("nate: " * squeeze(text(cut(s.actual))), cols); nl = nl[1:min(4, length(nl))]
+            for l in nl; println(T, Y, l, Z); end
+            top = length(nl) + 2; ph = max(3, (rows - top - (nr - 1)) ÷ nr); pw = (cols - (nc - 1)) ÷ nc
+            box(k) = (top + ((k - 1) ÷ nc) * (ph + 1), 1 + ((k - 1) % nc) * (pw + 1)); LASTROW[] = top + nr * (ph + 1) - 2
+            for k in 1:n; r0, c0 = box(k); at(r0, c0); print(T, W, rname(k), " ", setting(k)[1], Z); end
+            seen = zeros(Int, n); fin = falses(n); scored = false
+            while !scored
+                todo, scored = lock(Rn.cond) do
+                    quiet(k) = length(s.panes[k].toks) == seen[k] && (!s.panes[k].done || fin[k])
+                    while all(quiet, 1:n) && !s.scored; wait(Rn.cond); end
+                    ([k for k in 1:n if !quiet(k)], s.scored)
+                end
+                for k in todo
+                    P = s.panes[k]; seen[k] = length(P.toks); fin[k] = P.done; r0, c0 = box(k)
+                    ls = wrap(text(cut(P.toks)) * (isempty(P.err) ? "" : "\n" * P.err), pw)
+                    paint(r0 + 1, c0, ph - 2, pw, ls, C)
+                end
+                scored || continue
+                for k in 1:n
+                    r0, c0 = box(k); at(r0 + ph - 1, c0)
+                    print(T, k == s.best ? G : R, "jev ", isnan(s.scores[k]) ? first(s.jerr, pw - 4) : string(round(s.scores[k]; digits = 2)), Z)
+                end
+                flush(T)
+            end
+            flush(T)
+            s === last(Rn.samples) || sleep(2)
         end
-    catch e
-        e isa Base.IOError || e isa HTTP.HTTPError || rethrow()
+    finally
+        print(T, "\e[?25h"); at(min(rows, LASTROW[] + 1), 1); flush(T)
     end
 end
 
 function arena(args)
-    arg(k, d) = (i = findfirst(==(k), args); i === nothing ? d : args[i+1])
-    CFG["sock"] = arg("--sock", "/run/user/1000/lfm3.sock"); CFG["model"] = arg("--model", expanduser("~/models/lfm3-1.7b-nate"))
-    listen = arg("--listen", "127.0.0.1:18650")
-    global D = Data(arg("--data", expanduser("~/models/lfm3-data"))); global VOCAB = vocabulary(CFG["model"])
-    nf = joinpath(arg("--data", expanduser("~/models/lfm3-data")), "names.txt"); isfile(nf) && (global NAMES = readlines(nf))
-    println("arena: $(length(D.ex)) examples, $(length(D.tr)) transcripts, listening on $listen"); flush(stdout)
-    srv = HTTP.Server(; address = listen, handler = handler, stream = true); HTTP.listen!(srv); wait(srv)
+    arg(ks, d) = (i = findfirst(in(ks), args); i === nothing ? d : args[i+1])
+    CFG["sock"] = arg(("--sock",), "/run/user/1000/lfm3.sock"); CFG["model"] = arg(("--model",), expanduser("~/models/lfm3-1.7b-nate"))
+    NSAMP[] = parse(Int, arg(("-n", "--n"), "1")); NROLL[] = parse(Int, arg(("-r", "-o", "--rollouts"), "4"))
+    seed = UInt32(parse(Int, arg(("--seed",), string(rand(UInt32)))))
+    global D = Data(arg(("--data",), expanduser("~/models/lfm3-data"))); global VOCAB = vocabulary(CFG["model"])
+    Rn = newrun(seed)
+    try TTY[] = open("/dev/tty", "w") catch; end
+    TTY[] === nothing || return tui(Rn)
+    for s in Rn.samples                                        # not a terminal: the lines in order
+        println(Y, "nate: ", squeeze(text(cut(s.actual))), Z)
+        for k in 1:NROLL[]
+            P = s.panes[k]
+            lock(Rn.cond) do
+                while !P.done; wait(Rn.cond); end
+            end
+            println(C, squeeze(text(cut(P.toks))), isempty(P.err) ? "" : R * P.err, Z)
+        end
+        lock(Rn.cond) do
+            while !s.scored; wait(Rn.cond); end
+        end
+        for k in 1:NROLL[]
+            println(k == s.best ? G : R, "jev ", rname(k), " ", isnan(s.scores[k]) ? s.jerr : string(round(s.scores[k]; digits = 2)), Z)
+        end
+        flush(stdout)
+    end
 end
 
 function main(args)
-    if "--arena" in args
+    if "--arena" in args || basename(PROGRAM_FILE) == "nlfm-arena"
         arena(args)
     elseif "--train" in args
         train(args)
@@ -2928,6 +2964,6 @@ function main(args)
         serve(args[k+1], args[i+1])
     end
 end
-if abspath(PROGRAM_FILE) == @__FILE__() && SRV[] === nothing
+if realpath(PROGRAM_FILE) == realpath(@__FILE__()) && SRV[] === nothing
     main(ARGS)
 end
