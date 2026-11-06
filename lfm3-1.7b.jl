@@ -14,8 +14,7 @@ function help()
 nlfm [options]
 	processing:
 		\e[1m-c\e[0m <continuations> per transcript
-		\e[1m-q\e[0m <transcripts>   per slot
-		\e[1m-s\e[0m <concurrency>   of transcripts
+		\e[1m-q\e[0m <transcripts>
 	sampling:
 		\e[1m-t\e[0m <temperature>
 		\e[1m-k\e[0m <top-k>
@@ -23,7 +22,7 @@ nlfm [options]
 	defaults:
 		continuations all  temp  $t
 		transcripts   1    top-k $k
-		concurrency   1    top-p $p
+		                   top-p $p
 	indicators:
 		\e[38;2;255;122;0mclaude\e[0m
 		\e[38;2;0;174;107mnate\e[0m
@@ -2810,13 +2809,13 @@ end
 
 # ---- nlfm: fill in nate's replies. A slot takes a transcript and walks its user turns in order on one growing prefix: at each,
 # nlfm continues the prefix (its fill), never seeing nate's real reply; the prefix then gets the fill, then claude's real next turn,
-# and so on. Jev scores each fill against the real reply (jev-1.13 through OpenCode Zen). -s slots run transcripts at once, one
-# pane each; -q transcripts a slot; -c user turns a transcript ("all" by default). The engine snapshots each prompt, so the next continues
-# from the cached prefix.
-#   nlfm [-c N] [-s N] [-q N] [--seed S] [--data DIR] [--model DIR] [--sock SOCK]   (~/.local/bin/nlfm -> this file; the shebang runs it under withkey)
+# and so on. Jev scores each fill against the real reply (jev-1.13 through OpenCode Zen). One process is one slot: -q transcripts,
+# -c user turns a transcript ("all" by default); more concurrency is more processes. The engine snapshots each prompt, so the next
+# continues from the cached prefix.
+#   nlfm [-c N] [-q N] [--seed S] [--data DIR] [--model DIR] [--sock SOCK]   (~/.local/bin/nlfm -> this file; the shebang runs it under withkey)
 using HTTP, JSON3
 const SAMP = Ref((0.1, 50, 1.0))                               # temp, top-k, top-p for every continuation (-t -k -p set the defaults)
-const NCONT = Ref(typemax(Int)); const NSLOT = Ref(1); const NQ = Ref(1); const NGEN = 128; const IM_END = 124900; const PMAX = 60000
+const NCONT = Ref(typemax(Int)); const NQ = Ref(1); const NGEN = 128; const IM_END = 124900; const PMAX = 60000
 const LEVELS = ["unrelated to what nate said, or not a sentence", "nate's voice, but a different subject", "the same subject, a different point",
                 "the same point in different words", "the same reply: meaning and nearly the words"]
 const CJ = "\e[38;2;242;40;60m"; const CC = "\e[38;2;255;122;0m"; const CL = "\e[38;2;0;184;217m"; const CU = "\e[38;2;0;174;107m"; const Z = "\e[0m"
@@ -2901,13 +2900,13 @@ function walk!(R::Run, S::Slot, t::Int, all, n, seed)           # one transcript
     isempty(scores) || say!(R, S, CJ, "jev mean $(round(sum(scores) / length(scores); digits = 2)) over $(length(scores))")
 end
 
-function drive(R::Run, order)                                   # slot i takes transcripts i, i+s, i+2s, ... up to q of them
+function drive(R::Run, order)                                   # the slot takes the first q transcripts of the order
     bytr = Dict{Int,Vector{NTuple{4,UInt32}}}()
     for e in D.ex; e[4] - e[3] >= 3 && push!(get!(bytr, Int(e[1]), NTuple{4,UInt32}[]), e); end
     for S in R.slots
         Threads.@spawn try
             for qi in 1:NQ[]
-                k = (qi - 1) * NSLOT[] + S.i; k > length(order) && break
+                k = qi; k > length(order) && break
                 t = order[k]; exs = sort(bytr[t]; by = e -> e[3])
                 qi == 1 || say!(R, S, "", "")
                 say!(R, S, "", "transcript $t: $(min(NCONT[], length(exs))) of $(length(exs)) user turns")
@@ -2921,61 +2920,7 @@ function drive(R::Run, order)                                   # slot i takes t
     end
 end
 
-# ---- the terminal: one pane a slot, its log's tail, wrapped; withkey pipes stdout to mask the key, so the TUI draws on /dev/tty
-const TTY = Ref{Union{Nothing,IOStream}}(nothing); const LASTROW = Ref(1)
-function ttysize()                                             # rows, cols by TIOCGWINSZ
-    ws = zeros(UInt16, 4); r = ccall(:ioctl, Cint, (Cint, Culong, Ptr{UInt16}), fd(TTY[]), 0x5413, ws)
-    r == 0 && ws[1] > 0 && ws[2] > 0 ? (Int(ws[1]), Int(ws[2])) : (24, 80)
-end
-at(r, c) = print(TTY[], "\e[", r, ";", c, "H")
-function wrap(t, w)                                             # lines of at most w characters (tabs as spaces, no empty lines)
-    out = String[]
-    for l in split(replace(t, '\t' => "    "), '\n')
-        isempty(strip(l)) && continue
-        l = String(l)
-        while length(l) > w; push!(out, l[1:prevind(l, nextind(l, 0, w + 1))]); l = l[nextind(l, 0, w + 1):end]; end
-        push!(out, l)
-    end
-    out
-end
-function paint(r0, c0, h, w, log)                               # the last h wrapped lines of the log in a box at (r0, c0)
-    v = Tuple{String,String}[]
-    for e in Iterators.reverse(log)
-        ls = wrap(squeeze(e.txt), w); isempty(ls) && isempty(strip(e.txt)) && (ls = [""])
-        for l in Iterators.reverse(ls); pushfirst!(v, (e.col, l)); end
-        length(v) >= h && break
-    end
-    length(v) > h && (v = v[end-h+1:end])
-    for i in 1:h
-        at(r0 + i - 1, c0)
-        if i <= length(v); c, l = v[i]; print(TTY[], c, l, Z, " "^max(0, w - length(l))) else print(TTY[], " "^w) end
-    end
-end
-function tui(R::Run)
-    T = TTY[]; rows, cols = ttysize(); n = NSLOT[]
-    nc = n <= 2 ? n : n <= 6 ? 2 : n <= 12 ? 3 : 4; nr = cld(n, nc)
-    ph = (rows - (nr - 1)) ÷ nr; pw = (cols - (nc - 1)) ÷ nc
-    box(k) = (1 + ((k - 1) ÷ nc) * (ph + 1), 1 + ((k - 1) % nc) * (pw + 1)); LASTROW[] = nr * (ph + 1) - 1
-    print(T, "\e[?25l\e[2J"); try
-        last = Dict{Int,Tuple{Int,String}}()
-        while true
-            alldone = lock(R.cond) do
-                changed(S) = (length(S.log), isempty(S.log) ? "" : S.log[end].txt) != get(last, S.i, (0, ""))
-                while !any(changed, R.slots) && !all(S -> S.done, R.slots); wait(R.cond); end
-                for S in R.slots
-                    changed(S) || continue
-                    last[S.i] = (length(S.log), isempty(S.log) ? "" : S.log[end].txt); r0, c0 = box(S.i); paint(r0, c0, ph, pw, S.log)
-                end
-                all(S -> S.done, R.slots)
-            end
-            flush(T); alldone && break
-        end
-    finally
-        print(T, "\e[?25h"); at(rows, 1); println(T); flush(T)
-    end
-end
-
-function stream(R::Run)                                         # one slot: its log straight to stdout as it grows, the terminal wraps; blank lines dropped
+function stream(R::Run)                                         # the log straight to stdout as it grows; the terminal wraps; blank lines dropped
     S = R.slots[1]; n = 0; sent = 0; nl = true                  # n entries printed, sent chars of the last, nl: at a line start
     function emit(col, t)
         print(col)
@@ -3001,29 +2946,13 @@ end
 function arena(args)
     arg(ks, d) = (i = findfirst(in(ks), args); i === nothing ? d : args[i+1])
     CFG["sock"] = arg(("--sock",), "/run/user/1000/lfm3.sock"); CFG["model"] = arg(("--model",), expanduser("~/models/lfm3-1.7b-nate"))
-    c = arg(("-c",), "all"); NCONT[] = c == "all" ? typemax(Int) : parse(Int, c); NSLOT[] = parse(Int, arg(("-s",), "1")); NQ[] = parse(Int, arg(("-q",), "1"))
+    c = arg(("-c",), "all"); NCONT[] = c == "all" ? typemax(Int) : parse(Int, c); NQ[] = parse(Int, arg(("-q",), "1"))
     seed = UInt32(parse(Int, arg(("--seed",), string(rand(UInt32))))); SAMP[] = sampling()
     global D = Data(arg(("--data",), expanduser("~/models/lfm3-data"))); global VOCAB = vocabulary(CFG["model"])
     ts = unique(Int(e[1]) for e in D.ex if e[4] - e[3] >= 3); order = shuffle(MersenneTwister(seed), ts)
-    R = Run(seed, [Slot(i, Entry[], false) for i in 1:NSLOT[]], Threads.Condition())
+    R = Run(seed, [Slot(1, Entry[], false)], Threads.Condition())
     drive(R, order)
-    NSLOT[] == 1 && return stream(R)
-    try TTY[] = open("/dev/tty", "w") catch; end
-    TTY[] === nothing || return tui(R)
-    seen = zeros(Int, NSLOT[])                                 # not a terminal: each slot's finished lines, prefixed by its number
-    while true
-        lines, alldone = lock(R.cond) do
-            while all(S -> length(S.log) - 1 <= seen[S.i], R.slots) && !all(S -> S.done, R.slots); wait(R.cond); end
-            out = String[]
-            for S in R.slots
-                upto = S.done ? length(S.log) : length(S.log) - 1
-                for e in S.log[seen[S.i]+1:upto]; push!(out, string(NSLOT[] > 1 ? "$(S.i) " : "", e.col, squeeze(e.txt), Z)); end
-                seen[S.i] = max(seen[S.i], upto)
-            end
-            (out, all(S -> S.done, R.slots))
-        end
-        foreach(println, lines); flush(stdout); alldone && break
-    end
+    stream(R)
 end
 
 function main(args)
