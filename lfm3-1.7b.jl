@@ -9,8 +9,8 @@
 const HELP = """
   nlfm [options]
 
-  \e[1m-n N\e[0m   states: sequences that end where one of nate's replies begins   \e[2m1\e[0m
-  \e[1m-r N\e[0m   rollouts: continuations sampled from each state, one pane each   \e[2m4\e[0m
+  \e[1m-n N\e[0m   states: sequences that end where one of nate's replies begins
+  \e[1m-r N\e[0m   rollouts: continuations sampled from each state, one pane each
 
   \e[38;2;255;122;0mclaude\e[0m    \e[38;2;0;174;107mnate\e[0m    \e[38;2;0;184;217mnlfm\e[0m    \e[38;2;242;40;60mjev\e[0m
 """
@@ -2790,7 +2790,7 @@ end
 #   nlfm [-n STATES] [-r ROLLOUTS] [--seed S] [--data DIR] [--model DIR] [--sock SOCK]   (~/.local/bin/nlfm -> this file; the shebang runs it under withkey)
 using HTTP, JSON3
 const SETTINGS = [("temp 0.1 top-k 50", 0.1, 50, 1.0), ("temp 0.6 top-k 50", 0.6, 50, 1.0), ("temp 0.7 top-k 20 top-p 0.95", 0.7, 20, 0.95), ("temp 1.0 top-p 0.9", 1.0, 0, 0.9)]
-const NSAMP = Ref(1); const NROLL = Ref(4); const NGEN = 96; const IM_END = 124900
+const NSAMP = Ref(1); const NROLL = Ref(1); const NGEN = 96; const IM_END = 124900
 const LEVELS = ["unrelated to what nate said, or not a sentence", "nate's voice, but a different subject", "the same subject, a different point",
                 "the same point in different words", "the same reply: meaning and nearly the words"]
 setting(k) = SETTINGS[(k - 1) % length(SETTINGS) + 1]       # rollout k's sampling; past 4 the settings repeat with other seeds
@@ -2952,7 +2952,7 @@ end
 function arena(args)
     arg(ks, d) = (i = findfirst(in(ks), args); i === nothing ? d : args[i+1])
     CFG["sock"] = arg(("--sock",), "/run/user/1000/lfm3.sock"); CFG["model"] = arg(("--model",), expanduser("~/models/lfm3-1.7b-nate"))
-    NSAMP[] = parse(Int, arg(("-n", "--n"), "1")); NROLL[] = parse(Int, arg(("-r", "-o", "--rollouts"), "4"))
+    NSAMP[] = parse(Int, arg(("-n", "--n"), "1")); NROLL[] = parse(Int, arg(("-r", "-o", "--rollouts"), "1"))
     seed = UInt32(parse(Int, arg(("--seed",), string(rand(UInt32)))))
     global D = Data(arg(("--data",), expanduser("~/models/lfm3-data"))); global VOCAB = vocabulary(CFG["model"])
     Rn = newrun(seed)
