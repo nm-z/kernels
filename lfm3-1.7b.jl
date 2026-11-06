@@ -2772,7 +2772,7 @@ function train(args)
 end
 
 
-# ---- the arena: https://nm-z.com/arena/ — 16 random conversation states from the transcripts, the model's reply in 4 panes (one
+# ---- the arena: https://nm-z.com/arena/ — 4 random conversation states from the transcripts, the model's reply in 4 panes (one
 # sampling setting each, streamed from the engine), the reply nate actually gave, and Jev's similarity score for each pane
 # (jev-1.13 through OpenCode Zen: 4 Score questions in one request); the best pane is highlighted. The page is four quadrants, a
 # blank page folded twice (arena/index.html); a sample's replies appear whole once scored, 2 s apart. The engine serves the model on SOCK.
@@ -2780,7 +2780,7 @@ end
 using HTTP, JSON3
 const PANES = [("A · temp 0.1 top-k 50", 0.1, 50, 1.0), ("B · temp 0.6 top-k 50", 0.6, 50, 1.0),
                ("C · temp 0.7 top-k 20 top-p 0.95", 0.7, 20, 0.95), ("D · temp 1.0 top-p 0.9", 1.0, 0, 0.9)]
-const NSAMP = 16; const NGEN = 96; const IM_END = 124900
+const NSAMP = 4; const NGEN = 96; const IM_END = 124900          # 4 samples x 4 panes: 16 outcomes a load, then it stops
 const LEVELS = ["unrelated to what nate said, or not a sentence", "nate's voice, but a different subject", "the same subject, a different point",
                 "the same point in different words", "the same reply: meaning and nearly the words"]
 
