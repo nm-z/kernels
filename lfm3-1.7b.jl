@@ -2776,7 +2776,7 @@ end
 # ---- the arena, in the terminal: N random conversation states from the transcripts; for each, the reply nate actually gave
 # (yellow), the model's reply under 4 sampling settings streamed from the engine one after another (cyan), then Jev's similarity
 # score for each (red; jev-1.13 through OpenCode Zen, 4 Score questions in one request), the best marked green. 2 s between states.
-#   nlfm-arena [-n STATES] [-r ROLLOUTS] [--seed S] [--data DIR] [--model DIR] [--sock SOCK]   (~/.local/bin/nlfm-arena -> this file; the shebang runs it under withkey)
+#   nlfm [-n STATES] [-r ROLLOUTS] [--seed S] [--data DIR] [--model DIR] [--sock SOCK]   (~/.local/bin/nlfm -> this file; the shebang runs it under withkey)
 using HTTP, JSON3
 const SETTINGS = [("temp 0.1 top-k 50", 0.1, 50, 1.0), ("temp 0.6 top-k 50", 0.6, 50, 1.0), ("temp 0.7 top-k 20 top-p 0.95", 0.7, 20, 0.95), ("temp 1.0 top-p 0.9", 1.0, 0, 0.9)]
 const NSAMP = Ref(1); const NROLL = Ref(4); const NGEN = 96; const IM_END = 124900
@@ -2954,7 +2954,7 @@ function arena(args)
 end
 
 function main(args)
-    if "--arena" in args || basename(PROGRAM_FILE) == "nlfm-arena"
+    if "--arena" in args || basename(PROGRAM_FILE) == "nlfm"
         arena(args)
     elseif "--train" in args
         train(args)
