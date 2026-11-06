@@ -23,8 +23,9 @@ body{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
         const d = q[e.p - 1]; cur[e.p - 1].textContent += e.t; d.scrollTop = d.scrollHeight;
       } else if (e.scores !== undefined) {              // scored: the score in front of the reply, the best in green
         q.forEach((d, k) => {
-          const p = cur[k]; p.textContent = (e.scores[k] == null ? '' : e.scores[k].toFixed(2) + ' ') + p.textContent;
-          if (e.best === k + 1) p.className = 'best';
+          const best = e.best === k + 1;
+          if (best) cur[k].className = 'best';
+          line(d, best ? 'best' : '', 'jev ' + (e.scores[k] == null ? e.error : e.scores[k].toFixed(2)));
           line(d, '', '');
         });
       }
