@@ -14,8 +14,8 @@ function help()
   nlfm [options]
 
   \e[1m-c N\e[0m   continuations per transcript
-  \e[1m-s N\e[0m   slots: transcripts in flight at once, one pane each
-  \e[1m-q N\e[0m   queue: transcripts a slot works through
+  \e[1m-q N\e[0m   transcripts per slot
+  \e[1m-s N\e[0m   transcript processing concurrency
   \e[1m-t T\e[0m   temperature   \e[2m$t\e[0m
   \e[1m-k K\e[0m   top-k         \e[2m$k\e[0m
   \e[1m-p P\e[0m   top-p         \e[2m$p\e[0m
