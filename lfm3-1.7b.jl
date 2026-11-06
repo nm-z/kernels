@@ -2773,8 +2773,8 @@ end
 
 # ---- the arena: https://nm-z.com/arena/ — 16 random conversation states from the transcripts, the model's reply in 4 panes (one
 # sampling setting each, streamed from the engine), the reply nate actually gave, and Jev's similarity score for each pane
-# (jev-1.13 through OpenCode Zen: 4 Score questions in one request); the best pane is highlighted. No scripts: the page is one
-# streamed HTML document, each pane an iframe streaming its own text. The engine serves the model on SOCK.
+# (jev-1.13 through OpenCode Zen: 4 Score questions in one request); the best pane is highlighted. The page is four quadrants, a
+# blank page folded twice; a sample's replies appear whole once scored, 2 s apart. The engine serves the model on SOCK.
 #   withkey "OpenCode Zen" -- julia --project=env/amd -t 4,1 lfm3-1.7b.jl --arena --data ~/models/lfm3-data --model DIR --sock SOCK [--listen 127.0.0.1:18650]
 using HTTP, JSON3
 const PANES = [("A · temp 0.1 top-k 50", 0.1, 50, 1.0), ("B · temp 0.6 top-k 50", 0.6, 50, 1.0),
@@ -2859,88 +2859,63 @@ end
 function drive(R::Run)                                          # samples one after another; a sample's 4 panes at once
     for s in R.samples
         ts = [Threads.@spawn generate!(R, s, k) for k in 1:4]; foreach(wait, ts)
-        judge!(s); notify_all(R)
+        judge!(s); notify_all(R); sleep(2)
     end
 end
 
-const CSS = """
-body{font:15px/1.4 system-ui,sans-serif;background:#111;color:#ddd;margin:0;padding:12px 16px}h1{font-size:20px;margin:0 0 4px}
-.meta{color:#999;font-size:13px;margin-bottom:14px}section{border-top:1px solid #333;padding:12px 0}h2{font-size:15px;margin:0 0 6px;color:#bbb}
-pre{white-space:pre-wrap;word-break:break-word;margin:0;font:13px/1.35 ui-monospace,monospace}
-.tail pre{background:#181818;border-left:3px solid #555;padding:6px 8px;color:#aaa;max-height:14em;overflow:auto}
-details{margin:4px 0;color:#888;font-size:13px}details pre{max-height:30em;overflow:auto;background:#161616;padding:6px 8px;color:#999}
-.panes{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:8px 0}@media(max-width:900px){.panes{grid-template-columns:1fr 1fr}}
-.pane{border:1px solid #333;border-radius:4px;padding:6px;background:#141414}.pane .label{font-size:12px;color:#8ab;margin-bottom:4px}
-.pane iframe{width:100%;height:9em;border:0;background:#0d0d0d}.pane .score{font-size:12px;color:#999;min-height:1.2em;margin-top:4px}
-.nate{margin:6px 0}.nate b{color:#ec7;font-size:13px}.nate pre{background:#1a1810;border-left:3px solid #ec7;padding:6px 8px;color:#eda}
-.scores{font-size:13px;color:#bbb;margin-top:4px}.best{outline:2px solid #4c4;background:#122012}.jerr{color:#e66;font-size:13px}
+const PAGE = """
+<!doctype html><html><head><meta charset=utf-8><title>nlfm arena</title><style>
+html,body{height:100%;margin:0;background:#000;color:#ddd;font:17px/1.4 ui-monospace,monospace}
+body{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
+.q{position:relative;padding:28px;overflow:auto;white-space:pre-wrap;word-break:break-word;border:0 solid #333}
+#q1,#q2{border-bottom-width:1px}#q1,#q3{border-right-width:1px}
+.q::after{content:attr(data-score);position:absolute;right:10px;bottom:6px;font-size:12px;color:#777}
+.q.best{background:#0e1a0e;color:#dfd}
+#nate{position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);text-align:center;font-size:12px;color:#aa8;padding:2px 10px;pointer-events:none;white-space:pre-wrap}
+</style></head><body><div class=q id=q1></div><div class=q id=q2></div><div class=q id=q3></div><div class=q id=q4></div><div id=nate></div>
+<script>
+(async () => {
+  const q = [1,2,3,4].map(i => document.getElementById('q' + i)), nate = document.getElementById('nate');
+  const r = await fetch('events' + location.search); const rd = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
+  for (;;) {
+    const {value, done} = await rd.read(); if (done) break;
+    buf += dec.decode(value, {stream: true}); let i;
+    while ((i = buf.indexOf('\\n')) >= 0) {
+      const line = buf.slice(0, i); buf = buf.slice(i + 1); if (!line) continue;
+      const e = JSON.parse(line);
+      q.forEach((d, k) => { d.textContent = e.replies[k]; d.dataset.score = e.scores[k] == null ? '' : e.scores[k].toFixed(2); d.classList.toggle('best', e.best === k + 1); });
+      nate.textContent = e.nate;
+    }
+  }
+})();
+</script></body></html>
 """
-const FRAME_CSS = "body{margin:0;padding:4px 6px;background:#0d0d0d;color:#ddd}pre{white-space:pre-wrap;word-break:break-word;margin:0;font:13px/1.35 ui-monospace,monospace}.err{color:#e66}"
-
-function tail_html(s::Sample)                                   # the context's last assistant message, then the full context folded
-    full = text(s.ctx)
-    i = findlast("<|im_start|>assistant\n", full); j = findlast("<|im_start|>user\n", full)
-    a = i === nothing ? 1 : first(i)
-    t = (j !== nothing && first(j) > a) ? full[a:first(j)-1] : full[a:end]
-    t = replace(t, "<|im_start|>assistant\n" => "assistant: ", "<|im_end|>\n" => "", "<|im_end|>" => "")
-    "<details><summary>whole context ($(length(s.ctx)) tokens)</summary><pre>$(esc(full))</pre></details><div class=tail><pre>$(esc(last(t, 1500)))</pre></div>"
-end
 
 function page(http::HTTP.Stream)
+    HTTP.setstatus(http, 200); HTTP.setheader(http, "content-type" => "text/html; charset=utf-8"); HTTP.setheader(http, "cache-control" => "no-store")
+    HTTP.startwrite(http); write(http, PAGE)
+end
+
+function events(http::HTTP.Stream)                              # one JSON line a sample, once its 4 replies are scored; 2 s between samples
     q = query(http.message.target)
     seed = haskey(q, "seed") ? parse(UInt32, q["seed"]) : rand(UInt32)
     R = newrun(seed)
-    HTTP.setstatus(http, 200); HTTP.setheader(http, "content-type" => "text/html; charset=utf-8"); HTTP.setheader(http, "cache-control" => "no-store"); HTTP.setheader(http, "x-accel-buffering" => "no")
+    HTTP.setstatus(http, 200); HTTP.setheader(http, "content-type" => "application/x-ndjson"); HTTP.setheader(http, "cache-control" => "no-store"); HTTP.setheader(http, "x-accel-buffering" => "no")
     HTTP.startwrite(http)
-    w(x) = (write(http, x); flush(http))
-    w("<!doctype html><html><head><meta charset=utf-8><title>nlfm arena</title><style>$CSS</style></head><body>")
-    w("<h1>nlfm arena</h1><div class=meta>model $(basename(CFG["model"])) · $NSAMP random conversation states (seed $seed · <a href=\"?seed=$seed\">this seed</a> · <a href=\"./\">new</a>) · 4 sampling settings · judge jev-1.13: how close each reply is to what nate actually said (0–$(length(LEVELS)-1))</div>")
-    w("<!--" * " "^1024 * "-->")
     for s in R.samples
-        name = s.t + 1 <= length(NAMES) ? basename(NAMES[s.t+1]) : "transcript $(s.t)"
-        w("<section id=s$(s.i)><h2>$(s.i). $(esc(name)) · example $(s.ex)$(s.held ? " · held out" : " · trained on")</h2>$(tail_html(s))<div class=panes>")
-        for k in 1:4
-            w("<div class=pane id=s$(s.i)p$k><div class=label>$(PANES[k][1])</div><iframe src=\"gen?r=$(R.id)&amp;s=$(s.i)&amp;p=$k\"></iframe><div class=score></div></div>")
-        end
-        w("</div><div class=nate><b>nate said</b><pre>$(esc(text(cut(s.actual))))</pre></div>")
         lock(R.cond) do
             while !s.scored; wait(R.cond); end
         end
-        if s.best > 0
-            w("<div class=scores>" * join(["$("ABCD"[k]) $(round(s.scores[k]; digits = 2)) (conf $(round(s.conf[k]; digits = 2)))" for k in 1:4], " · ") * " → best $("ABCD"[s.best])</div><style>#s$(s.i)p$(s.best){outline:2px solid #4c4;background:#122012}</style>")
-        else
-            w("<div class=jerr>judge failed: $(esc(s.jerr))</div>")
-        end
-        w("</section>")
+        e = Dict("i" => s.i, "seed" => seed, "held" => s.held, "nate" => text(cut(s.actual)), "replies" => [text(cut(p.toks)) for p in s.panes],
+                 "scores" => [isnan(x) ? nothing : x for x in s.scores], "conf" => [isnan(x) ? nothing : x for x in s.conf], "best" => s.best, "error" => s.jerr)
+        write(http, JSON3.write(e) * "\n"); flush(http)
     end
-    w("</body></html>")
-end
-
-function frame(http::HTTP.Stream)
-    q = query(http.message.target)
-    R = lock(RLK) do; get(RUNS, get(q, "r", ""), nothing); end
-    HTTP.setstatus(http, R === nothing ? 404 : 200); HTTP.setheader(http, "content-type" => "text/html; charset=utf-8"); HTTP.setheader(http, "cache-control" => "no-store"); HTTP.setheader(http, "x-accel-buffering" => "no")
-    HTTP.startwrite(http)
-    R === nothing && (write(http, "no such run"); return)
-    s = R.samples[parse(Int, q["s"])]; P = s.panes[parse(Int, q["p"])]
-    write(http, "<!doctype html><html><head><meta charset=utf-8><style>$FRAME_CSS</style></head><body><pre>" * "<!--" * " "^1024 * "-->"); flush(http)
-    n = 0
-    while true
-        toks, done = lock(R.cond) do
-            while length(P.toks) == n && !P.done; wait(R.cond); end
-            (P.toks[n+1:end], P.done)
-        end
-        isempty(toks) || (write(http, esc(text(toks))); flush(http)); n += length(toks)
-        done && break
-    end
-    isempty(P.err) || write(http, "<span class=err>$(esc(P.err))</span>")
-    write(http, "</pre></body></html>")
 end
 
 function handler(http::HTTP.Stream)
     p = first(split(http.message.target, '?'))
     try
-        if endswith(p, "/gen"); frame(http)
+        if endswith(p, "/events"); events(http)
         elseif endswith(p, "/"); page(http)
         else
             HTTP.setstatus(http, 302); HTTP.setheader(http, "location" => p * "/"); HTTP.startwrite(http)
