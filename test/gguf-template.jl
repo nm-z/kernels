@@ -22,5 +22,5 @@ for _ in 1:nkv
     elseif haskey(samp, k); copyval(io, IOBuffer(), t); wsamp(body, k, samp[k]); push!(seen, k)
     else; wstr(body, k); write(body, t); copyval(io, body, t); end
 end
-for (k, v) in samp; k in seen || (wsamp(body, k, v); nkv += 1); end
+for (k, v) in samp; k in seen || (wsamp(body, k, v); global nkv += 1); end
 write(out, magic, ver, nt, nkv, take!(body)); write(ARGS[3], take!(out))
