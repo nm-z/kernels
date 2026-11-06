@@ -4,7 +4,7 @@ html,body{height:100%;margin:0;background:#000;color:#fff;font:16px/20px po,mono
 body{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
 .q{padding:16px;overflow:hidden;white-space:pre-wrap;word-break:break-word;border:0 solid #fff}
 #q1,#q2{border-bottom-width:1px}#q1,#q3{border-right-width:1px}
-.n{color:#277DFF}.best{color:#00AE6B}
+.n{color:#FFC200}.m{color:#00B8D9}.best{color:#00AE6B}.j{color:#F2283C}
 </style></head><body><div class=q id=q1></div><div class=q id=q2></div><div class=q id=q3></div><div class=q id=q4></div>
 <script>
 (async () => {
@@ -20,14 +20,14 @@ body{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
       const l = buf.slice(0, i); buf = buf.slice(i + 1); if (!l) continue;
       const e = JSON.parse(l);
       if (e.nate !== undefined) {                       // a sample starts: nate's line, then an empty reply line in each pane
-        cur = q.map(d => { line(d, 'n', 'nate: ' + e.nate.replace(/\n[ \t]*(\n[ \t]*)+/g, '\n').trim()); return line(d, '', ''); }); raw = ['', '', '', ''];
+        cur = q.map(d => { line(d, 'n', 'nate: ' + e.nate.replace(/\n[ \t]*(\n[ \t]*)+/g, '\n').trim()); return line(d, 'm', ''); }); raw = ['', '', '', ''];
       } else if (e.t !== undefined) {                   // tokens for pane p
         raw[e.p - 1] += e.t; show(e.p - 1); q[e.p - 1].scrollTop = q[e.p - 1].scrollHeight;
       } else if (e.scores !== undefined) {              // scored: the score in front of the reply, the best in green
         q.forEach((d, k) => {
           const best = e.best === k + 1;
           if (best) cur[k].className = 'best';
-          line(d, best ? 'best' : '', 'jev ' + (e.scores[k] == null ? e.error : e.scores[k].toFixed(2)));
+          line(d, 'j', 'jev ' + (e.scores[k] == null ? e.error : e.scores[k].toFixed(2)));
         });
       }
     }
