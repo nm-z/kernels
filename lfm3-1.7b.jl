@@ -1798,6 +1798,7 @@ function chat(c, nnew, ids, stops, snap = 0, sample = (0.0, 0.0, 1.0), seed = UI
     end
     while q.slot < 0 && !q.done; sleep(0.002); end
     isempty(q.err) || (say("error: ", q.err); return)
+    q.slot < 0 && return                                   # cancelled (the client went) before a slot took it: nothing to read
     r = q.slot; outp = Ptr{Int32}(PE.hx.c + PE.hx.tok) + 4r * PE.maxgen
     function progress()                                    # "prog ran total cached", at most one every 500 ms
         n == 0 || return
@@ -2865,26 +2866,28 @@ end
 
 const PAGE = """
 <!doctype html><html><head><meta charset=utf-8><title>nlfm arena</title><style>
-html,body{height:100%;margin:0;background:#000;color:#ddd;font:17px/1.4 ui-monospace,monospace}
+html,body{height:100%;margin:0;background:#000;color:#fff;font:16px/1.4 ui-monospace,monospace}
 body{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
-.q{position:relative;padding:28px;overflow:auto;white-space:pre-wrap;word-break:break-word;border:0 solid #333}
+.q{padding:16px;overflow:auto;white-space:pre-wrap;word-break:break-word;border:0 solid #fff}
 #q1,#q2{border-bottom-width:1px}#q1,#q3{border-right-width:1px}
-.q::after{content:attr(data-score);position:absolute;right:10px;bottom:6px;font-size:12px;color:#777}
-.q.best{background:#0e1a0e;color:#dfd}
-#nate{position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);text-align:center;font-size:12px;color:#aa8;padding:2px 10px;pointer-events:none;white-space:pre-wrap}
-</style></head><body><div class=q id=q1></div><div class=q id=q2></div><div class=q id=q3></div><div class=q id=q4></div><div id=nate></div>
+.n{color:#277DFF}.best{color:#00AE6B}
+</style></head><body><div class=q id=q1></div><div class=q id=q2></div><div class=q id=q3></div><div class=q id=q4></div>
 <script>
 (async () => {
-  const q = [1,2,3,4].map(i => document.getElementById('q' + i)), nate = document.getElementById('nate');
+  const q = [1,2,3,4].map(i => document.getElementById('q' + i));
+  const line = (d, cls, t) => { const p = document.createElement('div'); if (cls) p.className = cls; p.textContent = t; d.appendChild(p); d.scrollTop = d.scrollHeight; };
   const r = await fetch('events' + location.search); const rd = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
   for (;;) {
     const {value, done} = await rd.read(); if (done) break;
     buf += dec.decode(value, {stream: true}); let i;
     while ((i = buf.indexOf('\\n')) >= 0) {
-      const line = buf.slice(0, i); buf = buf.slice(i + 1); if (!line) continue;
-      const e = JSON.parse(line);
-      q.forEach((d, k) => { d.textContent = e.replies[k]; d.dataset.score = e.scores[k] == null ? '' : e.scores[k].toFixed(2); d.classList.toggle('best', e.best === k + 1); });
-      nate.textContent = e.nate;
+      const l = buf.slice(0, i); buf = buf.slice(i + 1); if (!l) continue;
+      const e = JSON.parse(l);
+      q.forEach((d, k) => {
+        line(d, 'n', 'nate: ' + e.nate);
+        line(d, e.best === k + 1 ? 'best' : '', (e.scores[k] == null ? '' : e.scores[k].toFixed(2) + ' ') + e.replies[k]);
+        line(d, '', '');
+      });
     }
   }
 })();
