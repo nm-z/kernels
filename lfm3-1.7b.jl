@@ -2308,7 +2308,7 @@ vnames(l) = ["operator_norm", "post_operator_norm", "ffn_norm", "post_ffn_norm",
 struct TS                                                  # the training state
     M::Model; g::ST; L::Vector{TLayer}; om::ROCVector{Float32}   # om: the embedding norm's momentum
     E::Matrix{Float32}; ME::Matrix{Float32}; OE::Matrix{Float32}  # the embedding (NE x NV: a column a row of it), its momentum, the step
-    mh::Ptr{Float32}; moh::Ptr{Float32}
+    mh::Ptr{Float32}; moh::Ptr{Float32}; nf::Int              # the masters' host pointer, the momenta's, their floats
 end
 function load_train(dir)
     M, g = load_engine(dir; caches = false)
@@ -2331,7 +2331,7 @@ function load_train(dir)
     @printf("masters loaded (%.0f s)\n", time() - t0)
     E = Matrix{Float32}(undef, NE, NV); src = tensor(g, "model.embed_tokens.weight")
     Threads.@threads for i in 1:NE*NV; E[i] = bf32(src[i]); end
-    TS(M, g, L, AMDGPU.zeros(Float32, NE), E, zeros(Float32, NE, NV), Matrix{Float32}(undef, NE, NV), mh, moh)
+    TS(M, g, L, AMDGPU.zeros(Float32, NE), E, zeros(Float32, NE, NV), Matrix{Float32}(undef, NE, NV), mh, moh, nf)
 end
 # ---- the buffers of a window: rows of positions, NPMAX of them ----
 struct TB
@@ -2665,6 +2665,35 @@ function export_bf16(S::TS, src, out)
     end
     println("wrote $out/model.safetensors"); flush(stdout)
 end
+# ---- a checkpoint: every FP32 master and momentum, the embedding and its momentum, the vectors and theirs, and where the epoch
+# stood; written to a temporary name and renamed, so a crash leaves the last one whole. --resume reads it, repacks W from the masters
+# and carries on after the window it names (the shuffles are the seed's, so the order is the same)
+function ckpt_write(S::TS, path, ep, i, best)
+    AMDGPU.synchronize(); t0 = time(); tmp = path * ".tmp"
+    open(tmp, "w") do io
+        write(io, Int64(ep), Int64(i), Float64(best))
+        write(io, unsafe_wrap(Array, S.mh, S.nf)); write(io, unsafe_wrap(Array, S.moh, S.nf))
+        write(io, S.E); write(io, S.ME); write(io, Array(S.M.onrm)); write(io, Array(S.om))
+        for T in S.L; for v in T.V; write(io, Array(v)); end; for m in T.VM; write(io, Array(m)); end; end
+    end
+    mv(tmp, path; force = true)
+    @printf("checkpoint: epoch %d window %d (%.0f s)\n", ep, i, time() - t0); flush(stdout)
+end
+function ckpt_read(S::TS, path)
+    t0 = time(); ep = 0; i = 0; best = 0.0
+    open(path) do io
+        ep = read(io, Int64); i = read(io, Int64); best = read(io, Float64)
+        read!(io, unsafe_wrap(Array, S.mh, S.nf)); read!(io, unsafe_wrap(Array, S.moh, S.nf))
+        read!(io, S.E); read!(io, S.ME); up!(S.M.onrm, read!(io, Vector{Float32}(undef, NE))); up!(S.om, read!(io, Vector{Float32}(undef, NE)))
+        for T in S.L; for v in T.V; up!(v, read!(io, Vector{Float32}(undef, length(v)))); end; for m in T.VM; up!(m, read!(io, Vector{Float32}(undef, length(m)))); end; end
+    end
+    for T in S.L, tw in T.M                                # W in BF16 from the master: the update with a step of 0
+        trun!(T_UPD, tw.rows; i1 = tw.rows, i2 = tw.K, i4 = 0, f1 = 0, a = dp(tw.m), b = dp(tw.m), W = wp(tw.W))
+    end
+    AMDGPU.synchronize()
+    @printf("resumed: epoch %d window %d, best held out %.4f (%.0f s)\n", ep, i, best, time() - t0); flush(stdout)
+    Int(ep), Int(i), best
+end
 # ---- the gradient check: one window's gradients (momentum with f2 = 0, acc = 1) of named tensors, for test/lfm3-grad.jl ----
 const CHECKN = ["model.embed_tokens.weight", "model.embedding_norm.weight", "model.layers.0.conv.in_proj.weight", "model.layers.0.conv.out_proj.weight", "model.layers.0.conv.conv.weight",
                 "model.layers.0.operator_norm.weight", "model.layers.0.post_operator_norm.weight", "model.layers.0.ffn_norm.weight", "model.layers.0.post_ffn_norm.weight",
@@ -2695,7 +2724,7 @@ function train(args)
     dir = arg("--model", ""); data = arg("--train", ""); out = arg("--out", ""); epochs = parse(Int, arg("--epochs", "2"))
     lr = parse(Float64, arg("--lr", "0.002")); lrv = parse(Float64, arg("--lrv", "0.0002")); lre = parse(Float64, arg("--lre", "0.002")); beta = parse(Float64, arg("--beta", "0.95"))
     acc = parse(Int, arg("--acc", "8")); nwin = parse(Int, arg("--windows", "0")); seed = parse(Int, arg("--seed", "1"))
-    (dir == "" || data == "") && error("usage: julia --project=env/amd -t 12 lfm3-1.7b.jl --train DATADIR --model DIR --out OUTDIR [--epochs E --lr L --lrv L --lrv L --beta B --acc A --windows W --check PREFIX N]")
+    (dir == "" || data == "") && error("usage: julia --project=env/amd -t 12 lfm3-1.7b.jl --train DATADIR --model DIR --out OUTDIR [--epochs E --lr L --lrv L --lrv L --beta B --acc A --windows W --check PREFIX N --resume]")
     BLAS.set_num_threads(Sys.CPU_THREADS)
     AMDGPU.stream!(AMDGPU.HIPStream(:low))                 # (the card also runs the desktop: its gfx ring goes first)
     fence_start()
@@ -2710,17 +2739,25 @@ function train(args)
     nwin > 0 && (Wt = Wt[1:min(nwin, end)]; Wh = Wh[1:min(cld(nwin, 3), end)])
     "--repeat" in args && (Wt = fill(Wt[1], length(Wt)); Wh = Wh[1:1])   # (the same window every time: what a step does to its loss)
     @printf("%d training windows, %d held out; %d windows a step\n", length(Wt), length(Wh), acc); flush(stdout)
-    best = heldout(S, B, Hd, D, Wh)
+    ck = joinpath(out, "checkpoint.bin"); ep0 = 1; i0 = 0
+    if "--resume" in args && isfile(ck)
+        ep0, i0, best = ckpt_read(S, ck)
+    else
+        best = heldout(S, B, Hd, D, Wh)
+    end
     rng = Random.MersenneTwister(seed)
-    for ep in 1:epochs
+    for _ in 1:ep0-1; Random.shuffle(rng, 1:length(Wt)); end
+    for ep in ep0:epochs
         order = Random.shuffle(rng, 1:length(Wt)); t0 = time(); tot = 0.0; n = 0
         for (i, wi) in enumerate(order)
+            ep == ep0 && i <= i0 && continue
             w = Wt[wi]; fst = (i - 1) % acc == 0
             t1 = time(); loss = window!(S, B, Hd, D, w, fst ? beta : 1.0, acc)
             tot += loss * length(w[4]); n += length(w[4])
             @printf("epoch %d window %d/%d: N %d, %d reply tokens, loss %.4f (%.1f s)\n", ep, i, length(order), w[3], length(w[4]), loss, time() - t1); flush(stdout)
             "--prof" in args && (println(join(("$k $(v[1]) $(round(v[2]; digits = 2)) s" for (k, v) in sort(collect(TPROF); by = x -> -x[2][2])), ", ")); empty!(TPROF); flush(stdout))
             (i % acc == 0 || i == length(order)) && step!(S, B, lr, lrv, lre)
+            i % (acc * 32) == 0 && ckpt_write(S, ck, ep, i, best)
         end
         @printf("epoch %d: train loss %.4f over %d reply tokens (%.0f min)\n", ep, tot / n, n, (time() - t0) / 60)
         h = heldout(S, B, Hd, D, Wh)
@@ -2729,7 +2766,7 @@ function train(args)
         else
             println("not the best ($best): no export")
         end
-        flush(stdout)
+        ckpt_write(S, ck, ep, length(order), best); flush(stdout)
     end
 end
 
