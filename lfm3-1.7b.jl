@@ -7,14 +7,19 @@
 #   julia --project=env/amd -t 12 lfm3-1.7b.jl --model DIR --serve SOCK
 # nlfm --help answers before the packages load (7 s)
 const HELP = """
-nlfm [-n STATES] [-r ROLLOUTS] [--seed S] [--data DIR] [--model DIR] [--sock SOCK]
-  -n STATES     sequences to continue, each cut where nate's reply begins; one after another, 2 s apart (1)
-  -r ROLLOUTS   continuations sampled at once from each state, one pane each; -o works too (4)
-  --seed S      repeat a draw: the same states and sampling seeds
-  --data DIR    the tokenized transcripts (~/models/lfm3-data)
-  --model DIR   the model's directory, for its tokenizer (~/models/lfm3-1.7b-nate)
-  --sock SOCK   the engine serving that model (/run/user/1000/lfm3.sock)
-  -h, --help    this
+nlfm: continue sequences from nate's transcripts and score the continuations against what nate wrote
+
+  nlfm [options]
+
+  -n N          states: sequences cut where nate's reply begins          1
+  -r N          rollouts: continuations sampled from each state, one pane each   4
+  --seed N      replay a draw
+  --data DIR    tokenized transcripts     ~/models/lfm3-data
+  --model DIR   model directory           ~/models/lfm3-1.7b-nate
+  --sock PATH   engine socket             /run/user/1000/lfm3.sock
+  -h            help
+
+  yellow  what nate wrote      cyan  continuation      red  jev score      green  jev's pick
 """
 basename(PROGRAM_FILE) == "nlfm" && any(in(("-h", "--help")), ARGS) && (print(HELP); exit())
 
