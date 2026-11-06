@@ -11,15 +11,15 @@ nlfm: continue sequences from nate's transcripts and score the continuations aga
 
   nlfm [options]
 
-  -n N         states: sequences cut where nate's reply begins                        1
-  -r N         rollouts: continuations sampled from each state, one pane each          4
-  --seed N     replay a draw
-  --data DIR   tokenized transcripts                                                   ~/models/lfm3-data
-  --model DIR  model directory                                                         ~/models/lfm3-1.7b-nate
-  --sock PATH  engine socket                                                           /run/user/1000/lfm3.sock
-  -h           help
+  \e[1m-n N\e[0m         states: sequences cut where nate's reply begins                        \e[2m1\e[0m
+  \e[1m-r N\e[0m         rollouts: continuations sampled from each state, one pane each          \e[2m4\e[0m
+  \e[1m--seed N\e[0m     replay a draw
+  \e[1m--data DIR\e[0m   tokenized transcripts                                                   \e[2m~/models/lfm3-data\e[0m
+  \e[1m--model DIR\e[0m  model directory                                                         \e[2m~/models/lfm3-1.7b-nate\e[0m
+  \e[1m--sock PATH\e[0m  engine socket                                                           \e[2m/run/user/1000/lfm3.sock\e[0m
+  \e[1m-h\e[0m           help
 
-  yellow  what nate wrote    cyan  continuation    red  jev score    green  jev's pick
+  \e[33mwhat nate wrote\e[0m    \e[36mcontinuation\e[0m    \e[31mjev score\e[0m    \e[32mjev's pick\e[0m
 """
 basename(PROGRAM_FILE) == "nlfm" && any(in(("-h", "--help")), ARGS) && (print(HELP); exit())
 
