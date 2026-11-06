@@ -8,7 +8,8 @@ body{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
 <script>
 (async () => {
   const q = [1,2,3,4].map(i => document.getElementById('q' + i));
-  const line = (d, cls, t) => { const p = document.createElement('div'); if (cls) p.className = cls; p.textContent = t; d.appendChild(p); d.scrollTop = d.scrollHeight; };
+  const line = (d, cls, t) => { const p = document.createElement('div'); if (cls) p.className = cls; p.textContent = t; d.appendChild(p); d.scrollTop = d.scrollHeight; return p; };
+  let cur = [];
   const r = await fetch('events' + location.search); const rd = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
   for (;;) {
     const {value, done} = await rd.read(); if (done) break;
@@ -16,11 +17,17 @@ body{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
     while ((i = buf.indexOf('\n')) >= 0) {
       const l = buf.slice(0, i); buf = buf.slice(i + 1); if (!l) continue;
       const e = JSON.parse(l);
-      q.forEach((d, k) => {
-        line(d, 'n', 'nate: ' + e.nate);
-        line(d, e.best === k + 1 ? 'best' : '', (e.scores[k] == null ? '' : e.scores[k].toFixed(2) + ' ') + e.replies[k]);
-        line(d, '', '');
-      });
+      if (e.nate !== undefined) {                       // a sample starts: nate's line, then an empty reply line in each pane
+        cur = q.map(d => { line(d, 'n', 'nate: ' + e.nate); return line(d, '', ''); });
+      } else if (e.t !== undefined) {                   // tokens for pane p
+        const d = q[e.p - 1]; cur[e.p - 1].textContent += e.t; d.scrollTop = d.scrollHeight;
+      } else if (e.scores !== undefined) {              // scored: the score in front of the reply, the best in green
+        q.forEach((d, k) => {
+          const p = cur[k]; p.textContent = (e.scores[k] == null ? '' : e.scores[k].toFixed(2) + ' ') + p.textContent;
+          if (e.best === k + 1) p.className = 'best';
+          line(d, '', '');
+        });
+      }
     }
   }
 })();

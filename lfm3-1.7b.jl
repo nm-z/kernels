@@ -2870,19 +2870,25 @@ function page(http::HTTP.Stream)
     HTTP.startwrite(http); write(http, read(joinpath(@__DIR__, "arena", "index.html")))
 end
 
-function events(http::HTTP.Stream)                              # one JSON line a sample, once its 4 replies are scored; 2 s between samples
+function events(http::HTTP.Stream)                              # JSON lines: a sample's start, each pane's tokens as they come, then its scores; 2 s between samples
     q = query(http.message.target)
     seed = haskey(q, "seed") ? parse(UInt32, q["seed"]) : rand(UInt32)
     R = newrun(seed)
     HTTP.setstatus(http, 200); HTTP.setheader(http, "content-type" => "application/x-ndjson"); HTTP.setheader(http, "cache-control" => "no-store"); HTTP.setheader(http, "x-accel-buffering" => "no")
     HTTP.startwrite(http)
+    send(e) = (write(http, JSON3.write(e) * "\n"); flush(http))
     for s in R.samples
-        lock(R.cond) do
-            while !s.scored; wait(R.cond); end
+        send(Dict("i" => s.i, "seed" => seed, "held" => s.held, "nate" => text(cut(s.actual))))
+        sent = zeros(Int, 4)
+        while true
+            out, fin = lock(R.cond) do
+                while all(k -> length(s.panes[k].toks) == sent[k], 1:4) && !s.scored; wait(R.cond); end
+                ([(k, s.panes[k].toks[sent[k]+1:end]) for k in 1:4 if length(s.panes[k].toks) > sent[k]], s.scored)
+            end
+            for (k, toks) in out; send(Dict("i" => s.i, "p" => k, "t" => text(toks))); sent[k] += length(toks); end
+            fin && break
         end
-        e = Dict("i" => s.i, "seed" => seed, "held" => s.held, "nate" => text(cut(s.actual)), "replies" => [text(cut(p.toks)) for p in s.panes],
-                 "scores" => [isnan(x) ? nothing : x for x in s.scores], "conf" => [isnan(x) ? nothing : x for x in s.conf], "best" => s.best, "error" => s.jerr)
-        write(http, JSON3.write(e) * "\n"); flush(http)
+        send(Dict("i" => s.i, "scores" => [isnan(x) ? nothing : x for x in s.scores], "conf" => [isnan(x) ? nothing : x for x in s.conf], "best" => s.best, "error" => s.jerr))
     end
 end
 
