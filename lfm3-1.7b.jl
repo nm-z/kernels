@@ -8,7 +8,9 @@
 # nlfm --help answers before the packages load (7 s)
 const SAMPF = expanduser("~/.config/nlfm/sampling")             # the sampling defaults: "temp top-k top-p"; -t -k -p set them and exit
 sampling() = isfile(SAMPF) ? (v = split(read(SAMPF, String)); (parse(Float64, v[1]), parse(Int, v[2]), parse(Float64, v[3]))) : (0.1, 50, 1.0)
-help() = (t, k, p) = sampling(); """
+function help()
+    t, k, p = sampling()
+    """
   nlfm [options]
 
   \e[1m-n N\e[0m   states: sequences that end where one of nate's replies begins
@@ -19,6 +21,7 @@ help() = (t, k, p) = sampling(); """
 
   \e[38;2;255;122;0mclaude\e[0m    \e[38;2;0;174;107mnate\e[0m    \e[38;2;0;184;217mnlfm\e[0m    \e[38;2;242;40;60mjev\e[0m
 """
+end
 if basename(PROGRAM_FILE) == "nlfm"
     any(in(("-h", "--help")), ARGS) && (print(help()); exit())
     if any(in(("-t", "-k", "-p")), ARGS)
