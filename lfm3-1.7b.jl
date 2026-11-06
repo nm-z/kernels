@@ -8,8 +8,8 @@
 # nlfm --help answers before the packages load (7 s)
 const HELP = """
 nlfm [-n STATES] [-r ROLLOUTS] [--seed S] [--data DIR] [--model DIR] [--sock SOCK]
-  -n STATES     random points in the transcripts where nate replied, run one after another, 2 s apart (1)
-  -r ROLLOUTS   nlfm replies sampled at once from each state, one pane each; -o works too (4)
+  -n STATES     sequences to continue, each cut where nate's reply begins; one after another, 2 s apart (1)
+  -r ROLLOUTS   continuations sampled at once from each state, one pane each; -o works too (4)
   --seed S      repeat a draw: the same states and sampling seeds
   --data DIR    the tokenized transcripts (~/models/lfm3-data)
   --model DIR   the model's directory, for its tokenizer (~/models/lfm3-1.7b-nate)
