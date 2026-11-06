@@ -2811,7 +2811,7 @@ end
 # ---- nlfm: fill in nate's replies. A slot takes a transcript and walks its user turns in order on one growing prefix: at each,
 # nlfm continues the prefix (its fill), never seeing nate's real reply; the prefix then gets the fill, then claude's real next turn,
 # and so on. Jev scores each fill against the real reply (jev-1.13 through OpenCode Zen). -s slots run transcripts at once, one
-# pane each; -q transcripts a slot; -c user turns a transcript (0: all), 1 by default. The engine snapshots each prompt, so the next continues
+# pane each; -q transcripts a slot; -c user turns a transcript (1; "all"). The engine snapshots each prompt, so the next continues
 # from the cached prefix.
 #   nlfm [-c N] [-s N] [-q N] [--seed S] [--data DIR] [--model DIR] [--sock SOCK]   (~/.local/bin/nlfm -> this file; the shebang runs it under withkey)
 using HTTP, JSON3
@@ -2907,7 +2907,7 @@ function drive(R::Run, order)                                   # slot i takes t
         Threads.@spawn try
             for qi in 1:NQ[]
                 k = (qi - 1) * NSLOT[] + S.i; k > length(order) && break
-                t = order[k]; exs = sort(bytr[t]; by = e -> e[3]); NCONT[] > 0 && (exs = exs[1:min(NCONT[], end)])
+                t = order[k]; exs = sort(bytr[t]; by = e -> e[3]); exs = exs[1:min(NCONT[], end)]
                 qi == 1 || say!(R, S, "", "")
                 say!(R, S, "", "transcript $t: $(length(exs)) of $(length(bytr[t])) user turns")
                 walk!(R, S, t, exs, (R.seed % 1000) * 1000 + k * 100)
@@ -2977,7 +2977,7 @@ end
 function arena(args)
     arg(ks, d) = (i = findfirst(in(ks), args); i === nothing ? d : args[i+1])
     CFG["sock"] = arg(("--sock",), "/run/user/1000/lfm3.sock"); CFG["model"] = arg(("--model",), expanduser("~/models/lfm3-1.7b-nate"))
-    NCONT[] = parse(Int, arg(("-c",), "1")); NSLOT[] = parse(Int, arg(("-s",), "1")); NQ[] = parse(Int, arg(("-q",), "1"))
+    c = arg(("-c",), "1"); NCONT[] = c == "all" ? typemax(Int) : parse(Int, c); NSLOT[] = parse(Int, arg(("-s",), "1")); NQ[] = parse(Int, arg(("-q",), "1"))
     seed = UInt32(parse(Int, arg(("--seed",), string(rand(UInt32))))); SAMP[] = sampling()
     global D = Data(arg(("--data",), expanduser("~/models/lfm3-data"))); global VOCAB = vocabulary(CFG["model"])
     ts = unique(Int(e[1]) for e in D.ex if e[4] - e[3] >= 3); order = shuffle(MersenneTwister(seed), ts)
