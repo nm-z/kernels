@@ -6,18 +6,27 @@
 # Reports only: prefill tok/s, decode tok/s, idle time %.
 #   julia --project=env/amd -t 12 lfm3-1.7b.jl --model DIR --serve SOCK
 # nlfm --help answers before the packages load (7 s)
-const HELP = """
+const SAMPF = expanduser("~/.config/nlfm/sampling")             # the sampling defaults: "temp top-k top-p"; -t -k -p set them and exit
+sampling() = isfile(SAMPF) ? (v = split(read(SAMPF, String)); (parse(Float64, v[1]), parse(Int, v[2]), parse(Float64, v[3]))) : (0.1, 50, 1.0)
+help() = (t, k, p) = sampling(); """
   nlfm [options]
 
   \e[1m-n N\e[0m   states: sequences that end where one of nate's replies begins
   \e[1m-r N\e[0m   rollouts: continuations sampled from each state, one pane each
-  \e[1m-t T\e[0m   temperature   \e[2m0.1\e[0m
-  \e[1m-k K\e[0m   top-k         \e[2m50\e[0m
-  \e[1m-p P\e[0m   top-p         \e[2m1.0\e[0m
+  \e[1m-t T\e[0m   temperature   \e[2m$t\e[0m
+  \e[1m-k K\e[0m   top-k         \e[2m$k\e[0m
+  \e[1m-p P\e[0m   top-p         \e[2m$p\e[0m
 
   \e[38;2;255;122;0mclaude\e[0m    \e[38;2;0;174;107mnate\e[0m    \e[38;2;0;184;217mnlfm\e[0m    \e[38;2;242;40;60mjev\e[0m
 """
-basename(PROGRAM_FILE) == "nlfm" && any(in(("-h", "--help")), ARGS) && (print(HELP); exit())
+if basename(PROGRAM_FILE) == "nlfm"
+    any(in(("-h", "--help")), ARGS) && (print(help()); exit())
+    if any(in(("-t", "-k", "-p")), ARGS)
+        t, k, p = sampling(); a(f, d) = (i = findfirst(==(f), ARGS); i === nothing ? d : ARGS[i+1])
+        t = parse(Float64, a("-t", string(t))); k = parse(Int, a("-k", string(k))); p = parse(Float64, a("-p", string(p)))
+        mkpath(dirname(SAMPF)); write(SAMPF, "$t $k $p\n"); println("temp $t  top-k $k  top-p $p"); exit()
+    end
+end
 
 using AMDGPU, KernelAbstractions, Mmap, Printf, Sockets
 const KI = KernelAbstractions.KernelInterface
@@ -2957,7 +2966,7 @@ function arena(args)
     CFG["sock"] = arg(("--sock",), "/run/user/1000/lfm3.sock"); CFG["model"] = arg(("--model",), expanduser("~/models/lfm3-1.7b-nate"))
     NSAMP[] = parse(Int, arg(("-n", "--n"), "1")); NROLL[] = parse(Int, arg(("-r", "-o", "--rollouts"), "1"))
     seed = UInt32(parse(Int, arg(("--seed",), string(rand(UInt32)))))
-    SAMP[] = (parse(Float64, arg(("-t",), "0.1")), parse(Int, arg(("-k",), "50")), parse(Float64, arg(("-p",), "1.0")))
+    SAMP[] = sampling()
     global D = Data(arg(("--data",), expanduser("~/models/lfm3-data"))); global VOCAB = vocabulary(CFG["model"])
     Rn = newrun(seed)
     try TTY[] = open("/dev/tty", "w") catch; end
