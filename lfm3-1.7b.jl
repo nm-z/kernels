@@ -2971,7 +2971,7 @@ function tui(R::Run)
             flush(T); alldone && break
         end
     finally
-        print(T, "\e[?25h"); at(min(rows, LASTROW[] + 1), 1); flush(T)
+        print(T, "\e[?25h"); at(rows, 1); println(T); flush(T)
     end
 end
 
