@@ -11,6 +11,9 @@ const HELP = """
 
   \e[1m-n N\e[0m   states: sequences that end where one of nate's replies begins
   \e[1m-r N\e[0m   rollouts: continuations sampled from each state, one pane each
+  \e[1m-t T\e[0m   temperature   \e[2m0.1\e[0m
+  \e[1m-k K\e[0m   top-k         \e[2m50\e[0m
+  \e[1m-p P\e[0m   top-p         \e[2m1.0\e[0m
 
   \e[38;2;255;122;0mclaude\e[0m    \e[38;2;0;174;107mnate\e[0m    \e[38;2;0;184;217mnlfm\e[0m    \e[38;2;242;40;60mjev\e[0m
 """
@@ -2789,11 +2792,11 @@ end
 # score for each (red; jev-1.13 through OpenCode Zen, 4 Score questions in one request), the best marked green. 2 s between states.
 #   nlfm [-n STATES] [-r ROLLOUTS] [--seed S] [--data DIR] [--model DIR] [--sock SOCK]   (~/.local/bin/nlfm -> this file; the shebang runs it under withkey)
 using HTTP, JSON3
-const SETTINGS = [("temp 0.1 top-k 50", 0.1, 50, 1.0), ("temp 0.6 top-k 50", 0.6, 50, 1.0), ("temp 0.7 top-k 20 top-p 0.95", 0.7, 20, 0.95), ("temp 1.0 top-p 0.9", 1.0, 0, 0.9)]
+const SAMP = Ref((0.1, 50, 1.0))                                 # temp, top-k, top-p for every rollout (-t -k -p)
 const NSAMP = Ref(1); const NROLL = Ref(1); const NGEN = 96; const IM_END = 124900
 const LEVELS = ["unrelated to what nate said, or not a sentence", "nate's voice, but a different subject", "the same subject, a different point",
                 "the same point in different words", "the same reply: meaning and nearly the words"]
-setting(k) = SETTINGS[(k - 1) % length(SETTINGS) + 1]       # rollout k's sampling; past 4 the settings repeat with other seeds
+setting(k) = ("temp $(SAMP[][1]) top-k $(SAMP[][2]) top-p $(SAMP[][3])", SAMP[]...)
 rname(k) = string('A' + (k - 1) % 26, k > 26 ? string(k) : "")
 
 mutable struct Pane; toks::Vector{Int}; done::Bool; err::String; end
@@ -2954,6 +2957,7 @@ function arena(args)
     CFG["sock"] = arg(("--sock",), "/run/user/1000/lfm3.sock"); CFG["model"] = arg(("--model",), expanduser("~/models/lfm3-1.7b-nate"))
     NSAMP[] = parse(Int, arg(("-n", "--n"), "1")); NROLL[] = parse(Int, arg(("-r", "-o", "--rollouts"), "1"))
     seed = UInt32(parse(Int, arg(("--seed",), string(rand(UInt32)))))
+    SAMP[] = (parse(Float64, arg(("-t",), "0.1")), parse(Int, arg(("-k",), "50")), parse(Float64, arg(("-p",), "1.0")))
     global D = Data(arg(("--data",), expanduser("~/models/lfm3-data"))); global VOCAB = vocabulary(CFG["model"])
     Rn = newrun(seed)
     try TTY[] = open("/dev/tty", "w") catch; end
