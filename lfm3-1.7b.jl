@@ -21,9 +21,9 @@ nlfm [options]
 		\e[1m-k\e[0m <top-k>
 		\e[1m-p\e[0m <top-p>
 	defaults:
-		continuations all  temp  $t
+		continuations 8    temp  $t
 		transcripts   1    top-k $k
-		concurrency   2    top-p $p
+		concurrency   4    top-p $p
 	indicators:
 		\e[38;2;255;122;0mclaude\e[0m
 		\e[38;2;0;174;107mnate\e[0m
@@ -2979,11 +2979,11 @@ end
 
 function arena(args)
     arg(ks, d) = (i = findfirst(in(ks), args); i === nothing ? d : args[i+1])
-    nslot = parse(Int, arg(("-s",), "2")); BASE[] = PANE[] = arg(("--pane",), "")
+    nslot = parse(Int, arg(("-s",), "4")); BASE[] = PANE[] = arg(("--pane",), "")
     isempty(BASE[]) && nslot > 1 && return launch(args, nslot)
     zenkey()
     CFG["sock"] = arg(("--sock",), "/run/user/1000/lfm3.sock"); CFG["model"] = arg(("--model",), expanduser("~/models/lfm3-1.7b-nate"))
-    c = arg(("-c",), "all"); NCONT[] = c == "all" ? typemax(Int) : parse(Int, c); NQ[] = parse(Int, arg(("-q",), "1"))
+    c = arg(("-c",), "8"); NCONT[] = c == "all" ? typemax(Int) : parse(Int, c); NQ[] = parse(Int, arg(("-q",), "1"))
     seed = UInt32(parse(Int, arg(("--seed",), string(rand(UInt32))))); SAMP[] = sampling()
     global D = Data(arg(("--data",), expanduser("~/models/lfm3-data"))); global VOCAB = vocabulary(CFG["model"])
     ts = unique(Int(e[1]) for e in D.ex if e[4] - e[3] >= 3); order = shuffle(MersenneTwister(seed), ts)
