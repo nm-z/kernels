@@ -3014,8 +3014,8 @@ function dataset(args)
         for l in eachline(joinpath(run_, f))
             r = JSON3.read(l); seen += 1; (r["score"] === nothing || r["score"] < smin) && continue
             pre = Int32.(r["prefix"]); fil = Int32.(r["fill"]); v = vcat(pre, fil, Int32(IM_END)); rs = length(pre); re = length(v)
-            starts = [i for i in 1:rs if v[i] == IM_START]; cs = something(findlast(q -> re - (q - 1) <= NPMAX - 100, starts), 1) - 1
-            isempty(starts) || (cs = max(cs, 0))
+            starts = [i for i in 1:rs if v[i] == IM_START]; q = findlast(q -> re - (q - 1) <= NPMAX - 100, starts)
+            cs = q === nothing ? max(0, re - (NPMAX - 100)) : starts[q] - 1          # a turn start inside the window, else mid-turn
             first = length(tok); append!(tok, v); t = length(names)
             append!(tr, (UInt32(first & 0xffffffff), UInt32(first >> 32), UInt32(re), UInt32(20261106), UInt32(0), UInt32(0)))
             append!(ex, (UInt32(t), UInt32(cs), UInt32(rs), UInt32(re))); push!(names, "$f t$(r["t"]) j$(r["j"]) jev $(r["score"])"); kept += 1
