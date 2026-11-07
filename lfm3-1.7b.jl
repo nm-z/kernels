@@ -1897,7 +1897,7 @@ end
 # is the input rows plus a few head rows, and it's bigger than VRAM has room for).
 # ---------------------------------------------------------------------------------------------
 using LinearAlgebra
-const T_NORM, T_NORMB, T_NORMW, T_PACK, T_GEMV, T_AXPBY, T_CONV1, T_CONV2, T_CONVB1, T_CONVB2, T_CONVW, T_SILU, T_SILUB, T_ROT, T_ROTB, T_TR, T_SOFT, T_SOFTB, T_GATE, T_GATEB, T_GEMM, T_UPD, T_GEMVT = Int32.(1:23)
+const T_NORM, T_NORMB, T_NORMW, T_PACK, T_GEMV, T_AXPBY, T_CONV1, T_CONV2, T_CONVB1, T_CONVB2, T_CONVW, T_SILU, T_SILUB, T_ROT, T_ROTB, T_TR, T_SOFT, T_SOFTB, T_GATE, T_GATEB, T_GEMM, T_UPD, T_GEMVT, T_STORE, T_LOAD = Int32.(1:25)
 const NPMAX = 1568                                         # positions a window (a multiple of 32)
 struct TR
 	op::Int32; nwg::Int32; N::Int32
@@ -2231,6 +2231,23 @@ end
         g += NW
     end
 end
+@inline ldb(b::LP{Float32}, o) = reinterpret(Float32, UInt32(unsafe_load(reinterpret(LP{UInt16}, b + o))) << 16)
+@inline function t_store!(T::TR)                           # c[(n K + k) BF16] = a[n S + k]: a layer's intermediate kept for the backward; a wave a row
+	lane = lanei(); NW = tnw(T); K = T.i1; S = T.i2; g = waveid()
+	while g < T.N
+	k = lane
+	while k < K; stb!(T.c, ld(T.a, Int64(g) * S + k), (Int64(g) * K + k) * 2); k += LANES; end
+	g += NW
+    end
+end
+@inline function t_load!(T::TR)                            # a[n S + k] = c[(n K + k) BF16]
+	lane = lanei(); NW = tnw(T); K = T.i1; S = T.i2; g = waveid()
+	while g < T.N
+	k = lane
+	while k < K; st!(T.a, ldb(T.c, (Int64(g) * K + k) * 2), Int64(g) * S + k); k += LANES; end
+	g += NW
+    end
+end
 @kernel unsafe_indices = true function k_tr!(T)
     op = T.op
     if op == T_NORM; t_norm!(T)
@@ -2255,6 +2272,8 @@ end
     elseif op == T_GATEB; t_gateb!(T)
     elseif op == T_UPD; t_upd!(T)
     elseif op == T_GEMVT; t_gemvt!(T)
+    elseif op == T_STORE; t_store!(T)
+    elseif op == T_LOAD; t_load!(T)
     end
 end
 KernelAbstractions.compiler_options(obj::KernelAbstractions.Kernel{ROCBackend,<:Any,<:Any,typeof(gpu_k_tr!)}) = (; maxthreads = Int(WGS))
@@ -2386,7 +2405,14 @@ struct TB
     gu1::ROCVector{Float32}; gu3::ROCVector{Float32}; gs::ROCVector{Float32}
     dW::ROCVector{Float32}; X::ROCVector{Float32}; X2::ROCVector{Float32}; NA::ROCVector{Float32}; NB::ROCVector{Float32}; vg::ROCVector{Float32}
     Xg::ROCVector{Float32}; X2g::ROCVector{Float32}       # the embedding's chunks
+    act::ROCVector{UInt16}; rsa::ROCVector{Float32}       # every layer's intermediates (BF16) and its norms' rsqrt (FP32), kept from the forward for the backward
 end
+# the intermediates a layer's backward reads, a slot each: [layer][slot][n][k] in BF16; P is the one rebuilt (its q, k are kept)
+const ASLOT = Dict(:xn => (0, NE), :o => (NE, NE), :x1 => (2NE, NE), :fn => (3NE, NE), :f => (4NE, NE), :u1 => (5NE, NFF), :u3 => (5NE + NFF, NFF), :s => (5NE + 2NFF, NFF),
+                   :q => (5NE + 3NFF, NE), :qr => (6NE + 3NFF, NE), :A => (7NE + 3NFF, NE), :ao => (8NE + 3NFF, NE), :k => (9NE + 3NFF, NKV * HD), :v => (9NE + 3NFF + NKV * HD, NKV * HD), :kr => (9NE + 3NFF + 2NKV * HD, NKV * HD), :gt => (9NE + 3NFF + 3NKV * HD, 32),
+                   :BCx => (5NE + 3NFF, 3NE), :h => (8NE + 3NFF, NE), :cv => (9NE + 3NFF, NE), :y => (10NE + 3NFF, NE))
+const ACTW = 11NE + 3NFF                                   # the widest layer's slots (a conv layer's end), elements a position
+const RSLOT = Dict(:rs1 => (0, 1), :rso => (1, 1), :rsf => (2, 1), :rsff => (3, 1), :rsq => (4, NH), :rsk => (4 + NH, NKV)); const RSW = 4 + NH + NKV
 const ECH = 8192                                           # embedding rows a chunk of its orthogonalization
 function TB()
     z(n) = AMDGPU.zeros(Float32, n); NP = NPMAX; rct = zeros(Float32, NP * 2 * 64 * 2); rf = rftab()
@@ -2406,8 +2432,15 @@ function TB()
        z(NP * NE), z(NP * NKV * HD), z(NP * NKV * HD), z(NP * 32), z(NP * NE), z(NP * NKV * HD), z(NH * NP * NP), z(NP * NE),
        z(NP * NFF), z(NP * NFF), z(NP * NFF),
        z(NFF * NE), z(NFF * NE), z(NFF * NE), z(NE * NE), z(NE * NE), z(7NE),
-       z(ECH * NE), z(ECH * NE))
+       z(ECH * NE), z(ECH * NE),
+       AMDGPU.zeros(UInt16, NL * ACTW * NP), z(NL * RSW * NP))
 end
+aslot(B::TB, l, name) = ((o, w) = ASLOT[name]; (reinterpret(LP{Float32}, pointer(B.act) + 2 * (Int64(l) * ACTW + o) * NPMAX), w))
+store!(B::TB, l, name, x, S, N) = ((p, w) = aslot(B, l, name); trun!(T_STORE, N; i1 = w, i2 = S, a = x, c = p))
+load!(B::TB, l, name, x, S, N) = ((p, w) = aslot(B, l, name); trun!(T_LOAD, N; i1 = w, i2 = S, a = x, c = p))
+rsoff(l, name) = ((o, w) = RSLOT[name]; (Int64(l) * RSW + o) * NPMAX + 1)
+rstore!(B::TB, l, name, rs, N) = copyto!(B.rsa, rsoff(l, name), rs, 1, N * RSLOT[name][2])
+rload!(B::TB, l, name, rs, N) = copyto!(rs, 1, B.rsa, rsoff(l, name), N * RSLOT[name][2])
 hrow(B::TB, l) = dp(B.H, l * NPMAX * NE)
 # ---- the ops over a window of N positions ----
 norm!(x, w, out, rs, N; D = NE, S = NE, nb = 1) = trun!(T_NORM, N; i1 = D, i2 = S, i3 = nb, a = x, b = dp(w), c = dp(out), d = dp(rs))
@@ -2420,18 +2453,21 @@ function matmul!(B::TB, x, K, S, W::DMat, out, N)
     trun!(T_GEMV, N; i1 = W.rows ÷ 32, i3 = W.K, i4 = W.rows, c = dp(B.xp), d = out, W = wp(W))
 end
 # the layer's forward from H[l] into H[l + 1], its intermediates left in the buffers
-function lfwd!(S::TS, B::TB, l, N)
+function lfwd!(S::TS, B::TB, l, N; keep = false)
     T = S.L[l+1]; x = hrow(B, l); full = isfull(l)
-    norm!(x, T.V[1], B.xn, B.rs1, N)
+    sv(name, buf, S_) = keep && store!(B, l, name, dp(buf), S_, N)
+    rv(name, rs) = keep && rstore!(B, l, name, rs, N)
+    norm!(x, T.V[1], B.xn, B.rs1, N); sv(:xn, B.xn, NE); rv(:rs1, B.rs1)
     if isattn(l)
         q, k, v, gt, o = T.M[1:5]
         trun!(T_PACK, N; i1 = NE, i2 = NE, a = dp(B.xn), c = dp(B.xp))
         for (W, out) in ((q, B.q), (k, B.k), (v, B.v), (gt, B.gt))
             trun!(T_GEMV, N; i1 = W.W.rows ÷ 32, i3 = NE, i4 = W.W.rows, c = dp(B.xp), d = dp(out), W = wp(W.W))
         end
-        norm!(dp(B.q), T.V[5], B.qn, B.rsq, N; D = HD, S = NE, nb = NH); norm!(dp(B.k), T.V[6], B.kn, B.rsk, N; D = HD, S = NKV * HD, nb = NKV)
+        sv(:q, B.q, NE); sv(:k, B.k, NKV * HD); sv(:v, B.v, NKV * HD); sv(:gt, B.gt, 32)
+        norm!(dp(B.q), T.V[5], B.qn, B.rsq, N; D = HD, S = NE, nb = NH); norm!(dp(B.k), T.V[6], B.kn, B.rsk, N; D = HD, S = NKV * HD, nb = NKV); rv(:rsq, B.rsq); rv(:rsk, B.rsk)
         tt = full ? 0 : 1
-        trun!(T_ROT, N; i1 = NE, i2 = NH, i3 = tt, a = dp(B.qn), b = dp(B.rc), c = dp(B.qr)); trun!(T_ROT, N; i1 = NKV * HD, i2 = NKV, i3 = tt, a = dp(B.kn), b = dp(B.rc), c = dp(B.kr))
+        trun!(T_ROT, N; i1 = NE, i2 = NH, i3 = tt, a = dp(B.qn), b = dp(B.rc), c = dp(B.qr)); trun!(T_ROT, N; i1 = NKV * HD, i2 = NKV, i3 = tt, a = dp(B.kn), b = dp(B.rc), c = dp(B.kr)); sv(:qr, B.qr, NE); sv(:kr, B.kr, NKV * HD)
         for j in 0:NH-1                                    # S_j = scale Q_j K_j'; Sc(m, n) = Σ_c Kc(c, m) Qc(c, n)
             sgemm!(true, false, N, N, HD, SCALE, fp(B.kr, (j ÷ 4) * HD), NKV * HD, fp(B.qr, j * HD), NE, 0, fp(B.P, j * N * N), N)
         end
@@ -2439,25 +2475,45 @@ function lfwd!(S::TS, B::TB, l, N)
         for j in 0:NH-1                                    # A_j = P_j V_j; Ac(c, n) = Σ_m Vc(c, m) Pc(m, n)
             sgemm!(false, false, HD, N, N, 1, fp(B.v, (j ÷ 4) * HD), NKV * HD, fp(B.P, j * N * N), N, 0, fp(B.A, j * HD), NE)
         end
-        trun!(T_GATE, N; i1 = 32, a = dp(B.A), b = dp(B.gt), c = dp(B.ao))
+        trun!(T_GATE, N; i1 = 32, a = dp(B.A), b = dp(B.gt), c = dp(B.ao)); sv(:A, B.A, NE); sv(:ao, B.ao, NE)
         matmul!(B, dp(B.ao), NE, NE, o.W, dp(B.o), N)
     else
-        matmul!(B, dp(B.xn), NE, NE, T.M[1].W, dp(B.BCx), N)
-        trun!(T_CONV1, N; a = dp(B.BCx), b = dp(B.h))
-        trun!(T_CONV2, N; a = dp(B.BCx), b = dp(B.h), d = dp(T.V[5]), c = dp(B.y), e = dp(B.cv))
+        matmul!(B, dp(B.xn), NE, NE, T.M[1].W, dp(B.BCx), N); sv(:BCx, B.BCx, 3NE)
+        trun!(T_CONV1, N; a = dp(B.BCx), b = dp(B.h)); sv(:h, B.h, NE)
+        trun!(T_CONV2, N; a = dp(B.BCx), b = dp(B.h), d = dp(T.V[5]), c = dp(B.y), e = dp(B.cv)); sv(:y, B.y, NE); sv(:cv, B.cv, NE)
         matmul!(B, dp(B.y), NE, NE, T.M[2].W, dp(B.o), N)
     end
-    norm!(dp(B.o), T.V[2], B.on, B.rso, N)
-    axpby!(x, dp(B.on), dp(B.x1), N, NE, 1, 1)
-    norm!(dp(B.x1), T.V[3], B.fn, B.rsf, N)
+    sv(:o, B.o, NE)
+    norm!(dp(B.o), T.V[2], B.on, B.rso, N); rv(:rso, B.rso)
+    axpby!(x, dp(B.on), dp(B.x1), N, NE, 1, 1); sv(:x1, B.x1, NE)
+    norm!(dp(B.x1), T.V[3], B.fn, B.rsf, N); sv(:fn, B.fn, NE); rv(:rsf, B.rsf)
     w1, w3, w2 = T.M[end-2:end]
     trun!(T_PACK, N; i1 = NE, i2 = NE, a = dp(B.fn), c = dp(B.xp))
     trun!(T_GEMV, N; i1 = NFF ÷ 32, i3 = NE, i4 = NFF, c = dp(B.xp), d = dp(B.u1), W = wp(w1.W))
     trun!(T_GEMV, N; i1 = NFF ÷ 32, i3 = NE, i4 = NFF, c = dp(B.xp), d = dp(B.u3), W = wp(w3.W))
-    trun!(T_SILU, N; a = dp(B.u1), b = dp(B.u3), c = dp(B.s))
-    matmul!(B, dp(B.s), NFF, NFF, w2.W, dp(B.f), N)
-    norm!(dp(B.f), T.V[4], B.fo, B.rsff, N)
+    trun!(T_SILU, N; a = dp(B.u1), b = dp(B.u3), c = dp(B.s)); sv(:u1, B.u1, NFF); sv(:u3, B.u3, NFF); sv(:s, B.s, NFF)
+    matmul!(B, dp(B.s), NFF, NFF, w2.W, dp(B.f), N); sv(:f, B.f, NE)
+    norm!(dp(B.f), T.V[4], B.fo, B.rsff, N); rv(:rsff, B.rsff)
     axpby!(dp(B.x1), dp(B.fo), hrow(B, l + 1), N, NE, 1, 1)
+end
+# the layer's intermediates back into the buffers from the store (FP32 again), P rebuilt from its q and k: what lbwd! reads
+function lrestore!(S::TS, B::TB, l, N)
+    T = S.L[l+1]; full = isfull(l)
+    lv(name, buf, S_) = load!(B, l, name, dp(buf), S_, N)
+    for (name, buf) in ((:xn, B.xn), (:o, B.o), (:x1, B.x1), (:fn, B.fn), (:f, B.f)); lv(name, buf, NE); end
+    for (name, buf) in ((:u1, B.u1), (:u3, B.u3), (:s, B.s)); lv(name, buf, NFF); end
+    for (name, rs) in ((:rs1, B.rs1), (:rso, B.rso), (:rsf, B.rsf), (:rsff, B.rsff)); rload!(B, l, name, rs, N); end
+    if isattn(l)
+        for (name, buf) in ((:q, B.q), (:qr, B.qr), (:A, B.A), (:ao, B.ao)); lv(name, buf, NE); end
+        for (name, buf) in ((:k, B.k), (:v, B.v), (:kr, B.kr)); lv(name, buf, NKV * HD); end
+        lv(:gt, B.gt, 32); rload!(B, l, :rsq, B.rsq, N); rload!(B, l, :rsk, B.rsk, N)
+        for j in 0:NH-1
+            sgemm!(true, false, N, N, HD, SCALE, fp(B.kr, (j ÷ 4) * HD), NKV * HD, fp(B.qr, j * HD), NE, 0, fp(B.P, j * N * N), N)
+        end
+        trun!(T_SOFT, N; i1 = full ? 0 : WIN, a = dp(B.P))
+    else
+        lv(:BCx, B.BCx, 3NE); for (name, buf) in ((:h, B.h), (:cv, B.cv), (:y, B.y)); lv(name, buf, NE); end
+    end
 end
 # the gradient of a matrix into its momentum: mo = f2 mo + (1 / acc) dW; of a vector likewise
 function macc!(B::TB, tw::TW, f2, acc)
@@ -2480,7 +2536,7 @@ function mback!(B::TB, tw::TW, gy, ldg, x, ldx, gx, N, f2, acc; add = false)
 end
 # the layer's adjoint: gx, the gradient of H[l + 1], becomes the gradient of H[l]; every weight's gradient into its momentum
 function lbwd!(S::TS, B::TB, l, N, f2, acc)
-    lfwd!(S, B, l, N)
+    lrestore!(S, B, l, N)
     T = S.L[l+1]; x = hrow(B, l); gx = dp(B.gx); full = isfull(l)
     w1, w3, w2 = T.M[end-2:end]
     # the FFN: H[l + 1] = x1 + post_ffn_norm(f)
@@ -2524,8 +2580,8 @@ function lbwd!(S::TS, B::TB, l, N, f2, acc)
     normb!(dp(B.gxn), x, T.V[1], B.rs1, gx, N, 1); normw!(dp(B.gxn), x, B.rs1, B.vg, N); vacc!(B, T.VM[1], f2, acc)
 end
 # the forward of a window whose tokens are in H[0]: the final hidden state, normalized, into xn
-function wfwd!(S::TS, B::TB, N)
-    for l in 0:NL-1; lfwd!(S, B, l, N); end
+function wfwd!(S::TS, B::TB, N; keep = false)
+    for l in 0:NL-1; lfwd!(S, B, l, N; keep); end
     norm!(hrow(B, NL), S.M.onrm, B.xn, B.rs1, N)
 end
 # the backward from gy, the gradient of the normalized final state: gx ends as the gradient of the embeddings
@@ -2647,7 +2703,7 @@ function window!(S::TS, B::TB, Hd::Head, D::Data, w, f2, acc; grad = true)
     t, f0, N, pos, tgt = w
     for p in 0:N-1; Hd.xf[:, p+1] = view(S.E, :, D.tok[f0+p+1] + 1); end
     copyto!(B.H, 1, Hd.xf, 1, N * NE)
-    wfwd!(S, B, N)
+    wfwd!(S, B, N; keep = grad)
     AMDGPU.synchronize(); copyto!(Hd.xf, 1, B.xn, 1, N * NE)
     loss = head!(S, Hd, N, pos, tgt, f2, acc; grad)
     grad || return loss
