@@ -2847,7 +2847,7 @@ function turns(ids)                                             # (color, text) 
 end
 
 function generate!(R::Run, S::Slot, prefix::Vector{Int32}, seed)  # one continuation of the prefix, streamed into a cyan entry; the prompt snapshotted
-    e = say!(R, S, CL, ""); toks = Int[]; (temp, topk, topp) = SAMP[]
+    e = say!(R, S, CL, "lfmb: "); toks = Int[]; (temp, topk, topp) = SAMP[]
     try
         c = connect(CFG["sock"])
         println(c, "stop ", IM_END); println(c, "sample ", seed, " ", temp, " ", topk, " ", topp); println(c, "snap ", length(prefix) - 1)
@@ -2856,9 +2856,9 @@ function generate!(R::Run, S::Slot, prefix::Vector{Int32}, seed)  # one continua
             l = readline(c)
             if startswith(l, "tok ")
                 t = parse(Int, l[5:end]); t == IM_END && break
-                push!(toks, t); lock(R.cond) do; e.txt = text(toks); end; notify_all(R)
+                push!(toks, t); lock(R.cond) do; e.txt = "lfmb: " * text(toks); end; notify_all(R)
             elseif startswith(l, "error")
-                say!(R, S, CJ, l); break
+                say!(R, S, CJ, "jev: " * l); break
             elseif startswith(l, "done")
                 break
             end
@@ -2910,20 +2910,20 @@ function walk!(R::Run, S::Slot, t::Int, all, n, seed)           # one transcript
     for (role, s0, b0, e0) in turnlist(D.tok, f, N)
         length(prefix) > PMAX && (say!(R, S, CJ, "prefix past $PMAX tokens: stopping this transcript"); break)
         if role == A_ROLE                                       # claude's turn, verbatim
-            body = D.tok[f+b0:f+e0-3]; isempty(strip(text(body))) || say!(R, S, CC, text(body))
+            body = D.tok[f+b0:f+e0-3]; isempty(strip(text(body))) || say!(R, S, CC, "claude: " * text(body))
             append!(prefix, D.tok[f+s0:f+e0])
         elseif haskey(targets, b0)                              # nate's turn: nlfm fills it; the real reply is only shown and judged
             j += 1; j > n && break
             append!(prefix, (IM_START, U_ROLE, NLT))
             fill = generate!(R, S, prefix, seed + j); actual = D.tok[f+b0:f+Int(targets[b0][4])]
-            say!(R, S, CU, text(cut(actual)))
+            say!(R, S, CU, "user: " * text(cut(actual)))
             v = judge(prefix, actual, fill)
-            say!(R, S, CJ, v isa String ? "jev " * v : "jev $(round(v[1]; digits = 2))  $(commas(v[3])) tok"); v isa String || push!(scores, v[1])
+            say!(R, S, CJ, v isa String ? "jev: " * v : "jev: $(round(v[1]; digits = 2))  $(commas(v[3])) tok"); v isa String || push!(scores, v[1])
             save(t, j, prefix, fill, actual, v); header!(n - j)
             append!(prefix, Int32.(fill)); append!(prefix, (IM_END, NLT))
         end                                                     # any other user turn (a paste, the first message) is left out
     end
-    isempty(scores) || say!(R, S, CJ, "jev mean $(round(sum(scores) / length(scores); digits = 2)) over $(length(scores))")
+    isempty(scores) || say!(R, S, CJ, "jev: mean $(round(sum(scores) / length(scores); digits = 2)) over $(length(scores))")
 end
 
 function drive(R::Run, order)                                   # the slot takes the first q transcripts of the order
