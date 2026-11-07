@@ -2880,8 +2880,8 @@ const IM_START = Int32(124899)
 const CJ = "\e[38;2;242;40;60m"; const CC = "\e[38;2;255;122;0m"; const CL = "\e[38;2;0;184;217m"; const CU = "\e[38;2;0;174;107m"; const Z = "\e[0m"
 
 mutable struct Entry; col::String; txt::String; end             # one line of a pane's log (txt may hold newlines)
-mutable struct Slot; i::Int; log::Vector{Entry}; done::Bool; end
-struct Run; seed::UInt32; slots::Vector{Slot}; cond::Threads.Condition; end
+mutable struct Lane; i::Int; log::Vector{Entry}; done::Bool; end
+struct Run; seed::UInt32; slots::Vector{Lane}; cond::Threads.Condition; end
 const CFG = Dict{String,String}()
 D = nothing; VOCAB = nothing
 
@@ -2890,7 +2890,7 @@ text(ids) = detok(VOCAB, ids)
 squeeze(t) = strip(replace(t, r"\n[ \t]*(\n[ \t]*)+" => "\n"))
 commas(n) = replace(string(n), r"(?<=\d)(?=(\d{3})+$)" => ",")
 notify_all(R) = lock(R.cond) do; notify(R.cond); end
-function say!(R::Run, S::Slot, col, txt)
+function say!(R::Run, S::Lane, col, txt)
     e = Entry(col, txt); lock(R.cond) do; push!(S.log, e); end; notify_all(R); e
 end
 function turns(ids)                                             # (color, text) a turn, from tokens in the chat format
@@ -2903,7 +2903,7 @@ function turns(ids)                                             # (color, text) 
     out
 end
 
-function generate!(R::Run, S::Slot, prefix::Vector{Int32}, seed)  # one continuation of the prefix, streamed into a cyan entry; the prompt snapshotted
+function generate!(R::Run, S::Lane, prefix::Vector{Int32}, seed)  # one continuation of the prefix, streamed into a cyan entry; the prompt snapshotted
     e = say!(R, S, CL, "lfmb: "); toks = Int[]; (temp, topk, topp) = SAMP[]
     try
         c = connect(CFG["sock"])
@@ -2961,7 +2961,7 @@ function save(t, j, prefix, fill, actual, v)
                                      "prefix" => prefix, "fill" => fill, "actual" => cut(actual))))
     end
 end
-function walk!(R::Run, S::Slot, t::Int, all, n, seed)           # one transcript: the first n of nate's typed turns, on one prefix of claude's turns and nlfm's fills
+function walk!(R::Run, S::Lane, t::Int, all, n, seed)           # one transcript: the first n of nate's typed turns, on one prefix of claude's turns and nlfm's fills
     f = tfirst(D, t); N = Int(D.tr[t+1][3]); targets = Dict(Int(e[3]) + 1 => e for e in all); prefix = Int32[BOS]   # examples are 0-based offsets
     scores = Float64[]; j = 0
     for (role, s0, b0, e0) in turnlist(D.tok, f, N)
@@ -3101,7 +3101,7 @@ function arena(args)
     seed = UInt32(parse(Int, arg(("--seed",), string(rand(UInt32))))); SAMP[] = sampling()
     global D = Data(arg(("--data",), expanduser("~/models/lfm3-data"))); global VOCAB = vocabulary(CFG["model"])
     ts = unique(Int(e[1]) for e in D.ex if e[4] - e[3] >= 3); order = shuffle(MersenneTwister(seed), ts)
-    R = Run(seed, [Slot(1, Entry[], false)], Threads.Condition())
+    R = Run(seed, [Lane(1, Entry[], false)], Threads.Condition())
     drive(R, order)
     stream(R)
 end
