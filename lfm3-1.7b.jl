@@ -1,4 +1,4 @@
-#!/usr/bin/env -S withkey "OpenCode Zen" -- julia --project=/home/nate/src/kernels/env/amd --startup-file=no -t 4,1
+#!/usr/bin/env -S julia --project=/home/nate/src/kernels/env/amd --startup-file=no -t 4,1
 # lfm3-1.7b.jl: LFM3-1.7B-Base (lfm3: 13 gated short-conv, 6 full-attention and 5 sliding-attention layers, hidden 2048)
 # in BF16 on engi's Radeon RX 7700 XT (gfx1101, wave32, 12 GB GDDR6), KernelAbstractions over AMDGPU.jl. One cooperative
 # persistent kernel runs a whole request: the prefill (positions in blocks of 16) then the decode loop.
@@ -14,7 +14,8 @@ function help()
 nlfm [options]
 	processing:
 		\e[1m-c\e[0m <continuations> per transcript
-		\e[1m-q\e[0m <transcripts>
+		\e[1m-q\e[0m <transcripts>   per slot
+		\e[1m-s\e[0m <concurrency>   of transcripts
 	sampling:
 		\e[1m-t\e[0m <temperature>
 		\e[1m-k\e[0m <top-k>
@@ -22,7 +23,7 @@ nlfm [options]
 	defaults:
 		continuations all  temp  $t
 		transcripts   1    top-k $k
-		                   top-p $p
+		concurrency   2    top-p $p
 	indicators:
 		\e[38;2;255;122;0mclaude\e[0m
 		\e[38;2;0;174;107mnate\e[0m
@@ -2812,7 +2813,7 @@ end
 # and so on. Jev scores each fill against the real reply (jev-1.13 through OpenCode Zen). One process is one slot: -q transcripts,
 # -c user turns a transcript ("all" by default); more concurrency is more processes. The engine snapshots each prompt, so the next
 # continues from the cached prefix.
-#   nlfm [-c N] [-q N] [--seed S] [--data DIR] [--model DIR] [--sock SOCK]   (~/.local/bin/nlfm -> this file; the shebang runs it under withkey)
+#   nlfm [-c N] [-q N] [--seed S] [--data DIR] [--model DIR] [--sock SOCK]   (~/.local/bin/nlfm -> this file)
 using HTTP, JSON3
 const SAMP = Ref((0.1, 50, 1.0))                               # temp, top-k, top-p for every continuation (-t -k -p set the defaults)
 const NCONT = Ref(typemax(Int)); const NQ = Ref(1); const NGEN = 128; const IM_END = 124900; const PMAX = 60000
@@ -2892,6 +2893,7 @@ function walk!(R::Run, S::Slot, t::Int, all, n, seed)           # one transcript
         say!(R, S, CU, text(cut(actual)))
         v = judge(prefix, actual, fill)
         say!(R, S, CJ, v isa String ? "jev " * v : "jev $(round(v[1]; digits = 2))  $(commas(v[3])) tok"); v isa String || push!(scores, v[1])
+        header!(length(exs) - j)
         j == length(exs) && break
         between = D.tok[f+re+1:f+Int(exs[j+1][3])]            # from the end of nate's real reply to the start of the next: claude's turns
         for (c, x) in turns(between); say!(R, S, c, x); end
@@ -2910,8 +2912,10 @@ function drive(R::Run, order)                                   # the slot takes
                 t = order[k]; exs = sort(bytr[t]; by = e -> e[3])
                 qi == 1 || say!(R, S, "", "")
                 say!(R, S, "", "transcript $t: $(min(NCONT[], length(exs))) of $(length(exs)) user turns")
+                header!(min(NCONT[], length(exs)))
                 walk!(R, S, t, exs, NCONT[], (R.seed % 1000) * 1000 + k * 100)
             end
+            header!(-1)
         catch x
             say!(R, S, CJ, sprint(showerror, x))
         finally
@@ -2943,8 +2947,41 @@ function stream(R::Run)                                         # the log straig
     end
 end
 
+function zenkey()                                               # the OpenCode Zen key through withkey, by a fifo (withkey masks stdout)
+    haskey(ENV, "KEY_OPENCODE_ZEN") && return
+    d = mktempdir(); f = joinpath(d, "k"); run(`mkfifo $f`)
+    pr = run(`withkey "OpenCode Zen" -- sh -c "printf %s \"\$KEY_OPENCODE_ZEN\" > $f"`; wait = false)
+    ENV["KEY_OPENCODE_ZEN"] = read(f, String); wait(pr); rm(d; recursive = true)
+end
+const RT = get(ENV, "XDG_RUNTIME_DIR", "/run/user/$(ccall(:getuid, Cuint, ()))")
+function asmux_up()                                             # the viewer: drawd and orgctl, started here when their endpoints are missing
+    ctl = joinpath(RT, "asmux.ctl"); sock = joinpath(RT, "asmux.sock"); lib = expanduser("~/.local/lib/asmux")
+    ispath(ctl) && return ctl
+    issocket(sock) || (run(detach(`$lib/drawd $sock 1600 900`); wait = false); for _ in 1:50; issocket(sock) && break; sleep(0.1); end)
+    run(detach(`$lib/orgctl --draw $sock --px 1600 900 --ctl $ctl`); wait = false)
+    for _ in 1:100; ispath(ctl) && return ctl; sleep(0.1); end
+    error("asmux: no controller at $ctl")
+end
+const PANE = Ref("")                                            # this worker's pane name; its header shows the continuations left
+function header!(left)
+    isempty(PANE[]) && return
+    new = left < 0 ? "$(PANE[])-done" : "$(PANE[])-$(left)left"; cur = PANE[]; PANE[] = new
+    try run(pipeline(`asmuxctl rename $cur $new $(getpid())`; stdout = devnull, stderr = devnull)) catch; end
+end
+function launch(args, n)                                        # -s n: one asmux pane a slot, each a worker nlfm; this process then leaves
+    asmux_up(); me = abspath(PROGRAM_FILE); seed = (i = findfirst(==("--seed"), args); i === nothing ? rand(UInt32) : parse(UInt32, args[i+1]))
+    rest = String[]; skip = false
+    for (j, a) in enumerate(args); skip && (skip = false; continue); a in ("-s", "--seed") && (skip = true; continue); push!(rest, a); end
+    for k in 1:n
+        name = "nlfm$k"; run(`asmuxctl add $name - --keep-on-exit -- $me --pane $name --seed $(seed + k) $rest`)
+    end
+end
+
 function arena(args)
     arg(ks, d) = (i = findfirst(in(ks), args); i === nothing ? d : args[i+1])
+    nslot = parse(Int, arg(("-s",), "2")); PANE[] = arg(("--pane",), "")
+    isempty(PANE[]) && nslot > 1 && return launch(args, nslot)
+    zenkey()
     CFG["sock"] = arg(("--sock",), "/run/user/1000/lfm3.sock"); CFG["model"] = arg(("--model",), expanduser("~/models/lfm3-1.7b-nate"))
     c = arg(("-c",), "all"); NCONT[] = c == "all" ? typemax(Int) : parse(Int, c); NQ[] = parse(Int, arg(("-q",), "1"))
     seed = UInt32(parse(Int, arg(("--seed",), string(rand(UInt32))))); SAMP[] = sampling()
