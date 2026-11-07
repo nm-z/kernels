@@ -2819,6 +2819,7 @@ const SAMP = Ref((0.1, 50, 1.0))                               # temp, top-k, to
 const NCONT = Ref(typemax(Int)); const NQ = Ref(1); const NGEN = 128; const IM_END = 124900; const PMAX = 60000
 const LEVELS = ["unrelated to what nate said, or not a sentence", "nate's voice, but a different subject", "the same subject, a different point",
                 "the same point in different words", "the same reply: meaning and nearly the words"]
+const IM_START = Int32(124899)
 const CJ = "\e[38;2;242;40;60m"; const CC = "\e[38;2;255;122;0m"; const CL = "\e[38;2;0;184;217m"; const CU = "\e[38;2;0;174;107m"; const Z = "\e[0m"
 
 mutable struct Entry; col::String; txt::String; end             # one line of a pane's log (txt may hold newlines)
@@ -2881,23 +2882,46 @@ function judge(prefix::Vector{Int32}, actual::Vector{Int32}, fill::Vector{Int}) 
     end
 end
 
-function walk!(R::Run, S::Slot, t::Int, all, n, seed)           # one transcript: the first n of its user turns in order on one growing prefix
-    f = tfirst(D, t); _, cs0, rs0, _ = Int.(all[1]); prefix = D.tok[f+cs0+1:f+rs0]; exs = all[1:min(n, end)]
-    for (c, x) in turns(prefix); say!(R, S, c, x); end
-    scores = Float64[]
-    for (j, e) in enumerate(exs)
-        _, _, rs, re = Int.(e)
+const U_ROLE = Int32(5922); const A_ROLE = Int32(63514); const NL = Int32(207); const BOS = Int32(124894)   # "user", "assistant", "\n" after <|im_start|>
+function turnlist(tok, f, n)                                    # (role, start, body start, end) a turn: start at <|im_start|>, end past its "\n"
+    out = NTuple{4,Int}[]; i = 1
+    while i <= n
+        if tok[f+i] == IM_START
+            role = tok[f+i+1]; j = i + 3
+            while j <= n && tok[f+j] != IM_END; j += 1; end
+            push!(out, (Int(role), i, i + 3, min(n, j + 1))); i = j + 2
+        else
+            i += 1
+        end
+    end
+    out
+end
+const OUT = Ref("")                                             # --out DIR: every fill appended to DIR/fills-PANE.jsonl
+function save(t, j, prefix, fill, actual, v)
+    isempty(OUT[]) && return
+    mkpath(OUT[]); open(joinpath(OUT[], "fills-$(isempty(BASE[]) ? getpid() : BASE[]).jsonl"), "a") do io
+        println(io, JSON3.write(Dict("t" => t, "j" => j, "score" => v isa String ? nothing : v[1], "conf" => v isa String ? nothing : v[2],
+                                     "prefix" => prefix, "fill" => fill, "actual" => cut(actual))))
+    end
+end
+function walk!(R::Run, S::Slot, t::Int, all, n, seed)           # one transcript: the first n of nate's typed turns, on one prefix of claude's turns and nlfm's fills
+    f = tfirst(D, t); N = Int(D.tr[t+1][3]); targets = Dict(Int(e[3]) + 1 => e for e in all); prefix = Int32[BOS]   # examples are 0-based offsets
+    scores = Float64[]; j = 0
+    for (role, s0, b0, e0) in turnlist(D.tok, f, N)
         length(prefix) > PMAX && (say!(R, S, CJ, "prefix past $PMAX tokens: stopping this transcript"); break)
-        fill = generate!(R, S, prefix, seed + j)
-        actual = D.tok[f+rs+1:f+re]
-        say!(R, S, CU, text(cut(actual)))
-        v = judge(prefix, actual, fill)
-        say!(R, S, CJ, v isa String ? "jev " * v : "jev $(round(v[1]; digits = 2))  $(commas(v[3])) tok"); v isa String || push!(scores, v[1])
-        header!(length(exs) - j)
-        j == length(exs) && break
-        between = D.tok[f+re+1:f+Int(exs[j+1][3])]            # from the end of nate's real reply to the start of the next: claude's turns
-        for (c, x) in turns(between); say!(R, S, c, x); end
-        prefix = vcat(prefix, Int32.(fill), Int32(IM_END), between)
+        if role == A_ROLE                                       # claude's turn, verbatim
+            body = D.tok[f+b0:f+e0-3]; isempty(strip(text(body))) || say!(R, S, CC, text(body))
+            append!(prefix, D.tok[f+s0:f+e0])
+        elseif haskey(targets, b0)                              # nate's turn: nlfm fills it; the real reply is only shown and judged
+            j += 1; j > n && break
+            append!(prefix, (IM_START, U_ROLE, NL))
+            fill = generate!(R, S, prefix, seed + j); actual = D.tok[f+b0:f+Int(targets[b0][4])]
+            say!(R, S, CU, text(cut(actual)))
+            v = judge(prefix, actual, fill)
+            say!(R, S, CJ, v isa String ? "jev " * v : "jev $(round(v[1]; digits = 2))  $(commas(v[3])) tok"); v isa String || push!(scores, v[1])
+            save(t, j, prefix, fill, actual, v); header!(n - j)
+            append!(prefix, Int32.(fill)); append!(prefix, (IM_END, NL))
+        end                                                     # any other user turn (a paste, the first message) is left out
     end
     isempty(scores) || say!(R, S, CJ, "jev mean $(round(sum(scores) / length(scores); digits = 2)) over $(length(scores))")
 end
@@ -2977,9 +3001,42 @@ function launch(args, n)                                        # -s n: one asmu
     end
 end
 
+# nlfm --dataset RUNDIR OUTDIR [--min S] [--held K]: a training set from a run's fills: each fill with jev score >= S becomes a
+# transcript (its prefix, the fill, <|im_end|>) with one example; K held-out transcripts of the original data come along, held out,
+# so --train scores the same held-out loss. The context start is the latest turn start that keeps the window inside NPMAX.
+function dataset(args)
+    i = findfirst(==("--dataset"), args); run_, out = args[i+1], args[i+2]
+    arg(k, d) = (j = findfirst(==(k), args); j === nothing ? d : args[j+1])
+    smin = parse(Float64, arg("--min", "2")); K = parse(Int, arg("--held", "40")); data = arg("--data", expanduser("~/models/lfm3-data"))
+    D0 = Data(data); mkpath(out)
+    tok = Int32[]; tr = UInt32[]; ex = UInt32[]; names = String[]; kept = 0; seen = 0
+    for f in sort(filter(x -> startswith(x, "fills-") && endswith(x, ".jsonl"), readdir(run_)))
+        for l in eachline(joinpath(run_, f))
+            r = JSON3.read(l); seen += 1; (r["score"] === nothing || r["score"] < smin) && continue
+            pre = Int32.(r["prefix"]); fil = Int32.(r["fill"]); v = vcat(pre, fil, Int32(IM_END)); rs = length(pre); re = length(v)
+            starts = [i for i in 1:rs if v[i] == IM_START]; cs = something(findlast(q -> re - (q - 1) <= NPMAX - 100, starts), 1) - 1
+            isempty(starts) || (cs = max(cs, 0))
+            first = length(tok); append!(tok, v); t = length(names)
+            append!(tr, (UInt32(first & 0xffffffff), UInt32(first >> 32), UInt32(re), UInt32(20261106), UInt32(0), UInt32(0)))
+            append!(ex, (UInt32(t), UInt32(cs), UInt32(rs), UInt32(re))); push!(names, "$f t$(r["t"]) j$(r["j"]) jev $(r["score"])"); kept += 1
+        end
+    end
+    held = [t for t in 0:length(D0.tr)-1 if D0.tr[t+1][5] != 0]; held = held[round.(Int, range(1, length(held); length = min(K, length(held))))]
+    for t in held
+        f = tfirst(D0, t); n = Int(D0.tr[t+1][3]); first = length(tok); append!(tok, D0.tok[f+1:f+n]); tn = length(names)
+        append!(tr, (UInt32(first & 0xffffffff), UInt32(first >> 32), UInt32(n), D0.tr[t+1][4], UInt32(1), UInt32(0)))
+        for e in D0.ex; e[1] == t && append!(ex, (UInt32(tn), e[2], e[3], e[4])); end
+        push!(names, "held-out transcript $t of $data")
+    end
+    write(joinpath(out, "tokens.bin"), tok); write(joinpath(out, "trans.bin"), tr); write(joinpath(out, "examples.bin"), ex)
+    write(joinpath(out, "names.txt"), join(names, '\n') * "\n")
+    println("$kept of $seen fills kept (jev >= $smin), $(length(held)) held-out transcripts, $(length(tok)) tokens -> $out")
+end
+
 function arena(args)
     arg(ks, d) = (i = findfirst(in(ks), args); i === nothing ? d : args[i+1])
-    nslot = parse(Int, arg(("-s",), "4")); BASE[] = PANE[] = arg(("--pane",), "")
+    nslot = parse(Int, arg(("-s",), "4")); BASE[] = PANE[] = arg(("--pane",), ""); OUT[] = arg(("--out",), "")
+    "--dataset" in args && return dataset(args)
     isempty(BASE[]) && nslot > 1 && return launch(args, nslot)
     zenkey()
     CFG["sock"] = arg(("--sock",), "/run/user/1000/lfm3.sock"); CFG["model"] = arg(("--model",), expanduser("~/models/lfm3-1.7b-nate"))
@@ -3003,6 +3060,6 @@ function main(args)
         serve(args[k+1], args[i+1])
     end
 end
-if realpath(PROGRAM_FILE) == realpath(@__FILE__()) && SRV[] === nothing
+if !isempty(PROGRAM_FILE) && realpath(PROGRAM_FILE) == realpath(@__FILE__()) && SRV[] === nothing
     main(ARGS)
 end
