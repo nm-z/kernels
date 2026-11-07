@@ -2761,6 +2761,7 @@ function train(args)
     dir = arg("--model", ""); data = arg("--train", ""); out = arg("--out", ""); epochs = parse(Int, arg("--epochs", "2"))
     lr = parse(Float64, arg("--lr", "0.002")); lrv = parse(Float64, arg("--lrv", "0.0002")); lre = parse(Float64, arg("--lre", "0.002")); beta = parse(Float64, arg("--beta", "0.95"))
     acc = parse(Int, arg("--acc", "8")); nwin = parse(Int, arg("--windows", "0")); seed = parse(Int, arg("--seed", "1"))
+    out == "" || mkpath(out)
     (dir == "" || data == "") && error("usage: julia --project=env/amd -t 12 lfm3-1.7b.jl --train DATADIR --model DIR --out OUTDIR [--epochs E --lr L --lrv L --lrv L --beta B --acc A --windows W --check PREFIX N --resume]")
     BLAS.set_num_threads(Sys.CPU_THREADS)
     AMDGPU.stream!(AMDGPU.HIPStream(:low))                 # (the card also runs the desktop: its gfx ring goes first)
@@ -3014,7 +3015,7 @@ function dataset(args)
         for l in eachline(joinpath(run_, f))
             r = JSON3.read(l); seen += 1; (r["score"] === nothing || r["score"] < smin) && continue
             pre = Int32.(r["prefix"]); fil = Int32.(r["fill"]); v = vcat(pre, fil, Int32(IM_END)); rs = length(pre); re = length(v)
-            starts = [i for i in 1:rs if v[i] == IM_START]; q = findlast(q -> re - (q - 1) <= NPMAX - 100, starts)
+            starts = [i for i in 1:rs if v[i] == IM_START]; q = findfirst(q -> re - (q - 1) <= NPMAX - 100, starts)   # the earliest turn start that fits
             cs = q === nothing ? max(0, re - (NPMAX - 100)) : starts[q] - 1          # a turn start inside the window, else mid-turn
             first = length(tok); append!(tok, v); t = length(names)
             append!(tr, (UInt32(first & 0xffffffff), UInt32(first >> 32), UInt32(re), UInt32(20261106), UInt32(0), UInt32(0)))
