@@ -2962,10 +2962,10 @@ function asmux_up()                                             # the viewer: dr
     for _ in 1:100; ispath(ctl) && return ctl; sleep(0.1); end
     error("asmux: no controller at $ctl")
 end
-const PANE = Ref("")                                            # this worker's pane name; its header shows the continuations left
+const PANE = Ref(""); const BASE = Ref("")                      # this worker's pane: its current name and its base; the header shows the continuations left
 function header!(left)
-    isempty(PANE[]) && return
-    new = left < 0 ? "$(PANE[])-done" : "$(PANE[])-$(left)left"; cur = PANE[]; PANE[] = new
+    isempty(BASE[]) && return
+    new = left < 0 ? "$(BASE[])-done" : "$(BASE[])-$(left)left"; cur = PANE[]; new == cur && return; PANE[] = new
     try run(pipeline(`asmuxctl rename $cur $new $(getpid())`; stdout = devnull, stderr = devnull)) catch; end
 end
 function launch(args, n)                                        # -s n: one asmux pane a slot, each a worker nlfm; this process then leaves
@@ -2979,8 +2979,8 @@ end
 
 function arena(args)
     arg(ks, d) = (i = findfirst(in(ks), args); i === nothing ? d : args[i+1])
-    nslot = parse(Int, arg(("-s",), "2")); PANE[] = arg(("--pane",), "")
-    isempty(PANE[]) && nslot > 1 && return launch(args, nslot)
+    nslot = parse(Int, arg(("-s",), "2")); BASE[] = PANE[] = arg(("--pane",), "")
+    isempty(BASE[]) && nslot > 1 && return launch(args, nslot)
     zenkey()
     CFG["sock"] = arg(("--sock",), "/run/user/1000/lfm3.sock"); CFG["model"] = arg(("--model",), expanduser("~/models/lfm3-1.7b-nate"))
     c = arg(("-c",), "all"); NCONT[] = c == "all" ? typemax(Int) : parse(Int, c); NQ[] = parse(Int, arg(("-q",), "1"))
