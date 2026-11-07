@@ -2882,7 +2882,7 @@ function judge(prefix::Vector{Int32}, actual::Vector{Int32}, fill::Vector{Int}) 
     end
 end
 
-const U_ROLE = Int32(5922); const A_ROLE = Int32(63514); const NL = Int32(207); const BOS = Int32(124894)   # "user", "assistant", "\n" after <|im_start|>
+const U_ROLE = Int32(5922); const A_ROLE = Int32(63514); const NLT = Int32(207); const BOS = Int32(124894)   # "user", "assistant", "\n" after <|im_start|>
 function turnlist(tok, f, n)                                    # (role, start, body start, end) a turn: start at <|im_start|>, end past its "\n"
     out = NTuple{4,Int}[]; i = 1
     while i <= n
@@ -2914,13 +2914,13 @@ function walk!(R::Run, S::Slot, t::Int, all, n, seed)           # one transcript
             append!(prefix, D.tok[f+s0:f+e0])
         elseif haskey(targets, b0)                              # nate's turn: nlfm fills it; the real reply is only shown and judged
             j += 1; j > n && break
-            append!(prefix, (IM_START, U_ROLE, NL))
+            append!(prefix, (IM_START, U_ROLE, NLT))
             fill = generate!(R, S, prefix, seed + j); actual = D.tok[f+b0:f+Int(targets[b0][4])]
             say!(R, S, CU, text(cut(actual)))
             v = judge(prefix, actual, fill)
             say!(R, S, CJ, v isa String ? "jev " * v : "jev $(round(v[1]; digits = 2))  $(commas(v[3])) tok"); v isa String || push!(scores, v[1])
             save(t, j, prefix, fill, actual, v); header!(n - j)
-            append!(prefix, Int32.(fill)); append!(prefix, (IM_END, NL))
+            append!(prefix, Int32.(fill)); append!(prefix, (IM_END, NLT))
         end                                                     # any other user turn (a paste, the first message) is left out
     end
     isempty(scores) || say!(R, S, CJ, "jev mean $(round(sum(scores) / length(scores); digits = 2)) over $(length(scores))")
