@@ -12,14 +12,15 @@ Done (git log): persistent cooperative kernel a die a request; resident weights;
 decode exchange words; DeltaNet conv fused into the recurrence; per-request DPM lock (`dpm 0|1`); flashd's engine
 protocol with in-kernel stop tokens.
 
-Serving: `/data/models/q27v.jl` (this file), socket `/data/models/q27.sock`; flashd (`/data/flashd/kern`, patched:
-folds system/developer messages, parses string tool-call arguments) on 127.0.0.1:18096; units `q27-engine`,
-`q27-flashd` (sentry, user); engi: `codex-q27-tunnel`, route in `~/.config/codex-flash-next/routes.toml`; Codex model
-`sentry-loc/Qwen3.8-27B`.
+Serving: an ai-mux service (codex/PROTOCOL.md) on sentry, `qwen3.8-27b`: ai-mux (`ai-mux.service`, user) starts
+`/data/models/q27/qwen3.8-27b.jl` (with `codex/julia/AiMux.jl` beside it) in `ai-mux-qwen3.8-27b.scope`; clients at
+`http://sentry.local:18100/v1`; development console `/data/models/q27/console.sock`; log
+`~/.local/state/ai-mux/qwen3.8-27b.log`. Codex model `qwen3.8-27b`, provider `ai-mux-sentry`.
 
-Open (the goal): idle under 1% (the exchange waits, 20-50 us each, 128 a forward); DFlash2 drafting
-(dflash-Qwen3.8-27B-Q4_0.gguf, not downloaded yet); vision (mmproj-Qwen3.8-27B-Q8_0.gguf, not downloaded); a
-262,144-position demonstration under the one-minute test limit; sampling (greedy only).
+Open (the goal): idle under 1% (the exchange waits, 20-50 us each, 128 a forward); DFlash2 drafting (the draft
+and the vision mmproj are on sentry in `/data/models/qwen3.8-27b-q5/`); vision; a 262,144-position demonstration
+under the one-minute test limit; sampling (greedy only); output per run capped at 8,192 tokens (the per-phase
+accounting buffers grow with it).
 
 DFlash2 draft (copies: archy `~/models/qwen3.8-27b/dflash-Qwen3.8-27B-Q4_0.gguf`, sentry
 `~/models/qwen3.8-27b-q5/`, engi scratch): arch `dflash`, 5 layers, hidden 5120, 32 q / 8 kv heads x 128, FFN 17408,
