@@ -1,5 +1,5 @@
 /* tok.h: the model's tokenizer, read from the GGUF (tokenizer.ggml.*): byte-level BPE with the
- * qwen35 pre-tokenizer, the same splits, merges and special-token handling as llama.cpp's
+ * qwen35 or lfm3 pre-tokenizer, the same splits, merges and special-token handling as llama.cpp's
  * (src/llama-vocab.cpp, src/unicode.cpp), so prompts tokenize to the ids the reference saw. */
 #ifndef FLASH_TOK_H
 #define FLASH_TOK_H

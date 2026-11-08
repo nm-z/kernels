@@ -22,6 +22,7 @@ struct tok_vocab {
 	htab ranks;            /* "left right" merge text -> rank */
 	int *special; int nspecial;   /* control / user-defined / unknown ids, longest text first */
 	uint32_t eos, bos; int add_bos;
+	unsigned lm; int maxnum;   /* the pre-tokenizer: what a word is made of (qwen35: letters and marks; lfm3: letters) and the longest digit run (1: \p{N}; 3: \p{N}{1,3}); lfm3 also ignores merges (a word that is a token is its token) */
 	char *tmpl;
 	char byte_utf8[256][3]; uint8_t byte_len[256];   /* byte -> its byte-level character */
 	int16_t cpt_byte[512];                           /* byte-level codepoint -> byte (-1: none) */
@@ -89,8 +90,8 @@ static unsigned cpt_flags(uint32_t c) {
 }
 static uint32_t lower_ascii(uint32_t c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
 
-/* unicode_regex_split_custom_qwen35 over cp[0..n): word lengths (in codepoints) into len[] */
-static size_t split_qwen35(const uint32_t *cp, size_t n, size_t *len) {
+/* unicode_regex_split_custom_qwen35 over cp[0..n): word lengths (in codepoints) into len[]; maxnum: the longest digit run (the lfm3 regex differs from qwen35's only in \p{N}{1,3}) */
+static size_t split_qwen35(const uint32_t *cp, size_t n, size_t *len, unsigned LM, int maxnum) {
 	const uint32_t OUT = 0xffffffffu; size_t nw = 0, prev = 0;
 #define CPT(p) ((p) < n ? cp[p] : OUT)            /* p must not have side effects */
 #define FL(p) ((p) < n ? cpt_flags(cp[p]) : 0u)
@@ -106,17 +107,17 @@ static size_t split_qwen35(const uint32_t *cp, size_t n, size_t *len) {
 			}
 		}
 		if (!(c == '\r' || c == '\n' || (f & F_NUMBER))) {
-			if ((f & (F_LETTER | F_MARK)) || (FL(pos + 1) & (F_LETTER | F_MARK))) {
+			if ((f & LM) || (FL(pos + 1) & LM)) {
 				pos++;
-				while (FL(pos) & (F_LETTER | F_MARK)) pos++;
+				while (FL(pos) & LM) pos++;
 				ADD(pos); continue;
 			}
 		}
-		if (f & F_NUMBER) { pos++; ADD(pos); continue; }
+		if (f & F_NUMBER) { size_t e = pos + 1; while ((int)(e - pos) < maxnum && (FL(e) & F_NUMBER)) e++; pos = e; ADD(pos); continue; }
 		unsigned f2 = c == ' ' ? FL(pos + 1) : f;
-		if (!(f2 & (F_WS | F_LETTER | F_MARK | F_NUMBER)) && f) {
+		if (!(f2 & (F_WS | LM | F_NUMBER)) && f) {
 			pos += c == ' ';
-			while (!(f2 & (F_WS | F_LETTER | F_MARK | F_NUMBER)) && f2) { pos++; f2 = FL(pos); }
+			while (!(f2 & (F_WS | LM | F_NUMBER)) && f2) { pos++; f2 = FL(pos); }
 			uint32_t c2 = CPT(pos);
 			while (c2 == '\r' || c2 == '\n') { pos++; c2 = CPT(pos); }
 			ADD(pos); continue;
@@ -173,6 +174,7 @@ static void bpe_word(const tok_vocab *v, const char *w, uint32_t wn, outbuf *o) 
 	static _Thread_local char *scratch; static _Thread_local uint32_t scap;
 	if ((int)wn > sycap) { sycap = (int)wn * 2; sy = realloc(sy, sizeof *sy * (size_t)sycap); }
 	if (2 * wn + 2 > scap) { scap = 2 * wn + 2; scratch = realloc(scratch, scap); }
+	if (v->maxnum > 1) { int32_t whole = ht_get(&v->ids, w, wn); if (whole >= 0) { emit(o, (uint32_t)whole); return; } }   /* (lfm3: ignore_merges) */
 	int ns = 0; h.n = 0;
 	for (uint32_t off = 0; off < wn;) {
 		uint32_t cl = (uint32_t)utf8_len((uint8_t)w[off]); if (cl > wn - off) cl = wn - off;
@@ -200,7 +202,7 @@ static void bpe_word(const tok_vocab *v, const char *w, uint32_t wn, outbuf *o) 
 static void encode_raw(const tok_vocab *v, const char *s, size_t n, outbuf *o) {
 	if (!n) return;
 	uint32_t *cp = malloc(sizeof *cp * n); size_t *wl = malloc(sizeof *wl * n);
-	size_t nc = cpts_from_utf8((const uint8_t *)s, n, cp), nw = split_qwen35(cp, nc, wl), at = 0;
+	size_t nc = cpts_from_utf8((const uint8_t *)s, n, cp), nw = split_qwen35(cp, nc, wl, v->lm, v->maxnum), at = 0;
 	char *w = malloc(16 * n + 16);
 	for (size_t k = 0; k < nw; k++) {
 		uint32_t wn = 0; char u[4];
@@ -284,7 +286,9 @@ tok_vocab *tok_load(const char *path) {
 	uint64_t len; const char *s = gguf_get_str(&v->g, "tokenizer.ggml.model", &len);
 	if (!s || len != 4 || memcmp(s, "gpt2", 4)) { fprintf(stderr, "%s: tokenizer.ggml.model is not gpt2\n", path); return NULL; }
 	s = gguf_get_str(&v->g, "tokenizer.ggml.pre", &len);
-	if (!s || len != 6 || memcmp(s, "qwen35", 6)) { fprintf(stderr, "%s: tokenizer.ggml.pre is %.*s, only qwen35 is implemented\n", path, s ? (int)len : 4, s ? s : "none"); return NULL; }
+	if (s && len == 6 && !memcmp(s, "qwen35", 6)) { v->maxnum = 1; v->lm = F_LETTER | F_MARK; }
+	else if (s && len == 4 && !memcmp(s, "lfm3", 4)) { v->maxnum = 3; v->lm = F_LETTER; }
+	else { fprintf(stderr, "%s: tokenizer.ggml.pre is %.*s, only qwen35 and lfm3 are implemented\n", path, s ? (int)len : 4, s ? s : "none"); return NULL; }
 	uint32_t et; uint64_t n; const uint8_t *p;
 	if (gguf_get_arr(&v->g, "tokenizer.ggml.tokens", &et, &n, &p) || et != 8) { fprintf(stderr, "%s: no tokenizer.ggml.tokens\n", path); return NULL; }
 	v->n = (int)n; v->text = malloc(sizeof *v->text * n); v->tlen = malloc(sizeof *v->tlen * n); v->type = malloc(sizeof *v->type * n);

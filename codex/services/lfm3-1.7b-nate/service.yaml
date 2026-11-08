@@ -1,0 +1,11 @@
+kind: engine
+display: LFM3-1.7B-nate-epoch1-archy-m60-megakernel
+gguf: /home/nate/models/lfm3-1.7b-nate/tokenizer.gguf
+ctx: 4096
+efforts: [none]
+vision: false
+device: archy Tesla M60 die 3 (lfm3.jl megakernel)
+command: [/usr/local/bin/julia, --project=env/cuda, -t, "8", lfm3-serve/serve.jl, --model, /dev/shm/lfm3/nate, --cap, "4096"]
+cwd: /home/nate/src/kernels
+env: {JULIA_DEPOT_PATH: "/dev/shm/jdepot:/home/nate/.julia", LFM3_DEVS: "4"}
+restart: on-failure

@@ -1,0 +1,8 @@
+# archy's mux (~/.config/mux/mux.yaml there): the LFM3 megakernel on die 3; compat_listen is the llama.cpp face nm-z.com/chat's gateway reads (NMZ_CHAT_EXTRA archy-mk=127.0.0.1:18111)
+listen: 127.0.0.1:18110
+socket: /run/user/1000/mux.sock
+services_dir: /home/nate/src/kernels/codex/services   # a checkout of codex/services
+compat_listen: 127.0.0.1:18111
+compat_service: lfm3-1.7b-nate
+services:
+  lfm3-1.7b-nate: {up: true}
