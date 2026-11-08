@@ -1,7 +1,7 @@
 # lfm3-upd2.jl: one step of lfm3.jl against a Float64 Newton-Schulz on the host: the momentum of a few matrices set to known values
 # (the others zero), then the masters' change against lr f ns(G), and the BF16 weights against the masters.
 #   julia --project=env/amd -t 8 test/lfm3-upd2.jl DIR
-include(joinpath(@__DIR__, "..", "lfm3.jl"))
+include(joinpath(@__DIR__, "..", "lfm3.jl")); include(joinpath(@__DIR__, "lfm3-dev.jl"))
 using LinearAlgebra, Random
 S = load(ARGS[1]; train = true, nslot = 0, reserve = 2e9, hostgb = 6.0, lr = 0.01, lrv = 0.001, lre = 0.01); G = S.G
 function ns(X)

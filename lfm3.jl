@@ -2,7 +2,7 @@
 # lfm3.jl: LFM3-1.7B as one graph of methods, each written once. A request (positions, wanted, memory free) is the only input; the
 # dispatch derives in the kernel the tiles, where every intermediate lives and how long, the order of the work and the waits.
 #   lfm3.jl --kl N REF.logits.bf16 --model DIR          logits against the vendor's, N positions
-#   lfm3.jl --train DATADIR --model DIR --out DIR ...   (--check PREFIX N: one window's gradients)
+#   lfm3.jl --train DATADIR --model DIR --out DIR ...
 #   lfm3.jl --serve DIR SOCK                            flashd's protocol on a unix socket
 using Mmap, Printf, Random, Sockets, LinearAlgebra, KernelAbstractions
 const CUDAON = Base.find_package("CUDA") !== nothing
@@ -30,7 +30,7 @@ isattn(l) = l >= 2 && iseven(l); isfull(l) = isattn(l) && (l - 2) % 4 == 0
 const LP{T} = Core.LLVMPtr{T,1}
 lp(::Type{T}, p) where {T} = Core.Intrinsics.bitcast(LP{T}, UInt64(p))
 const LP0 = lp(UInt8, 0)
-const DEVS = Ref(haskey(ENV, "LFM3_DEVS") ? parse.(Int, split(ENV["LFM3_DEVS"], ',')) : Int[])   # the cards to use (1-based; empty: all), e.g. LFM3_DEVS=3,4
+const DEVS = Ref(haskey(ENV, "LFM3_DEVS") ? parse.(Int, split(ENV["LFM3_DEVS"], ',')) : Int[])   # the cards to use (1-based), e.g. LFM3_DEVS=3,4
 ndev() = isempty(DEVS[]) ? (CUDAON ? length(CUDA.devices()) : length(AMDGPU.devices())) : length(DEVS[])
 dev!(i) = (j = isempty(DEVS[]) ? i : DEVS[][i]; CUDAON ? CUDA.device!(j - 1) : AMDGPU.device!(AMDGPU.devices()[j]))
 function vfree()
@@ -119,12 +119,12 @@ function muon!(G::Graph, m, R, K, lr, gd)
     end
     node!(G, STEP, 0, WEIGHTS; rows = WT, dep = DALL, in = (a, 0, 0, 0), m = m, rs = s, wr = R, K = K, f = (lr * sqrt(max(1.0, R / K)), 0, 0, 0))
 end
-done!(G::Graph, name) = edge!(G, name, 1, F32; rows = WT, r = 1)   # an edge for a wait alone: a momentum's gradient is in
+done!(G::Graph, name) = edge!(G, name, 1, F32; rows = WT, r = 1)   # an edge for a wait alone
 # the recipe
 function recipe(; lr = 0.002, lrv = 0.0002, lre = 0.002)
     G = Graph(); me = mat!(G, "model.embed_tokens.weight"); onv = vec!(G, "model.embedding_norm.weight"); gdm = Dict{Int,Int}(); gdv = Dict{Int,Int}()
     dmat(m) = (gdm[m] = done!(G, Symbol(:gd, m))); dvec(v) = (gdv[v] = done!(G, Symbol(:gv, v)))
-    function gmat!(l, m, wr, no; kw...)                     # dW = A' B into an edge, then mo = f2 mo + dW / acc, contiguous
+    function gmat!(l, m, wr, no; kw...)                     # dW = A' B into an edge, then mo = f2 mo + dW / acc
         dW = edge!(G, Symbol(:dW, m), no, F32; rows = WT, r = wr); node!(G, GEMM, l, GRAD; rows = WT, dep = DALL, out = (dW, 0), m = m, K = -1, no = no, wr = wr, kw...)
         node!(G, MOMU, l, GRAD; rows = WT, dep = DALL, in = (dW, 0, 0, 0), out = (dmat(m), 0), m = m, wr = wr, K = no)
     end
@@ -141,7 +141,7 @@ function recipe(; lr = 0.002, lrv = 0.0002, lre = 0.002)
         rs1 = edge!(G, L(:rs1), 1, F32); xa = edge!(G, L(:xa), NE, F32); n1 = node!(G, NORM, l, LOGITS; in = (x, 0, 0, 0), out = (rs1, xa), wv = vecs["operator_norm"], D = NE, K = NE)
         o = edge!(G, L(:o), NE, BF)
         if at
-            qkv = edge!(G, L(:qkv), NQKV, BF)   # q | k | v | gate: the four projections, one matrix product
+            qkv = edge!(G, L(:qkv), NQKV, BF)   # q | k | v | gate: one matrix product
             nq = node!(G, GEMM, l, LOGITS; in = (xa, 0, 0, 0), out = (qkv, 0), m = mats["self_attn.q_proj"], nm = 4, fl = A_ROW | B_MAT, K = NE, no = NQKV)
             rsq = edge!(G, L(:rsq), NH, F32); rsk = edge!(G, L(:rsk), NKV, F32)
             node!(G, NORM, l, LOGITS; in = (qkv, 0, 0, 0), out = (rsq, 0), wv = vecs["self_attn.q_norm"], D = HD, K = NE)
@@ -174,7 +174,7 @@ function recipe(; lr = 0.002, lrv = 0.0002, lre = 0.002)
     lg = edge!(G, :lg, NV, F32; rows = LOSS); lpart = edge!(G, :lpart, 2 * cld(NV, 16), F32; rows = LOSS)
     node!(G, GEMM, NL, LOGITS; rows = LOSS, in = (xh, 0, 0, 0), out = (lg, lpart), m = me, nm = 1, fl = A_ROW | B_MAT, K = NE, no = NV, epi = EP_LSE)
     lsev = edge!(G, :lse, 2, F32; rows = LOSS); node!(G, LSE, NL, LOSSW; rows = LOSS, in = (lpart, lg, 0, 0), out = (lsev, 0))
-    # the adjoint: dlg, dxn = dlg E (+ the final norm's), dE = dlg' xn
+    # the adjoint: dlg, dxn = dlg E, dE = dlg' xn
     dlg = edge!(G, :dlg, NV, F32; rows = LOSS); node!(G, DLOG, NL, GRAD; rows = LOSS, in = (lg, lsev, 0, 0), out = (dlg, 0))
     dxh = edge!(G, :dxh, NE, F32; rows = LOSS)
     node!(G, GEMM, NL, GRAD; rows = LOSS, dep = DALL, in = (dlg, 0, 0, 0), out = (dxh, 0), m = me, nm = 1, fl = A_ROW | B_MAT | B_TR, K = NV, no = NE)
@@ -229,7 +229,7 @@ function recipe(; lr = 0.002, lrv = 0.0002, lre = 0.002)
         gx = gx0
     end
     node!(G, EMBB, 0, GRAD; rows = WT, dep = DALL, in = (gx, gdm[me], 0, 0), out = (dmat(me), 0), m = me, wr = 0)
-    # the update: Muon for the hidden matrices, momentum for the vectors and the embedding (the head)
+    # the update: Muon for the hidden matrices, momentum for the rest
     for m in 1:G.nmat
         R, K = matdims(G.matname[m])
         m == me ? node!(G, STEP, 0, WEIGHTS; rows = WT, dep = DALL, in = (0, gdm[m], 0, 0), m = m, wr = R, K = K, f = (lre, 0, 0, 0)) : muon!(G, m, R, K, lr, gdm[m])
@@ -258,7 +258,7 @@ struct RQ
 end
 # the plan: a header; per edge; per node; per segment; the holes
 const PHN, PL_LOC, PL_OFF, PL_MOD, PL_LAST, PL_CA, PL_CB, PL_SZ = 16, 0, 1, 2, 3, 4, 5, 6
-const NP_F0, NP_NT, NP_NC, NP_RT, NP_CT, NP_T0, NP_ON, NP_FL, NP_WAR = 0, 1, 2, 3, 4, 5, 6, 7, 8   # (WAR: the last reader of the memory this node's outputs reuse)
+const NP_F0, NP_NT, NP_NC, NP_RT, NP_CT, NP_T0, NP_ON, NP_FL, NP_WAR = 0, 1, 2, 3, 4, 5, 6, 7, 8   # (WAR: the last reader of reused memory)
 const PH_NT, PH_NFLAG, PH_STAT, PH_ORDER, PH_S0, PH_S1, PH_SECT, PH_T0S, PH_T1S, PH_VUSE, PH_HUSE, PH_SLOT = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
 const NSEG, NHOLE = 64, 512
 @inline nd(R::RQ, n, f) = ld(R.node, Int64(n - 1) * NF + f)
@@ -337,7 +337,7 @@ end
         k == GEMM && nr >= 128 && (Int64(nr) ÷ 128) * nc >= 2 * R.nblk && (rt = 128)
         nt = max(Int64(1), (Int64(nr) + rt - 1) ÷ rt)
         while k == GEMM && nt * nc < R.nblk && ct > 16; ct >>= 1; nc = (Int64(nd(R, n, N_NO)) + ct - 1) ÷ ct; end
-        fl = 1                                             # an output read on another card: the cells in host memory
+        fl = 1                                             # read on another card: the cells in host memory
         for f in (N_O1, N_O2, N_O3); e = nd(R, n, f); e > 0 && ed(R, e, E_CROSS) != 0 && (fl = 2); end
         pl!(R, PN(R, n, NP_F0), f0); pl!(R, PN(R, n, NP_NT), nt); pl!(R, PN(R, n, NP_NC), nc); pl!(R, PN(R, n, NP_RT), rt); pl!(R, PN(R, n, NP_CT), ct)
         pl!(R, PN(R, n, NP_ON), on ? 1 : 0); pl!(R, PN(R, n, NP_FL), fl); pl!(R, PN(R, n, NP_T0), t0); pl!(R, PN(R, n, NP_WAR), 0)
@@ -364,7 +364,7 @@ end
             e = nd(R, n, f); (e > 0 && ed(R, e, E_CACHE) == 0 && pl(R, PE(R, e, PL_SZ)) == 0) || continue
             rk = ed(R, e, E_ROWS); nr = rk == ALL ? Int64(P) : rk == LOSS ? Int64(R.PL) : Int64(ed(R, e, E_R))
             sz = (nr * ebytes(R, e) + 255) & ~Int64(255); sz == 0 && (sz = 256)
-            cross = ed(R, e, E_CROSS) != 0                 # read on another card: host memory, which every card addresses
+            cross = ed(R, e, E_CROSS) != 0                 # read on another card: host memory
             loc = 0; off = Int64(0); best = typemax(Int64); hb = -1
             for want in (1, 2)                              # a VRAM hole, fresh VRAM, a host hole, fresh host
                 (want == 2 || !cross) || continue; best = typemax(Int64)
@@ -473,7 +473,7 @@ end
     Base.Cartesian.@nexprs 2 q -> (i_q < ng && Base.Cartesian.@nexprs 8 e -> (sm[so + l_q * sa + ((g_q + 8 * (l_q >> 3)) & (nrow - 1)) + e] = v_q[e]))
 end
 @inline function kloop(R::RQ, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk, t8::Bool)
-    act = tid < ntm * ntn * ntk; tk = tid ÷ (ntm * ntn); rem = tid % (ntm * ntn); tm = rem ÷ ntn; tn = rem % ntn; sa = Int64(132); sb = Int64(4224)   # (constant strides: the stores take immediate offsets)
+    act = tid < ntm * ntn * ntk; tk = tid ÷ (ntm * ntn); rem = tid % (ntm * ntn); tm = rem ÷ ntn; tn = rem % ntn; sa = Int64(132); sb = Int64(4224)   # (constant strides)
     Base.Cartesian.@nexprs 32 i -> (c_i = 0.0f0)
     k0 = Int64(0); ka = isk(oA); kb = isk(oB)
     g = (Int64(tid) & 3) << 3; ka && ltab!(R, sm, 0, oA, m0, nr, rt, true, tid); kb && ltab!(R, sm, sb, oB, n0, no, ct, true, tid)
@@ -588,7 +588,7 @@ end
 @inline ev(R::RQ, e, r, k) = rdv(eaddr(R, e, r), ed(R, e, E_DT), Int64(k))
 @inline ev!(R::RQ, e, r, v, k) = wrv!(eaddr(R, e, r), ed(R, e, E_DT), v, Int64(k))
 @inline rope(R::RQ, tbl, pos, q) = ld(R.rope, (Int64(tbl) * 64 + (q & 63)) * 1) * Float32(pos)   # the angle of pair q at position pos
-@inline function rotv(R::RQ, tbl, pos, q, a, b)             # the rotation of (x[q], x[q +- 64]): a this dim, b its partner
+@inline function rotv(R::RQ, tbl, pos, q, a, b)             # the rotation of (x[q], x[q +- 64])
     an = rope(R, tbl, pos, q); cs = cos(an); sn = sin(an); q < 64 ? a * cs - b * sn : a * cs + b * sn
 end
 @inline function norm!(R::RQ, sm, n, tile, tid)            # rs[r][b] = rsqrt(mean x[r][off + b D + q]^2 + eps)
@@ -625,7 +625,7 @@ end
         ev!(R, gu, r, g * b * (s + a * s * (1.0f0 - s)), k); ev!(R, gu, r, g * a * s, NFF + k)
     end
 end
-@inline function conv!(R::RQ, n, tile, tid)                 # win 0: h = B x into the ring; win 1: cv = taps * h, y = C cv
+@inline function conv!(R::RQ, n, tile, tid)                 # win 0: h = B x; win 1: cv = taps * h, y = C cv
     bcx = nd(R, n, N_I1); h = nd(R, n, N_WIN) == 0 ? nd(R, n, N_O1) : nd(R, n, N_I2)
     if nd(R, n, N_WIN) == 0
         foreach_el(R, n, tile, NE, tid) do r, k; ev!(R, h, r, ev(R, bcx, r, k) * ev(R, bcx, r, 2NE + k), k); end
@@ -644,7 +644,7 @@ end
         g = ev(R, gy, r, k); ev!(R, gc, r, g * ev(R, bcx, r, NE + k), k); ev!(R, gb, r, g * ev(R, cv, r, k), NE + k)
     end
 end
-@inline function convb2!(R::RQ, n, tile, tid)               # gh = taps' gc over the next 6 rows; gB = gh x, gx = gh B
+@inline function convb2!(R::RQ, n, tile, tid)               # gh = taps' gc over 6 rows; gB = gh x, gx = gh B
     gc = nd(R, n, N_I1); bcx = nd(R, n, N_I2); gb = nd(R, n, N_O1); taps = vp(R, nd(R, n, N_WV))
     foreach_el(R, n, tile, NE, tid) do r, k
         s = rw(R, r, 0); acc = 0.0f0
@@ -662,7 +662,7 @@ end
         st!(mo, R.f2 * ld(mo, k * 7 + t) + R.iacc * acc, k * 7 + t); i += 256
     end
 end
-@inline function normb!(R::RQ, sm, n, tile, tid)            # gx (+)= w gy rs - (rs^3 / D) (Σ gy w x) x; win 1: gy over the loss rows only
+@inline function normb!(R::RQ, sm, n, tile, tid)            # gx (+)= w gy rs - (rs^3 / D) (Σ gy w x) x; win 1: the loss rows only
     gy = nd(R, n, N_I1); x = nd(R, n, N_I2); rs = nd(R, n, N_I3); add = nd(R, n, N_I4); out = nd(R, n, N_O1); w = vp(R, nd(R, n, N_WV)); D = nd(R, n, N_D); lossy = nd(R, n, N_WIN) == 1
     rt = pln(R, n, NP_RT); nr = nrows(R, n); g = tid ÷ 64; lane = tid % 64; tot = min(rt, nr - Int64(tile) * rt); i = Int64(g)
     while i - g < tot
@@ -683,7 +683,7 @@ end
         bar(); i += 4
     end
 end
-@inline function normw!(R::RQ, sm, n, tile, tid)                # gw[q] = Σ_r Σ_b gy[r][off + b D + q] x[..] rs[r][b], 64 q's a tile
+@inline function normw!(R::RQ, sm, n, tile, tid)                # gw[q] = Σ_r Σ_b gy[r][off + b D + q] x[..] rs[r][b]
     gy = nd(R, n, N_I1); x = nd(R, n, N_I2); rs = nd(R, n, N_I3); D = nd(R, n, N_D); nb = nd(R, n, N_K) ÷ D; off = nd(R, n, N_TBL); lossy = nd(R, n, N_WIN) == 1
     mo = vmo(R, nd(R, n, N_WV)); q = Int64(tile) * 64 + tid % 64; part = tid ÷ 64; acc = 0.0f0
     if q < D
@@ -698,7 +698,7 @@ end
     sm[tid + 1] = acc; bar()
     if part == 0 && q < D; t = sm[tid + 1] + sm[tid + 65] + sm[tid + 129] + sm[tid + 193]; st!(mo, R.f2 * ld(mo, q) + R.iacc * t, q); end
 end
-@inline function rope!(R::RQ, n, tile, tid)                 # qr, kr: the normalized heads rotated; v copied to its cache
+@inline function rope!(R::RQ, n, tile, tid)                 # qr, kr: the heads rotated; v copied to its cache
     qkv = nd(R, n, N_I1); rsq = nd(R, n, N_I2); rsk = nd(R, n, N_I3); qr = nd(R, n, N_O1); kr = nd(R, n, N_O2); v = nd(R, n, N_O3)
     wq = vp(R, nd(R, n, N_WV)); wk = vp(R, nd(R, n, N_D)); tbl = nd(R, n, N_TBL)
     foreach_el(R, n, tile, NE + 2NKV * HD, tid) do r, k
@@ -729,7 +729,7 @@ end
         kt = Int64(lo) & ~Int64(15)
         while kt <= hi
             bar()
-            kb = caddr(R, kr, s0, kt); vb = caddr(R, v, s0, kt); ebk = ebytes(R, kr); ebv = ebytes(R, v)   # (16 keys from a block's start: a ring is a multiple of 16)
+            kb = caddr(R, kr, s0, kt); vb = caddr(R, v, s0, kt); ebk = ebytes(R, kr); ebv = ebytes(R, v)   # (16 keys from a block's start)
             for i in tid:256:16*HD-1; c = i ÷ HD; ok = kt + c <= hi; sm[2048 + i + 1] = ok ? rdv(kb + c * ebk, BF, g * HD + i % HD) : 0.0f0; sm[4096 + i + 1] = ok ? rdv(vb + c * ebv, BF, g * HD + i % HD) : 0.0f0; end
             bar()
             kp = kt + tc; s = -Inf32
@@ -766,11 +766,11 @@ end
         g = j ÷ 4
         if kvpass                                          # the key tile fixed: K, V in smem
             for i in tid:256:16*HD-1; c = i ÷ HD; r = t0 + c; r < R.P && (sm[i + 1] = ev(R, kr, r, g * HD + i % HD); sm[2048 + i + 1] = ev(R, v, r, g * HD + i % HD)); end
-        else                                               # the query tile fixed: Q, dO (= gao sigmoid(gate)) in smem
+        else                                               # the query tile fixed: Q, dO in smem
             for i in tid:256:16*HD-1; c = i ÷ HD; r = t0 + c; r < R.P && (sm[4096 + i + 1] = ev(R, qr, r, j * HD + i % HD); sm[6144 + i + 1] = ev(R, gao, r, j * HD + i % HD) * sigm(ev(R, qkv, r, NE + 2NKV * HD + j))); end
         end
         bar()
-        if !kvpass && tr < 16 && t0 + tr < R.P          # D_r = Σ dO ao / sigmoid (= Σ gao ao): 16 threads a row
+        if !kvpass && tr < 16 && t0 + tr < R.P          # D_r = Σ dO ao / sigmoid: 16 threads a row
             r = t0 + tr; s = 0.0f0; for d in 0:7; s = fma(ev(R, gao, r, j * HD + tc * 8 + d), ev(R, ao, r, j * HD + tc * 8 + d), s); end
             sm[8448 + tid + 1] = s
         end
@@ -801,7 +801,7 @@ end
                 p = exp(s * SCALE - sm[8720 + tr + 1]); ds = p * (dp - sm[8704 + tr + 1]) * SCALE
             end
             sm[8192 + tr * 16 + tc + 1] = p; sm[8448 + tr * 16 + tc + 1] = ds; bar()
-            if kvpass                                      # thread (key c = tr, dims tc 8..): dV += p' dO, dK += ds' Q
+            if kvpass                                      # thread (key c = tr, dims tc 8..): dV, dK
                 for q in 0:15; pq = sm[8192 + q * 16 + tr + 1]; dq = sm[8448 + q * 16 + tr + 1]
                     Base.Cartesian.@nexprs 8 d -> (v_d = fma(pq, sm[6144 + q * HD + tc * 8 + d], v_d)); Base.Cartesian.@nexprs 8 d -> (k_d = fma(dq, sm[4096 + q * HD + tc * 8 + d], k_d)); end
             else                                           # thread (query r = tr, dims): dQ += ds K
@@ -882,7 +882,7 @@ end
     sm[tid + 1] = s; bar()
     if tid == 0; t = 0.0f0; for q in 0:255; t += sm[q + 1]; end; wrv!(waddr(R, out, 0), F32, t, Int64(tile)); end
 end
-@inline function step!(R::RQ, n, tile, tid)                 # master -= f X (X = the momentum when no edge); W = bf16(master)
+@inline function step!(R::RQ, n, tile, tid)                 # master -= f X (X: the momentum if no edge); W = bf16(master)
     m = nd(R, n, N_M); X = nd(R, n, N_I1); ms = lp(Float32, mt(R, m, 3)); mo = lp(Float32, mt(R, m, 4)); W = lp(UInt8, mt(R, m, 0)); W2 = lp(UInt8, mt(R, m, 5)); K = mt(R, m, 2); Rr = mt(R, m, 1); f = ndf(R, n, 0)
     i = Int64(tile) * 64 * K + tid; hi = min(Int64(tile + 1) * 64, Rr) * K
     while i < hi
@@ -1023,7 +1023,7 @@ function load(dir; train = false, ncard = ndev(), hostgb = 6.0, reserve = 3.5e9,
             up!(Vb, off, Float32[bf32(u) for u in tensor(g, nm)]); off += 4n
         end
         train && fill!(vmb, 0)
-        if train   # masters and momenta: VRAM while it holds them, else host
+        if train   # masters and momenta: VRAM, else host
             for which in (5, 4), (m, nm) in enumerate(G.matname)
                 matcard(G, nm, ncard) == c || continue; R, K = matdims(nm); nb = 4R * K
                 if vfree() - nb > reserve && nm != "model.embed_tokens.weight"
@@ -1036,7 +1036,7 @@ function load(dir; train = false, ncard = ndev(), hostgb = 6.0, reserve = 3.5e9,
                 end
             end
         end
-        if c == ncard - 1 && nslot > 0; sl = dalloc(nslot * slotsz); push!(bufs, sl); S.slots = addr(sl); end   # (the slots: every card's cache edges... one card for now)
+        if c == ncard - 1 && nslot > 0; sl = dalloc(nslot * slotsz); push!(bufs, sl); S.slots = addr(sl); end   # (the slots: one card for now)
         nV = vfree() - max(round(Int, reserve ÷ 2), 1 << 30); aV = dalloc(nV); push!(bufs, aV)   # (the headroom: the launch itself takes local memory)
         rope = dalloc(4 * 128); up!(rope, 0, rftab())
         node = dalloc(4 * length(G.node)); up!(node, 0, G.node); edge = dalloc(4 * length(G.edge)); up!(edge, 0, G.edge)
@@ -1091,29 +1091,13 @@ function request!(S::Sys, rows::Matrix{Int32}, segs::Matrix{Int32}, lrows::Vecto
     st = S.plan[PH_STAT+1]; st == 0 || error("request: status $st, node $(S.plan[PH_S0+1]) ($(S.G.node[NF*(S.plan[PH_S0+1]-1)+N_KIND+1]), m $(S.G.node[NF*(S.plan[PH_S0+1]-1)+N_M+1])) $(S.plan[PH_S1+1] & 0xfffff) $((S.plan[PH_S1+1] >> 20) & 0xfffff) cell $(S.plan[PH_S1+1] >> 40) gen $(S.gen) (VRAM $(S.plan[PH_VUSE+1]), host $(S.plan[PH_HUSE+1]))")
     nothing
 end
-const WATCH = Ref(parse(Float64, get(ENV, "LFM3_WATCH", "0")))
-function await!(S::Sys)                                   # (LFM3_WATCH=s: progress)
-    (WATCH[] > 0 && CUDAON) || return; p = Ptr{UInt32}(S.cntH); last = -1; t = time()
-    ev = [(dev!(C.i + 1); e = CUDA.CuEvent(); CUDA.record(e); e) for C in S.cards]
-    say(m) = (h = Int(unsafe_load(p, NFLAG - 2)); c = Int(unsafe_load(p, NFLAG - 1)); n = clamp(Int(unsafe_load(p, NFLAG)), 1, S.G.nn);
-              @printf("%s: %d / %d tasks, node %d kind %d l %d\n", m, c, h >> 4, n, S.G.node[NF*(n-1)+N_KIND+1], S.G.node[NF*(n-1)+N_L+1]); flush(stdout); c)
-    try
-        while !all(CUDA.isdone, ev); sleep(0.05); time() - t >= WATCH[] || continue; t = time(); c = say("watch"); c == last && println("  (still)"); last = c; end
-    catch; say("fault after"); rethrow(); end
-end
-function prof(S::Sys, C::Card)                            # (debug 64: cycles per node kind)
-    nn = S.G.nn; st = dn!(Vector{UInt32}(undef, 4(nn + 1)), C.cnt, 4(NFLAG - 4(nn + 1))); up!(C.cnt, 4(NFLAG - 4(nn + 1)), zeros(UInt32, 4(nn + 1)))
-    by = Dict{Int,Vector{Float64}}(); for n in 1:nn; v = get!(by, S.G.node[NF*(n-1)+N_KIND+1], zeros(3)); v .+= st[4n+1:4n+3]; end
-    @printf("card %d (%d blocks): derive %.1f Mcyc\n", C.i, C.nblk, st[1] * 256 / 1e6)
-    for (k, v) in sort(collect(by); by = x -> -x[2][2]); @printf("  kind %2d: wait %8.1f  run %8.1f Mcyc  %6d tasks\n", k, v[1] * 256 / 1e6, v[2] * 256 / 1e6, v[3]); end
-    for n in sort(1:nn; by = n -> -Int(st[4n+2]))[1:6]; @printf("  node %4d kind %2d l %2d: wait %8.1f  run %8.1f Mcyc  %6d tasks\n", n, S.G.node[NF*(n-1)+N_KIND+1], S.G.node[NF*(n-1)+N_L+1], st[4n+1] * 256 / 1e6, st[4n+2] * 256 / 1e6, st[4n+3]); end
-end
+await!(S::Sys) = nothing; prof(S::Sys, C::Card) = nothing   # (test/lfm3-dev.jl)
 # an edge's rows as a matrix (width x rows): from VRAM or host memory
 function fetch(S::Sys, e::Int, nr; card = 0, T = Float32)
     p = S.G.edge[EF*(e-1)+E_PROD+1]; card == 0 && (card = p > 0 ? S.G.node[NF*(p-1)+N_CARD+1] + 1 : 1)   # the producer's card holds it: that card's plan
     dev!(card); plan = dn!(Vector{Int64}(undef, length(S.plan)), S.cards[card].plan, 0)
     w = S.G.edge[EF*(e-1)+E_W+1]; dt = S.G.edge[EF*(e-1)+E_DT+1]; loc = plan[PHN+8(e-1)+PL_LOC+1]; off = plan[PHN+8(e-1)+PL_OFF+1]
-    S.G.edge[EF*(e-1)+E_CACHE+1] != 0 && (loc = 1; off = plan[PHN+8(e-1)+PL_CA+1] * nr + plan[PHN+8(e-1)+PL_CB+1])   # (one segment, this request's slot, at the pool's start)
+    S.G.edge[EF*(e-1)+E_CACHE+1] != 0 && (loc = 1; off = plan[PHN+8(e-1)+PL_CA+1] * nr + plan[PHN+8(e-1)+PL_CB+1])   # (one segment, at the pool's start)
     loc == 0 && error("edge $e: not held"); nb = w * nr * (dt == BF ? 2 : 4)
     raw = Vector{UInt8}(undef, nb)
     if loc == 1; dev!(card); dn!(raw, S.cards[card].aV, off) else; unsafe_copyto!(pointer(raw), S.aH + off, nb); end
@@ -1137,6 +1121,53 @@ function kl(S::Sys, ids, refpath, n)
     m = length(kls)
     @printf("KL vs BF16 over %d positions: mean %.6f, median %.6f, max %.5f; top-1 %.4f; %.1f s (%.1f tok/s)\n", m, sum(kls) / m, sort(kls)[cld(m, 2)], maximum(kls), top / m, tp, n / tp)
 end
+# ---- serving: flashd's engine protocol (flash-sass kern/flashd.c) on a unix socket, a chat at a time; the slot keeps the last chat's cache ----
+function slotrun(S::Sys, toks, p0)                           # rows p0.. of the slot's chat, the last row's logits
+    n = length(toks); rows = Int32[r == 1 ? 0 : r == 2 ? p0 + i - 1 : r == 3 ? toks[i] : -1 for r in 1:4, i in 1:n]
+    request!(S, rows, reshape(Int32[0, p0 + n], 2, 1), Int32[n - 1], ones(Float32, 1), 1); fetch(S, S.G.names[:lg], 1)[:, 1]
+end
+function pick(l, temp, topk, topp, rng, seen, pen)
+    for t in seen; l[t+1] = l[t+1] > 0 ? l[t+1] / pen : l[t+1] * pen; end
+    temp <= 0 && return argmax(l) - 1
+    ix = partialsortperm(l, 1:topk; rev = true); p = exp.((l[ix] .- l[ix[1]]) ./ temp); c = cumsum(p); k = something(findfirst(>=(topp * c[end]), c), topk)
+    ix[findfirst(>=(rand(rng) * c[k]), c[1:k])] - 1
+end
+function chat(S::Sys, c, n, ids, stops, (temp, topk, topp), seed, pen, held, cap)
+    t0 = time(); P = length(ids); gone = false; (P < cap && P > 0) || (println(c, "error: ", P, " positions, the engine holds ", cap); return)
+    @async (try; eof(c); catch; end; gone = true)            # (cancel_on_eof: the client closed its side)
+    p0 = 0; while p0 < min(P - 1, length(held)) && held[p0+1] == ids[p0+1]; p0 += 1; end   # the cache's own prefix, the last token always run
+    length(held) - p0 > 100 && (p0 = 0); resize!(held, p0); l = Float32[]
+    for a in p0+1:64:P                                       # (64 rows a request: what the rings hold)
+        b = min(P, a + 63); l = slotrun(S, ids[a:b], a - 1); append!(held, ids[a:b]); println(c, "prog ", b, " ", P, " ", p0); flush(c)
+    end
+    rng = Random.Xoshiro(seed); seen = pen == 1 ? Int[] : copy(ids); gen = 0; ended = false; t1 = t0; n = clamp(n, 1, cap - P)
+    while !gone
+        t = pick(l, temp, topk, topp, rng, seen, pen); gen += 1; gen == 1 && (t1 = time()); println(c, "tok ", t); flush(c); push!(seen, t); ended = t in stops
+        (gen >= n || ended) && break
+        l = slotrun(S, [t], P + gen - 1); push!(held, t)
+    end
+    println(c, "done ", gen, " ", Int(ended), " ", P, " ", round(1e3 * (time() - t0); digits = 1), " ", round(1e3 * (t1 - t0); digits = 1), " ", p0, " 0"); flush(c)
+end
+function session(S::Sys, c, lk, held, cap)
+    stops = Int[]; smp = (0.0, 32, 1.0); seed = UInt64(1); pen = 1.0
+    while !eof(c)
+        a = split(readline(c)); isempty(a) && continue
+        if a[1] in ("timings", "cancel_on_eof"); println(c, "ok: ", join(a, " ")); flush(c)
+        elseif a[1] == "stop"; stops = [t for t in parse.(Int, a[2:end]) if t != 0xffffffff]
+        elseif a[1] == "sample"; seed = parse(UInt64, a[2]); smp = (parse(Float64, a[3]), parse(Int, a[4]), parse(Float64, a[5]))
+        elseif a[1] == "penalty"; pen = parse(Float64, a[2])
+        elseif a[1] == "info"; println(c, "info ", cap, " 0"); flush(c)
+        elseif a[1] == "chat"; lock(lk) do; chat(S, c, parse(Int, a[2]), parse.(Int, a[3:end]), stops, smp, seed, pen, held, cap); end; return
+        end
+    end
+end
+function serve(dir, sock; cap = 4096)
+    S = load(dir; nslot = 1, cap); lk = ReentrantLock(); held = Int[]; ispath(sock) && rm(sock); srv = listen(sock); println("serving on ", sock); flush(stdout)
+    while true
+        c = accept(srv)
+        @async try; session(S, c, lk, held, cap); catch e; try; println(c, "error: ", sprint(showerror, e)); catch; end; finally; close(c); end
+    end
+end
 function main(args)
     arg(k, d) = (i = findfirst(==(k), args); i === nothing ? d : args[i+1])
     dir = arg("--model", expanduser("~/models/lfm3-1.7b-base"))
@@ -1144,6 +1175,7 @@ function main(args)
         n = parse(Int, args[i+1]); ref = args[i+2]; S = load(dir; nslot = 0)
         ids = Int.(reinterpret(Int32, read(replace(ref, ".logits.bf16" => ".ids"))))
         kl(S, ids, ref, n)
+    elseif (i = findfirst(==("--serve"), args)) !== nothing; serve(dir, args[i+1])
     elseif "--train" in args; train(args)
     end
 end
@@ -1156,7 +1188,7 @@ function Data(dir)
     Data(tok, [(t[6i+1], t[6i+2], t[6i+3], t[6i+4], t[6i+5]) for i in 0:length(t)÷6-1], [(e[4i+1], e[4i+2], e[4i+3], e[4i+4]) for i in 0:length(e)÷4-1])
 end
 tfirst(D::Data, t) = Int(D.tr[t+1][1]) | Int(D.tr[t+1][2]) << 32
-function windows(D::Data, held::Bool)                     # (transcript, first token, N, loss positions, targets)
+function windows(D::Data, held::Bool)                     
     W = Tuple{Int,Int,Int,Vector{Int},Vector{Int}}[]; i = 1; ne = length(D.ex)
     while i <= ne
         t, w0, _, _ = D.ex[i]; last = i
@@ -1255,17 +1287,6 @@ function ckpt_read(S::Sys, path)
 end
 step0!(S::Sys) = (for n in 1:S.G.nn; S.G.node[NF*(n-1)+N_KIND+1] == STEP && (S.G.nodef[4(n-1)+1] = 0); end; step!(S))   # W from the masters: a step of 0
 # the gradient check: one window (momenta with f2 = 0, acc = 1)
-const CHECKN = ["model.embed_tokens.weight", "model.embedding_norm.weight", ["model.layers.$l.$t.weight" for l in (23, 22, 0) for t in ("operator_norm", "post_operator_norm", "ffn_norm", "post_ffn_norm", "feed_forward.w1", "feed_forward.w3", "feed_forward.w2")]...,
-                ["model.layers.$l.conv.$t.weight" for l in (23, 0) for t in ("in_proj", "out_proj", "conv")]..., ["model.layers.22.self_attn.$t.weight" for t in ("q_proj", "k_proj", "v_proj", "gate_proj", "o_proj")]...]
-function gradcheck(S::Sys, D::Data, prefix, N)
-    W = windows(D, false); w = W[findfirst(w -> any(p -> p + 1 < N, w[4]), W)]; t, f0, _, pos, tgt = w
-    keep = findall(p -> p + 1 < N, pos); pos = pos[keep]; tgt = tgt[keep]; isempty(pos) && (pos = [N - 2]; tgt = [D.tok[f0+N]])
-    write(prefix * ".ids", Int32[D.tok[f0+p+1] for p in 0:N-1]); write(prefix * ".pos", Int32.(pos))
-    t0 = time(); loss = window!(S, D, (t, f0, N, pos, tgt); f2 = 0.0, iacc = 1.0)
-    @printf("check: N %d, %d loss positions, loss %.5f (%.1f s)\n", N, length(pos), loss, time() - t0); write(prefix * ".loss", Float32(loss))
-    byname = trained(S); for nm in CHECKN; write(prefix * "." * nm * ".f32", byname[nm*".momentum"]); end
-    println("wrote $prefix.*.f32"); flush(stdout)
-end
 function train(args)
     arg(k, d) = (i = findfirst(==(k), args); i === nothing ? d : args[i+1])
     dir = arg("--model", ""); data = arg("--train", ""); out = arg("--out", ""); epochs = parse(Int, arg("--epochs", "2"))
@@ -1273,7 +1294,6 @@ function train(args)
     acc = parse(Int, arg("--acc", "8")); nwin = parse(Int, arg("--windows", "0")); seed = parse(Int, arg("--seed", "1")); reserve = parse(Float64, arg("--reserve", "3.5e9"))
     out == "" || mkpath(out); (dir == "" || data == "") && error("usage: lfm3.jl --train DATADIR --model DIR --out OUTDIR [--epochs E --lr L --lrv L --lre L --beta B --acc A --windows W --check PREFIX N --resume]")
     S = load(dir; train = true, nslot = 0, lr, lrv, lre, reserve); D = Data(data)
-    i = findfirst(==("--check"), args); i === nothing || return gradcheck(S, D, args[i+1], parse(Int, args[i+2]))
     Wt = windows(D, false); Wh = windows(D, true)
     nwin > 0 && (Wt = Wt[1:min(nwin, end)]; Wh = Wh[1:min(cld(nwin, 3), end)])
     @printf("%d training windows, %d held out; %d windows a step\n", length(Wt), length(Wh), acc); flush(stdout)

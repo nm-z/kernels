@@ -1,8 +1,8 @@
 # lfm3-repl.jl: a resident model; each file dropped into CMD is run with S in scope, its output to FILE.out, then renamed FILE.done
 #   julia --project=env/cuda -t 8 test/lfm3-repl.jl DIR CMD [train]
-include(joinpath(@__DIR__, "..", "lfm3.jl"))
+include(joinpath(@__DIR__, "..", "lfm3.jl")); include(joinpath(@__DIR__, "lfm3-dev.jl"))
 const CMD = ARGS[2]; mkpath(CMD)
-S = load(ARGS[1]; nslot = 0, reserve = 2e9, hostgb = 6.0, train = length(ARGS) > 2); println("ready"); flush(stdout)
+S = load(ARGS[1]; nslot = parse(Int, get(ENV, "LFM3_NSLOT", "0")), cap = parse(Int, get(ENV, "LFM3_CAP", "65536")), reserve = 2e9, hostgb = 6.0, train = length(ARGS) > 2); println("ready"); flush(stdout)
 while true
     for f in sort(filter(x -> endswith(x, ".jl"), readdir(CMD)))
         p = joinpath(CMD, f); t0 = time(); dead = false
