@@ -333,8 +333,9 @@ end
         k = nd(R, n, N_KIND); rk = nd(R, n, N_ROWS); on = lvlmask(nd(R, n, N_LVL)) & w != 0 && nd(R, n, N_CARD) == R.card
         nr = Int64(nrows(R, n)); att = k == ATTN || k == ATTBKV || k == ATTBQ; ct = 64; no = Int64(nd(R, n, N_NO)); nb = Int64(R.nblk)
         rows2 = max(Int64(8), pow2ge(cld(nr, 2 * nb)))     # two tasks a block
-        aq = Int64(16); while k == ATTN && 2aq <= (SMW - 4096) ÷ 162 && cld(nr, 2aq) * NH >= 2nb; aq *= 2; end   # the query tile: what smem holds, while the heads' tiles still fill the blocks
-        rt = att ? Int(k == ATTN ? aq : 16) : k in (NRM, STAGE, STEP, MOMU) ? Int(rows2) : rk == WT ? 64 : Int(min(rows2, Int64(64)))
+        aq = Int64(16); ac = k == ATTN ? 162 : k == ATTBKV ? 256 : 290; ab = k == ATTBKV ? 4640 : 4096   # the tile's rows: smem bytes = ac a row + ab (Q, K, V, scores per method), while the heads' tiles still fill the blocks
+        while att && 2aq <= (k == ATTN ? 32 : 16) && 2aq * ac + ab <= SMW && cld(nr, 2aq) * (k == ATTBKV ? NKV : NH) >= 2nb; aq *= 2; end   # (2 rows a thread is written for the forward only)
+        rt = att ? Int(aq) : k in (NRM, STAGE, STEP, MOMU) ? Int(rows2) : rk == WT ? 64 : Int(min(rows2, Int64(64)))
         nc = att && k != ATTBKV ? Int64(NH) : k == ATTBKV ? Int64(NKV) : k == DLOG ? Int64(cld(NV, 4096)) : Int64(1)
         if k == GEMM                                       # the tile with the least time
             best = typemax(Int64); nrp = max(Int64(8), pow2ge(nr)); nop = max(Int64(16), pow2ge(no))
@@ -782,7 +783,7 @@ end
 end
 @inline function attb!(R::RQ, sm, n, tile, col, tid, kvpass::Bool)
     qr = nd(R, n, N_I1); kr = nd(R, n, N_I2); v = nd(R, n, N_I3); qkv = nd(R, n, N_I4); ao = nd(R, n, N_M); gao = nd(R, n, N_NM); lse = nd(R, n, N_D); out = nd(R, n, N_O1); win = nd(R, n, N_WIN)
-    t0 = Int64(tile) * 16; nt = (Int64(R.P) + 15) ÷ 16; tr = tid ÷ 16; tc = tid % 16
+    qt = Int64(pln(R, n, NP_RT)); t0 = Int64(tile) * qt; nt = cld(Int64(R.P), qt); tr = tid ÷ 16; tc = tid % 16
     Base.Cartesian.@nexprs 8 d -> (k_d = 0.0f0); Base.Cartesian.@nexprs 8 d -> (v_d = 0.0f0)
     jlo = kvpass ? col * 4 : col; jhi = kvpass ? col * 4 + 3 : col
     for j in jlo:jhi
@@ -806,7 +807,7 @@ end
         bar()
         t2 = kvpass ? Int64(tile) : Int64(0); t2end = kvpass ? nt - 1 : Int64(tile)
         while t2 <= t2end                                  # the other tile: queries or keys
-            u0 = t2 * 16; bar()
+            u0 = t2 * qt; bar()
             if kvpass
                 for i in tid:256:16*HD-1; c = i ÷ HD; r = u0 + c; r < R.P && (sm[4096 + i + 1] = ev(R, qr, r, j * HD + i % HD); sm[6144 + i + 1] = ev(R, gao, r, j * HD + i % HD) * sigm(ev(R, qkv, r, NE + 2NKV * HD + j))); end
                 if tid < 16 && u0 + tid < R.P
