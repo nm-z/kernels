@@ -76,7 +76,7 @@ calls; the engine only turns token ids into token ids.
 | `register` | `positions` (most it holds), `max_new` (most tokens a run makes), `slots`, `vision` | first |
 | `prefill` | `id`, `done`, `total` | at least every 500 ms during the prompt, and at `done == total` |
 | `tokens` | `id`, `ids` | as they are made |
-| `stats` | `id`, `prefill_tps`, `decode_tps` | at least every 500 ms while running |
+| `stats` | `id`, `prefill_tps`, `decode_tps`, `idle_pct` (live) | at least every 500 ms while running |
 | `done` | `id`, `prompt`, `generated`, `prefill_tps`, `decode_tps`, `idle_pct`, `stopped` | last |
 | `error` | `id`, `message` | a run failed |
 | `image` | `img`, `tokens` | reply to `image` |
@@ -144,10 +144,10 @@ transport fields Codex sends (`tool_choice`, `parallel_tool_calls`, `store`, `in
 
 ```
 event: response.ai_mux.stats
-data: {"type":"response.ai_mux.stats","phase":"prefill"|"decode","prefill":{"done":N,"total":N,"tps":X},"decode":{"tokens":N,"tps":X},"ctx":N}
+data: {"type":"response.ai_mux.stats","phase":"prefill"|"decode","prefill":{"done":N,"total":N,"tps":X},"decode":{"tokens":N,"tps":X},"idle_pct":X,"ctx":N}
 ```
 
-for engines, at least every 500 ms while running and once with the final values (plus `"idle_pct"`); for
+for engines, at least every 500 ms while running (live values, idle % of the run so far) and once with the final measured values; for
 shims, `{"type":"response.ai_mux.stats","phase":"route"|"output","route":{"trying":[…],"failed":[…]},"ttft_ms":N,"ctx":N}`
 on every route change and once at the first token.
 

@@ -7,6 +7,7 @@
 #       ... run r.ids (stop at r.stop, at most r.max_new new tokens) ...
 #       AiMux.prefill!(r, done)            # prompt positions run so far (rate-limited here)
 #       AiMux.tokens!(r, ids)              # new token ids, as they are made
+#       AiMux.idle!(r, pct)                # the idle % of the run so far, measured by the engine
 #       AiMux.cancelled(r) && ...          # the client went: stop early
 #       AiMux.done!(r; prefill_tps, decode_tps, idle_pct, stopped)   # the engine's measured values
 #   end
@@ -93,6 +94,7 @@ mutable struct Run
     tsent::Float64                 # when stats last went out
     stopflag::Threads.Atomic{Bool}
     finished::Bool
+    idle::Float64                  # the engine's live idle % of the run so far (NaN: not measured yet)
 end
 struct Conn
     io::IO
@@ -127,10 +129,12 @@ function stats!(r::Run, now = time())
     tp = r.tpre > 0 ? r.tpre : now
     ptps = r.prefilled / max(tp - r.t0, 1e-6)
     dtps = r.ntok > 1 ? (r.ntok - 1) / max(now - r.tfirst, 1e-6) : 0.0
-    send(r, jobj(:op => "stats", :id => r.id, :prefill_tps => ptps, :decode_tps => dtps)); r.tsent = now
+    send(r, jobj(:op => "stats", :id => r.id, :prefill_tps => ptps, :decode_tps => dtps, :idle_pct => r.idle)); r.tsent = now
 end
 "Whether the client went (stop early, then call done!)."
 cancelled(r::Run) = r.stopflag[]
+"The engine's idle % of the run so far (goes out with the next stats line)."
+idle!(r::Run, pct::Real) = (r.idle = Float64(pct); nothing)
 "The run's end, with the engine's measured values."
 function done!(r::Run; prefill_tps, decode_tps, idle_pct, stopped::Bool)
     r.finished && return
@@ -160,7 +164,7 @@ function serve(f; positions::Integer, max_new::Integer, slots::Integer = 1, visi
             ctx = m["ctx"]; @info "ai-mux: registered as $ep, context $ctx"
         elseif op == "run"
             r = Run(m["id"], Int.(m["ids"]), m["max_new"], Int.(m["stop"]), get(m, "images", Any[]), c,
-                    time(), 0.0, 0.0, 0, 0, 0.0, Threads.Atomic{Bool}(false), false)
+                    time(), 0.0, 0.0, 0, 0, 0.0, Threads.Atomic{Bool}(false), false, NaN)
             runs[r.id] = r
             Threads.@spawn begin
                 Base.acquire(free)

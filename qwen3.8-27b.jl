@@ -1652,6 +1652,9 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing, stops = (-1,
         A = kargs(PE.K, PE.hx, d, mc, a, ib, nr, mode, PE.nwg, lgs === nothing ? nothing : lgs[d], npos, rid; stops)
         @roc groupsize = 256 gridsize = PE.nwg maxthreads = 256 waves_per_eu = KWPE[] k_req!(A)
     end
+    lock(() -> (LIVE[] = (accts = accts, dies = dies, n = 3 + 2nphase)), LIVELK)   # (liveidle reads them while the kernels run)
+    for d in 1:ND; AMDGPU.device!(dies[d].dev); AMDGPU.synchronize(); end
+    lock(() -> (LIVE[] = nothing), LIVELK)
     res = NTuple{3,Float64}[]; tpre = 0.0; tdec = 0.0
     for d in 1:ND
         AMDGPU.device!(dies[d].dev); AMDGPU.synchronize()
@@ -1682,6 +1685,47 @@ end
 if !isdefined(Main, :ACCTS)
     const ACCTS = Ref([UInt64[] for _ in 1:4])            # every die's phase times of the last request
 end
+if !isdefined(Main, :LIVE)
+    const LIVE = Ref{Any}(nothing)                         # the running request's phase-time arrays (request!)
+    const LIVELK = ReentrantLock()                         # held while liveidle copies them, so they are not freed under it
+    const LIVESTREAMS = Ref{Any}(nothing)                  # a stream a die for those copies (the kernel's own stream is busy)
+end
+# The running request's idle % so far, as request! will count it at the end (the union of the phases is instruction
+# time, the rest idle), from the phase times the kernels have written: each call copies the next window of them on
+# a stream of its own while the kernels run and merges the phases that are complete (a later one has begun). st
+# carries the merge from call to call; NaN until there is something to count.
+function liveidle!(st)
+    lock(LIVELK) do
+        L = LIVE[]; L === nothing && return NaN
+        LIVESTREAMS[] === nothing && (LIVESTREAMS[] = [(AMDGPU.device!(D.dev); AMDGPU.HIPStream()) for D in L.dies])
+        idle = 0.0; wall = 0.0
+        for d in 1:ND
+            AMDGPU.device!(L.dies[d].dev)
+            AMDGPU.stream!(LIVESTREAMS[][d]) do
+                if st.t0[d] == 0
+                    h = zeros(UInt64, 1); copyto!(h, 1, L.accts[d], 1, 1); h[1] != typemax(UInt64) && (st.t0[d] = h[1])
+                end
+                lo = 4 + 2st.k[d]; n = min(length(st.buf), L.n - lo + 1); n < 4 && return
+                copyto!(st.buf, 1, L.accts[d], lo, n)
+                last = -1
+                for j in 0:2:n-2; st.buf[1+j] != typemax(UInt64) && (last = j); end
+                for j in 0:2:last-2
+                    b = st.buf[1+j]; e = st.buf[2+j]; b == typemax(UInt64) && continue
+                    if st.ce[d] == 0 || b > st.ce[d]
+                        st.ce[d] > 0 && (st.busy[d] += st.ce[d] - st.cb[d]); st.cb[d] = b; st.ce[d] = e
+                    else
+                        st.ce[d] = max(st.ce[d], e)
+                    end
+                end
+                last > 0 && (st.k[d] += last ÷ 2)
+            end
+            (st.t0[d] > 0 && st.ce[d] > st.t0[d]) || continue
+            w = Float64(st.ce[d] - st.t0[d]); idle += w - (st.busy[d] + (st.ce[d] - st.cb[d])); wall += w
+        end
+        wall > 0 ? 100idle / wall : NaN
+    end
+end
+liveidle_state() = (k = zeros(Int, ND), cb = zeros(UInt64, ND), ce = zeros(UInt64, ND), busy = zeros(ND), t0 = zeros(UInt64, ND), buf = zeros(UInt64, 1 << 17))
 # a die's performance level (sysfs power_dpm_force_performance_level of its PCI device; writable by the wheel group
 # on sentry, a udev rule): forced high for a request's dispatch, auto between requests (300 MHz, about 26 W a die)
 dpmfile(D::Die) = (b = AMDGPU.HIP.properties(D.dev).pciBusID; "/sys/bus/pci/devices/0000:" * string(b, base = 16, pad = 2) * ":00.0/power_dpm_force_performance_level")
@@ -1813,13 +1857,20 @@ function run!(r)
         end
         AiMux.tokens!(r, new)
     end
+    # the idle % so far, measured off the token path (a copy can wait behind the kernels)
+    st = liveidle_state()
+    sampler = Threads.@spawn while !istaskdone(job)
+        x = try liveidle!(st) catch; NaN end
+        isnan(x) || AiMux.idle!(r, x)
+        sleep(0.4)
+    end
     while !istaskdone(job)
         n == 0 && AiMux.prefill!(r, Int(unsafe_load(hw(14))))
         pump()
         AiMux.cancelled(r) && unsafe_store!(hw(13), UInt32(1))
         sleep(0.005)
     end
-    res = fetch(job); pump()
+    res = fetch(job); pump(); wait(sampler)
     pt = length(ids) / res[3]; dt = max(n - 1, 0) / max(res[4], 1e-9); idle = idlepct(res[2])
     AiMux.done!(r; prefill_tps = pt, decode_tps = dt, idle_pct = idle, stopped)
     @printf("run %s: %d prompt, %d out, prefill %.2f tok/s, decode %.2f tok/s, idle time %.1f%%%s\n", r.id, length(ids), n,
