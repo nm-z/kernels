@@ -348,15 +348,9 @@ struct KA
     nem::LP{Int32}; drf::LP{Int32}; msel::LP{Int32}        # a request's tokens out, its draft, the draft's source (0, 1)
     spec::Int32                                            # decode with MTP drafts
     stp1::Int32; stp2::Int32                               # tokens that end a request (-1: none)
-    part2::LP{Float32}                                     # the partial sums of a matrix step right after an exchange
-    flg::LP{UInt32}                                        # dataflow flags: a workgroup's exchange done (the step's seq + 1)
 end
 const NR = 2                                               # requests at once
 const DW = 4                                               # the widest decode forward (with MTP: 2 positions a request)
-# A whose partial sums are part2: the matrix steps right after an exchange and their consumers. Those steps start
-# without a barrier at decode width, so they must not overwrite sums the exchange may still be reading.
-const PARTF = findfirst(==(:part), fieldnames(KA)); const PART2F = findfirst(==(:part2), fieldnames(KA))
-@inline withpart2(A::KA) = KA(ntuple(i -> i == PARTF ? getfield(A, PART2F) : getfield(A, i), Val(fieldcount(KA)))...)
 @inline slp(A::KA, r, j) = ld(A.sl, 6Int64(r) + j)      # (S, ring, kc, vc, S backup, ring backup)
 const NMAT = 8                                             # matrix (and vector) slots a layer in the table
 const TABF = 66 * NMAT * 5                                 # where the f32-vector offsets start in the table
@@ -433,23 +427,12 @@ end
     s
 end
 # the items (64 rows, one K slice) of the matrices js of layer l, over every wavefront of the die
-# wx > 0: x comes from the exchange (seq wx - 1) without a barrier after it; K slice sl of position p was written by
-# its workgroup 10 p + sl (flg = wx when done). An item waits for the P of its slice (a wavefront's lanes poll them).
-@inline function xready(A::KA, sl::Int32, P::Int32, wx::Int32)
-    lane = tid() & Int32(63); tw = memtime()
-    while true
-        v = lane < P ? reinterpret(Int32, ldacq(A.flg + 4 * (Int64(10) * lane + sl))) : wx
-        AMDGPU.Device.wfred(min, v) >= wx && break
-        (memtime() - tw > TOUT || aborted(A)) && (atadd(A.bar + 8, UInt32(1)); break)
-    end
-    dcinv()
-end
-function gemv_ph!(A::KA, l::Int32, j0::Int32, nm::Int32, seq::Int32, ::Val{P}, zs::Bool = false, wx::Int32 = Int32(0)) where {P}
+function gemv_ph!(A::KA, l::Int32, j0::Int32, nm::Int32, seq::Int32, ::Val{P}, zs::Bool = false) where {P}
     zs && zero_ssq!(A, Int32(P))
     # the wavefront index, uniform (readfirstlane): so is everything an item derives from it, and x is read with
     # scalar loads
     t = tid(); lane = t & Int32(63); gw = AMDGPU.Device.readfirstlane(Int32(4) * wgid() + (t >> Int32(6))); NW = Int32(4) * A.nwg
-    t0 = memtime(); did = false; okm = UInt64(0)
+    t0 = memtime(); did = false
     xr = sbuf(A.xt, NE * 4 * A.npos); x16 = sbuf(A.x16, NE ÷ 4 * A.npos); x32 = sbuf(A.x32, NE ÷ 8 * A.npos)
     base = Int32(0); o = Int64(0)
     for m in Int32(0):nm-Int32(1)
@@ -457,13 +440,6 @@ function gemv_ph!(A::KA, l::Int32, j0::Int32, nm::Int32, seq::Int32, ::Val{P}, z
         g = gw + max(Int32(0), cld(base - gw, NW)) * NW
         while g < base + n
             it = g - base; G = it ÷ ns; sl = it - G * ns
-            if wx > Int32(0) && (okm >> sl) & UInt64(1) == UInt64(0)  # (okm: the slices already seen written)
-                xready(A, sl, Int32(P), wx); okm |= UInt64(1) << sl
-                # x's descriptors again after the wait (an opaque copy each: no scalar load hoisted above it); a
-                # workgroup's span starts at its first item (the wait before it is not its work)
-                xr = sbuf(A.xt, NE * 4 * A.npos); x16 = sbuf(A.x16, NE ÷ 4 * A.npos); x32 = sbuf(A.x32, NE ÷ 8 * A.npos)
-                did || (t0 = memtime())
-            end
             if typ == Int32(GQ5_K)
                 gemv5!(A.part + 4o, reinterpret(LP{UInt8}, woff), xr, x32, nb, rows, G, sl, lane, Val(P))
             else
@@ -577,11 +553,6 @@ function xwr_ph!(A::KA, l::Int32, j::Int32, w::LP{Float32}, set::Bool, xs::Int32
             ta == UInt64(0) && (ta = memtime())
             xput2!(A, w, set, p, k, dsum(m0, ntuple(e -> sh[e][1], Val(ND - 1)), d), dsum(m1, ntuple(e -> sh[e][2], Val(ND - 1)), d), P)
             i += nthr(A)
-        end
-        # this workgroup's x elements are out: the matrix step after it starts its items on them (gemv_ph!'s wx)
-        if did
-            fence_rel(); sync_workgroup()
-            tid() == Int32(0) && stmono(A.flg + 4 * Int64(wgid()), UInt32(seq + Int32(1)))
         end
     else
         # prefill: bytes matter more than round trips, so plain 4-byte floats, and a die's workgroups each raise its
@@ -1309,10 +1280,10 @@ function gemm_ph!(A::KA, l::Int32, j0::Int32, nm::Int32, seq::Int32, P::Int32, W
     done!(A, seq, t0, did)
 end
 # matrices j0 .. j0 + nm - 1 of layer l (consecutive table slots)
-@inline mat_ph!(A::KA, l, j0, nm, seq, P, T, zs::Bool = false, pf::Int32 = Int32(0), wx::Int32 = Int32(0)) =
+@inline mat_ph!(A::KA, l, j0, nm, seq, P, T, zs::Bool = false, pf::Int32 = Int32(0)) =
     isgemm(P) ? gemm_ph!(A, Int32(l), Int32(j0), Int32(nm), seq, P, T[1], T[2], zs, pf) :   # prefill; decode: GEMV over all P positions
-    P == Int32(1) ? gemv_ph!(A, Int32(l), Int32(j0), Int32(nm), seq, Val(1), zs, wx) :
-    P == Int32(2) ? gemv_ph!(A, Int32(l), Int32(j0), Int32(nm), seq, Val(2), zs, wx) : gemv_ph!(A, Int32(l), Int32(j0), Int32(nm), seq, Val(4), zs, wx)
+    P == Int32(1) ? gemv_ph!(A, Int32(l), Int32(j0), Int32(nm), seq, Val(1), zs) :
+    P == Int32(2) ? gemv_ph!(A, Int32(l), Int32(j0), Int32(nm), seq, Val(2), zs) : gemv_ph!(A, Int32(l), Int32(j0), Int32(nm), seq, Val(4), zs)
 
 # ---- one forward of P positions (setpos_ph! set them): GEMMs for a prefill (isgemm), GEMVs at decode (P <= DW);
 # amax: one past the largest position; head: the head takes positions pfirst .. P - 1 (into tokens of step k).
@@ -1372,28 +1343,22 @@ end
 # (a prefill forward also checks at each trunk layer: it runs for seconds; nc counts the checks)
 function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, xf::Int32, head::Bool, pfirst::Int32, mtp::Bool, mhead::Bool, mpf::Int32, pre::Bool, T, nc::Int32)
     bx = P > Int32(DW)                                     # (the exchanges' counted path, prefill)
-    xwr_ph!(A, Int32(0), Int32(-1), fvec(A, 0, 0), true, xs, xf, seq, P); seq += Int32(2); xs += Int32(1); xf += bx ? Int32(1) : Int32(0)
+    xwr_ph!(A, Int32(0), Int32(-1), fvec(A, 0, 0), true, xs, xf, seq, P); seq += Int32(2); xs += Int32(1); xf += bx ? Int32(1) : Int32(0); gbar!(A)
     nlr = Int32(ldacq(A.bar + 12)); nl = nlr == Int32(0) ? Int32(NL) : nlr   # bar[3]: layers to run (0: all), for debugging
     gen = A.mode == Int32(0); spec = !pre && A.spec != Int32(0)
-    # The barrier after a step is taken at the next one's start. At decode width a matrix step right after an
-    # exchange takes none: each item waits for the exchange's workgroups of its K slice (gemv_ph!'s wx). Such a step
-    # and the steps reading its sums use part2 (A2).
-    A2 = withpart2(A); dx = P <= Int32(DW)
-    l = Int32(0); i = Int32(0); px = true; pchk = false
+    l = Int32(0); i = Int32(0)
     while l <= Int32(MTPL)
-        kind, j0, nm, zs = lstep(l, i)
-        (dx && px && kind == S_MAT) || gbar!(A)
-        (pchk && stopped(A)) && return seq, xs, xf, nc, true
         chk = pre && i == Int32(0) && l < Int32(64)
         chk && (cancelq!(A, nc); nc += Int32(1))
+        kind, j0, nm, zs = lstep(l, i)
         hd = l == Int32(64) || (l == Int32(MTPL) && j0 == Int32(1))   # a head step
         pf = l == Int32(MTPL) ? mpf : pfirst; nq = P - pf
         if kind == S_MAT
-            mat_ph!(px ? A2 : A, hd ? Int32(64) : l, j0, nm, seq, P, T, zs, hd ? pf : Int32(0), dx && px ? seq - Int32(1) : Int32(0)); seq += Int32(1)
+            mat_ph!(A, hd ? Int32(64) : l, j0, nm, seq, P, T, zs, hd ? pf : Int32(0)); seq += Int32(1)
         elseif kind == S_REC
-            rec_ph!(A2, l, seq, P); seq += Int32(1)
+            rec_ph!(A, l, seq, P); seq += Int32(1)
         elseif kind == S_APREP
-            aprep_ph!(A2, l, seq, P); seq += Int32(1)
+            aprep_ph!(A, l, seq, P); seq += Int32(1)
         elseif kind == S_ATTN
             attn_ph!(A, l, amax, seq, P, T); seq += Int32(1)
         elseif kind == S_ACOMB
@@ -1406,9 +1371,9 @@ function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, xf::Int32, he
             end
             xwr_ph!(A, l, j0, wn, j0 == Int32(-1) || j0 == Int32(3), xs, xf, seq, P); seq += Int32(2); xs += Int32(1); xf += bx ? Int32(1) : Int32(0)
         elseif kind == S_ACT
-            act_ph!(A2, l, seq, P); seq += Int32(1)
+            act_ph!(A, l, seq, P); seq += Int32(1)
         elseif kind == S_HMAX
-            hmax_ph!(A2, seq, P, pf); seq += Int32(1)
+            hmax_ph!(A, seq, P, pf); seq += Int32(1)
         elseif kind == S_HRED
             hred_ph!(A, xs & Int32(1), seq, nq); seq += Int32(1)
         elseif kind == S_XSIG
@@ -1424,7 +1389,8 @@ function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, xf::Int32, he
         else
             dtok_ph!(A, xs & Int32(1), seq, nq, pf, pre); seq += Int32(1); xs += Int32(1)
         end
-        px = kind == S_XWR; pchk = chk
+        gbar!(A)
+        (chk && stopped(A)) && return seq, xs, xf, nc, true
         i += Int32(1)
         if i == nsteps(l, gen, mhead)
             i = Int32(0)
@@ -1432,7 +1398,6 @@ function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, xf::Int32, he
                 l == Int32(64) ? (mtp ? Int32(MTPL) : Int32(MTPL + 1)) : Int32(MTPL + 1)
         end
     end
-    gbar!(A)
     seq, xs, xf, nc, false
 end
 # the requests (up to NR), one dispatch: each request's prefill (or scoring) in forwards of as many positions as fit
@@ -1586,14 +1551,12 @@ struct KDie
     ap::ROCVector{Float32}; tok::ROCVector{Int32}; bar::ROCVector{UInt32}; ssq::ROCVector{Int64}
     posr::ROCVector{Int32}; posa::ROCVector{Int32}; tks::ROCVector{Int32}; sl::ROCVector{Int64}; rq::ROCVector{Int32}
     pk::ROCVector{Int32}; nem::ROCVector{Int32}; drf::ROCVector{Int32}; msel::ROCVector{Int32}
-    part2::ROCVector{Float32}; flg::ROCVector{UInt32}
 end
 function KDie(D::Die, npos)
     AMDGPU.device!(D.dev); z(n) = AMDGPU.zeros(Float32, n); zi(n) = AMDGPU.zeros(Int32, n)
     KDie(ktable(D), z(NE * npos), z(NE * npos), z(NE ÷ 16 * npos), z(NE ÷ 32 * npos), z(max(VPD * 10, 2 * 4352 * npos, VPD * NSCORE)),
         z(2 * NWG * DW), z(QKVD * npos), z(1536 * npos), z(1536 * npos), z(6 * (HD + 2) * max(npos, NWG)),
-        zi(npos), AMDGPU.zeros(UInt32, 64), AMDGPU.zeros(Int64, npos), zi(npos), zi(npos), zi(NR), AMDGPU.zeros(Int64, 6NR), zi(4NR), zi(npos), zi(NR), zi(NR), zi(NR),
-        z(max(VPD * 10, 2 * 4352 * npos, VPD * NSCORE)), AMDGPU.zeros(UInt32, 4096))
+        zi(npos), AMDGPU.zeros(UInt32, 64), AMDGPU.zeros(Int64, npos), zi(npos), zi(npos), zi(NR), AMDGPU.zeros(Int64, 6NR), zi(4NR), zi(npos), zi(NR), zi(NR), zi(NR))
 end
 # page-locked host memory every die maps. p: what only the dies touch, the exchange words (2 phases x 2 slots x dies x
 # dies x npos x QTR) and the argmax exchange (2 slots x dies x DW); c: what the host reads or writes too, the counters
@@ -1656,7 +1619,7 @@ function kargs(K, hx::HostX, d, maxctx, acct, inp, nreq, mode, nwg, lg, npos, ri
        lp(Int32, inp), lp(Int32, k.rq), Int32(nreq), lp(Int32, hx.c + hx.tok), Int32(mode), Int32(nwg), lp(Int32, k.tok),
        lp(Int32, k.posr), lp(Int32, k.posa), lp(Int32, k.tks), Int32(npos), lp(Int64, k.ssq), Int32(rid),
        lp(Int32, k.pk), lp(Int32, k.nem), lp(Int32, k.drf), lp(Int32, k.msel), Int32(mode == 0 && SPEC[] ? 1 : 0),
-       Int32(stops[1]), Int32(stops[2]), lp(Float32, k.part2), lp(UInt32, k.flg))
+       Int32(stops[1]), Int32(stops[2]))
 end
 # up to NR requests at once on the four dies, one dispatch a die. reqs: (input ids, tokens to generate) each, with
 # its state sts[r] (one DState a die). mode 0: greedy; mode 1: score one request\x27s input (the logits of every
@@ -1682,7 +1645,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing, stops = (-1,
     for d in 1:ND
         AMDGPU.device!(dies[d].dev); K = PE.K[d]
         a = AMDGPU.zeros(UInt64, 3 + 2nphase); ah = zeros(UInt64, 3 + 2nphase); ah[1] = typemax(UInt64); ah[4:2:end] .= typemax(UInt64); up!(a, ah); push!(accts, a)
-        up!(K.bar, [UInt32[0, 0, 0, NLRUN[]]; zeros(UInt32, 60)]); up!(K.rq, rq); fill!(K.flg, 0x00000000)
+        up!(K.bar, [UInt32[0, 0, 0, NLRUN[]]; zeros(UInt32, 60)]); up!(K.rq, rq)
         for r in 1:nr; fill!(sts[r][d].S, 0.0f0); fill!(sts[r][d].ring, 0.0f0); end   # a request starts from zero state
         up!(K.sl, Int64[addr(getfield(sts[r][d], f)) for r in 1:nr for f in (:S, :ring, :kc, :vc, :S2, :ring2)]); up!(K.nem, zeros(Int32, NR))
         ib = dev(inp); push!(ibs, ib)
