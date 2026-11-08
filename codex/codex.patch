@@ -16122,7 +16122,7 @@ index 67bdacdca4..40424ac53b 100644
      chat.handle_server_notification(
          ServerNotification::ReasoningSummaryTextDelta(ReasoningSummaryTextDeltaNotification {
 diff --git a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
-index 9074c5ec03..a65ab9ebe5 100644
+index 9074c5ec03..713f3b0320 100644
 --- a/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs
 @@ -2996,6 +2996,90 @@ async fn stream_error_restores_hidden_status_indicator() {
@@ -16196,7 +16196,7 @@ index 9074c5ec03..a65ab9ebe5 100644
 +    handle_turn_completed(&mut chat, "turn-1", /*duration_ms*/ None);
 +    assert_eq!(
 +        status_line_text(&chat),
-+        Some(format!("Context 100% left · {summary}"))
++        Some(format!("{summary} · Context 100% left"))
 +    );
 +
 +    handle_turn_started(&mut chat, "turn-2");
