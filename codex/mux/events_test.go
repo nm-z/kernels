@@ -141,7 +141,7 @@ func TestEventsDBRecordsAndReplays(t *testing.T) {
 		n++
 	}
 	rows.Close()
-	for _, typ := range []string{"ai-mux.start", "service.state", "run.start", "run.prefill", "run.stats", "run.tokens", "run.end"} {
+	for _, typ := range []string{"mux.start", "service.state", "run.start", "run.prefill", "run.stats", "run.tokens", "run.end"} {
 		if types[typ] == 0 {
 			t.Errorf("no %s row (%v)", typ, types)
 		}
@@ -163,7 +163,7 @@ func TestEventsDBRecordsAndReplays(t *testing.T) {
 		prev = id
 		seen[ev.Name]++
 	}
-	if old[0].Name != "ai-mux.start" || seen["service.state"] < 2 || seen["run.start"] != 1 || seen["snapshot"] != 0 {
+	if old[0].Name != "mux.start" || seen["service.state"] < 2 || seen["run.start"] != 1 || seen["snapshot"] != 0 {
 		t.Errorf("replayed %v (first %s)", seen, old[0].Name)
 	}
 	oneRun(t, e, "m") // live, on the same connection, after the replay with no gap and no duplicate
@@ -187,7 +187,7 @@ func TestEventsDBRecordsAndReplays(t *testing.T) {
 	}
 	oneRun(t, e, "m")
 	first := es2.until(t, 5*time.Second, func(ev sseEvent) bool { return true })
-	if first[0].Name == "ai-mux.start" || idOf(t, first[0]) <= prev {
+	if first[0].Name == "mux.start" || idOf(t, first[0]) <= prev {
 		t.Errorf("a future since replayed %s id %s", first[0].Name, first[0].ID)
 	}
 	es2.cancel()

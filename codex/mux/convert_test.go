@@ -98,7 +98,7 @@ func TestConvertTools(t *testing.T) {
 		}
 	}
 	if strings.Contains(got, "web_search") || len(p.tools) != 4 {
-		t.Errorf("a tool ai-mux cannot offer was kept: %d tools", len(p.tools))
+		t.Errorf("a tool mux cannot offer was kept: %d tools", len(p.tools))
 	}
 	if ti := p.toolInfo["apply_patch"]; ti == nil || !ti.custom {
 		t.Errorf("custom tool not recorded: %+v", ti)

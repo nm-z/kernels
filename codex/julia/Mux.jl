@@ -1,21 +1,21 @@
-# AiMux.jl: a Julia engine's side of the ai-mux protocol (../PROTOCOL.md). The engine registers with
-# the ai-mux on this host and runs what it is sent; this module does the socket, the JSON lines and the
+# Mux.jl: a Julia engine's side of the mux protocol (../PROTOCOL.md). The engine registers with
+# the mux on this host and runs what it is sent; this module does the socket, the JSON lines and the
 # live numbers, so an engine only turns token ids into token ids:
 #
-#   include("AiMux.jl"); using .AiMux
-#   AiMux.serve(positions = 262144, max_new = 8192, slots = 1) do r     # r::AiMux.Run, in its own task
+#   include("Mux.jl"); using .Mux
+#   Mux.serve(positions = 262144, max_new = 8192, slots = 1) do r     # r::Mux.Run, in its own task
 #       ... run r.ids (stop at r.stop, at most r.max_new new tokens) ...
-#       AiMux.prefill!(r, done)            # prompt positions run so far (rate-limited here)
-#       AiMux.tokens!(r, ids)              # new token ids, as they are made
-#       AiMux.idle!(r, pct)                # the idle % of the run so far, measured by the engine
-#       AiMux.cancelled(r) && ...          # the client went: stop early
-#       AiMux.done!(r; prefill_tps, decode_tps, idle_pct, stopped)   # the engine's measured values
+#       Mux.prefill!(r, done)            # prompt positions run so far (rate-limited here)
+#       Mux.tokens!(r, ids)              # new token ids, as they are made
+#       Mux.idle!(r, pct)                # the idle % of the run so far, measured by the engine
+#       Mux.cancelled(r) && ...          # the client went: stop early
+#       Mux.done!(r; prefill_tps, decode_tps, idle_pct, stopped)   # the engine's measured values
 #   end
 #
-# The live prefill and decode tok/s ai-mux streams while a run goes are measured here from when the
-# engine reports progress and tokens; the final ones are the engine's own. serve returns when ai-mux
+# The live prefill and decode tok/s mux streams while a run goes are measured here from when the
+# engine reports progress and tokens; the final ones are the engine's own. serve returns when mux
 # closes the connection (it stops the service's process then anyway).
-module AiMux
+module Mux
 using Sockets, Printf
 
 # ---- JSON: the flat objects of the protocol (numbers, strings, bools, null, arrays, objects) ----
@@ -149,19 +149,19 @@ fail!(r::Run, msg) = (r.finished || send(r, jobj(:op => "error", :id => r.id, :m
 """
     serve(f; positions, max_new, slots = 1, vision = false, encode = nothing)
 
-Connect to `ENV["AI_MUX_SOCK"]` as service `ENV["AI_MUX_SERVICE"]`, register, and run `f(r::Run)` for
+Connect to `ENV["MUX_SOCK"]` as service `ENV["MUX_SERVICE"]`, register, and run `f(r::Run)` for
 each run (at most `slots` at once). `encode(img, bytes) -> positions` handles image encoding when
-`vision`. Returns ai-mux's configured context window when the connection closes.
+`vision`. Returns mux's configured context window when the connection closes.
 """
 function serve(f; positions::Integer, max_new::Integer, slots::Integer = 1, vision::Bool = false, encode = nothing)
-    sock = ENV["AI_MUX_SOCK"]; ep = ENV["AI_MUX_SERVICE"]
+    sock = ENV["MUX_SOCK"]; ep = ENV["MUX_SERVICE"]
     c = Conn(connect(sock), ReentrantLock())
     send(c, jobj(:op => "register", :service => ep, :kind => "engine", :positions => positions, :max_new => max_new, :slots => slots, :vision => vision))
     ctx = 0; runs = Dict{String,Run}(); free = Base.Semaphore(slots)
     while !eof(c.io)
         m = jparse(readline(c.io)); op = m["op"]
         if op == "registered"
-            ctx = m["ctx"]; @info "ai-mux: registered as $ep, context $ctx"
+            ctx = m["ctx"]; @info "mux: registered as $ep, context $ctx"
         elseif op == "run"
             r = Run(m["id"], Int.(m["ids"]), m["max_new"], Int.(m["stop"]), get(m, "images", Any[]), c,
                     time(), 0.0, 0.0, 0, 0, 0.0, Threads.Atomic{Bool}(false), false, NaN)
@@ -180,7 +180,7 @@ function serve(f; positions::Integer, max_new::Integer, slots::Integer = 1, visi
         elseif op == "cancel"
             r = get(runs, m["id"], nothing); r === nothing || (r.stopflag[] = true)
         elseif op == "image"
-            vision && encode !== nothing || error("ai-mux sent an image to an engine without vision")
+            vision && encode !== nothing || error("mux sent an image to an engine without vision")
             n = encode(m["img"], base64decode_(m["bytes"]))
             send(c, jobj(:op => "image", :img => m["img"], :tokens => n))
         end

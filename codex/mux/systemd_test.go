@@ -15,23 +15,23 @@ func cgroupOf(pid int) string {
 }
 
 // TestSystemdScopes runs an endpoint the way the systemd user unit does: in a transient scope bound to
-// the unit ai-mux runs as. A stand-in unit plays ai-mux.service, so the real one is not touched.
+// the unit mux runs as. A stand-in unit plays mux.service, so the real one is not touched.
 func TestSystemdScopes(t *testing.T) {
 	if _, err := exec.LookPath("systemd-run"); err != nil {
 		t.Skip("no systemd-run")
 	}
-	probe := "aimux-probe-" + strconv.Itoa(os.Getpid())
+	probe := "mux-probe-" + strconv.Itoa(os.Getpid())
 	if err := exec.Command("systemd-run", "--user", "--scope", "--collect", "--unit="+probe, "true").Run(); err != nil {
 		t.Skipf("no systemd user session to start scopes in: %v", err)
 	}
-	unit := "aimux-test-" + strconv.Itoa(os.Getpid()) + ".service"
+	unit := "mux-test-" + strconv.Itoa(os.Getpid()) + ".service"
 	if out, err := exec.Command("systemd-run", "--user", "--unit="+unit, "--collect", "sleep", "600").CombinedOutput(); err != nil {
 		t.Skipf("cannot start a stand-in unit: %v: %s", err, out)
 	}
 	t.Cleanup(func() { exec.Command("systemctl", "--user", "stop", unit).Run() })
 
 	name := "t" + strconv.Itoa(os.Getpid())
-	scope := "ai-mux-" + name + ".scope"
+	scope := "mux-" + name + ".scope"
 	e := startMuxOpts(t, Options{Supervisor: "systemd", Unit: unit}, epSpec{name: name, scenario: "spawn"})
 	in := e.waitState(name, StateUp, 15*time.Second)
 	waitFor(t, 3*time.Second, "child pid", func() bool { return e.readOut("child.pid") != "" })
@@ -67,7 +67,7 @@ func TestSystemdScopes(t *testing.T) {
 	waitFor(t, 3*time.Second, "child pid", func() bool { return len(strings.Fields(e.readOut("child.pid"))) == 2 })
 	child, _ = strconv.Atoi(strings.Fields(e.readOut("child.pid"))[1])
 
-	// invariant 2: when the unit ai-mux runs as goes away, systemd stops every endpoint scope
+	// invariant 2: when the unit mux runs as goes away, systemd stops every endpoint scope
 	exec.Command("systemctl", "--user", "stop", unit).Run()
 	waitFor(t, 20*time.Second, "systemd to stop the scope", func() bool { return !pidAlive(in.PID) && !pidAlive(child) })
 	e.waitState(name, StateFailed, 10*time.Second)

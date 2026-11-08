@@ -1,9 +1,9 @@
-// ai-mux serves AI on one host: it starts and stops every model endpoint and serves the Responses API.
+// mux serves AI on one host: it starts and stops every service and serves the Responses API.
 //
-//	ai-mux serve [-f ai-mux.yaml]      the daemon
-//	ai-mux ps | up NAME | down NAME | events [-since TS] [-f ai-mux.yaml]
+//	mux serve [-f mux.yaml]      the daemon
+//	mux ps | up NAME | down NAME | events [-since TS] [-f mux.yaml]
 //
-// The CLI finds the daemon through AI_MUX_URL, else the `listen` of the compose file.
+// The CLI finds the daemon through MUX_URL, else the `listen` of the compose file.
 package main
 
 import (
@@ -26,12 +26,12 @@ import (
 )
 
 func usage() {
-	fmt.Fprint(os.Stderr, `usage: ai-mux serve [-f FILE]
-       ai-mux ps [-f FILE]
-       ai-mux events [-since TS] [-f FILE]
-       ai-mux up NAME | down NAME [-f FILE]
+	fmt.Fprint(os.Stderr, `usage: mux serve [-f FILE]
+       mux ps [-f FILE]
+       mux events [-since TS] [-f FILE]
+       mux up NAME | down NAME [-f FILE]
 
-FILE defaults to ~/.config/ai-mux/ai-mux.yaml; the CLI uses AI_MUX_URL (http://host:port) when set.
+FILE defaults to ~/.config/mux/mux.yaml; the CLI uses MUX_URL (http://host:port) when set.
 `)
 	os.Exit(2)
 }
@@ -70,7 +70,7 @@ func main() {
 	}
 	if file == "" {
 		home, _ := os.UserHomeDir()
-		file = home + "/.config/ai-mux/ai-mux.yaml"
+		file = home + "/.config/mux/mux.yaml"
 	}
 	switch rest[0] {
 	case "serve":
@@ -92,39 +92,39 @@ func main() {
 func serve(file string) {
 	cfg, err := mux.LoadConfig(file)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ai-mux:", err)
+		fmt.Fprintln(os.Stderr, "mux:", err)
 		os.Exit(1)
 	}
 	srv, err := mux.New(mux.Options{Config: cfg})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ai-mux:", err)
+		fmt.Fprintln(os.Stderr, "mux:", err)
 		os.Exit(1)
 	}
 	if err := srv.Start(); err != nil {
-		fmt.Fprintln(os.Stderr, "ai-mux:", err)
+		fmt.Fprintln(os.Stderr, "mux:", err)
 		os.Exit(1)
 	}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	s := <-sig
-	fmt.Fprintf(os.Stderr, "ai-mux: %s: stopping every service\n", s)
+	fmt.Fprintf(os.Stderr, "mux: %s: stopping every service\n", s)
 	srv.Shutdown()
 }
 
 // ---- the CLI --------------------------------------------------------------------------------------------
 
 func baseURL(file string) string {
-	if u := os.Getenv("AI_MUX_URL"); u != "" {
+	if u := os.Getenv("MUX_URL"); u != "" {
 		return strings.TrimRight(u, "/")
 	}
 	listen, err := mux.ReadListen(file)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ai-mux: cannot find the daemon:", err, "(set AI_MUX_URL or -f)")
+		fmt.Fprintln(os.Stderr, "mux: cannot find the daemon:", err, "(set MUX_URL or -f)")
 		os.Exit(1)
 	}
 	host, port, err := net.SplitHostPort(listen)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ai-mux: listen:", err)
+		fmt.Fprintln(os.Stderr, "mux: listen:", err)
 		os.Exit(1)
 	}
 	if host == "" || host == "0.0.0.0" || host == "::" {
@@ -138,13 +138,13 @@ func call(method, url string) []byte {
 	cl := &http.Client{Timeout: 2 * time.Minute}
 	resp, err := cl.Do(req)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ai-mux:", err)
+		fmt.Fprintln(os.Stderr, "mux:", err)
 		os.Exit(1)
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode/100 != 2 {
-		fmt.Fprintf(os.Stderr, "ai-mux: %s %s: %s\n", method, url, strings.TrimSpace(string(b)))
+		fmt.Fprintf(os.Stderr, "mux: %s %s: %s\n", method, url, strings.TrimSpace(string(b)))
 		os.Exit(1)
 	}
 	return b
@@ -155,7 +155,7 @@ func ps(base string) {
 		Data []mux.ServiceInfo `json:"data"`
 	}
 	if err := json.Unmarshal(call("GET", base+"/v1/services"), &out); err != nil {
-		fmt.Fprintln(os.Stderr, "ai-mux:", err)
+		fmt.Fprintln(os.Stderr, "mux:", err)
 		os.Exit(1)
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -227,7 +227,7 @@ func age(d time.Duration) string {
 func toggle(base, name, action string) {
 	var e mux.ServiceInfo
 	if err := json.Unmarshal(call("POST", base+"/v1/services/"+name+"/"+action), &e); err != nil {
-		fmt.Fprintln(os.Stderr, "ai-mux:", err)
+		fmt.Fprintln(os.Stderr, "mux:", err)
 		os.Exit(1)
 	}
 	fmt.Printf("%s: %s (desired %s)\n", e.Name, e.State, action)
@@ -243,13 +243,13 @@ func events(base, since string) {
 	req, _ := http.NewRequestWithContext(ctx, "GET", base+"/v1/events"+q, nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ai-mux:", err)
+		fmt.Fprintln(os.Stderr, "mux:", err)
 		os.Exit(1)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
-		fmt.Fprintf(os.Stderr, "ai-mux: %s\n", strings.TrimSpace(string(b)))
+		fmt.Fprintf(os.Stderr, "mux: %s\n", strings.TrimSpace(string(b)))
 		os.Exit(1)
 	}
 	sc := bufio.NewScanner(resp.Body)

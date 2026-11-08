@@ -12,10 +12,10 @@ Done (git log): persistent cooperative kernel a die a request; resident weights;
 decode exchange words; DeltaNet conv fused into the recurrence; per-request DPM lock (`dpm 0|1`); flashd's engine
 protocol with in-kernel stop tokens.
 
-Serving: an ai-mux service (codex/PROTOCOL.md) on sentry, `qwen3.8-27b`: ai-mux (`ai-mux.service`, user) starts
-`/data/models/q27/qwen3.8-27b.jl` (with `codex/julia/AiMux.jl` beside it) in `ai-mux-qwen3.8-27b.scope`; clients at
+Serving: a mux service (codex/PROTOCOL.md) on sentry, `qwen3.8-27b`: mux (`mux.service`, user) starts
+`/data/models/q27/qwen3.8-27b.jl` (with `codex/julia/Mux.jl` beside it) in `mux-qwen3.8-27b.scope`; clients at
 `http://sentry.local:18100/v1`; development console `/data/models/q27/console.sock`; log
-`~/.local/state/ai-mux/qwen3.8-27b.log`. Codex model `qwen3.8-27b`, provider `ai-mux-sentry`.
+`~/.local/state/mux/qwen3.8-27b.log`. Codex model `qwen3.8-27b`, provider `ai-mux-sentry`.
 
 Open (the goal): idle under 1% (the exchange waits, 20-50 us each, 128 a forward); DFlash2 drafting (the draft
 and the vision mmproj are on sentry in `/data/models/qwen3.8-27b-q5/`); vision; a 262,144-position demonstration

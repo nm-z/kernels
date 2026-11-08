@@ -19,12 +19,12 @@ type fakeSvc struct {
 }
 
 func newFakeSvc() *fakeSvc {
-	conn, err := net.Dial("unix", os.Getenv("AI_MUX_SOCK"))
+	conn, err := net.Dial("unix", os.Getenv("MUX_SOCK"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "fake service:", err)
 		os.Exit(2)
 	}
-	return &fakeSvc{conn: conn, br: bufio.NewReaderSize(conn, 1<<20), out: os.Getenv("AIMUX_FAKE_OUT")}
+	return &fakeSvc{conn: conn, br: bufio.NewReaderSize(conn, 1<<20), out: os.Getenv("MUX_FAKE_OUT")}
 }
 
 func (f *fakeSvc) send(v map[string]any) {
@@ -46,11 +46,11 @@ func (f *fakeSvc) note(name, s string) {
 
 func (f *fakeSvc) register(m map[string]any) {
 	m["op"] = "register"
-	m["service"] = os.Getenv("AI_MUX_SERVICE")
+	m["service"] = os.Getenv("MUX_SERVICE")
 	f.send(m)
 }
 
-// read returns the next line of ai-mux as a map, and the raw line.
+// read returns the next line of mux as a map, and the raw line.
 func (f *fakeSvc) read() (map[string]any, []byte) {
 	line, err := f.br.ReadBytes('\n')
 	if err != nil {
@@ -211,7 +211,7 @@ func fakeEmbed(sc string) {
 func fakeJob(sc string) {
 	f := newFakeSvc()
 	f.register(map[string]any{"kind": "job", "title": "backfill embeddings"})
-	go func() { // read (and ignore) what ai-mux sends
+	go func() { // read (and ignore) what mux sends
 		for {
 			m, _ := f.read()
 			if m["op"] == "error" {

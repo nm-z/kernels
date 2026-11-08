@@ -12,7 +12,7 @@ func findGGUF(t *testing.T) string {
 	t.Helper()
 	home, _ := os.UserHomeDir()
 	for _, p := range []string{
-		os.Getenv("AI_MUX_TEST_GGUF"),
+		os.Getenv("MUX_TEST_GGUF"),
 		home + "/models/qwen3.8-27b-q5/Qwen3.8-27B.Q5_K_M.gguf",
 		"/data/models/qwen3.8-27b-q5/Qwen3.8-27B.Q5_K_M.gguf",
 	} {
@@ -23,7 +23,7 @@ func findGGUF(t *testing.T) string {
 			return p
 		}
 	}
-	t.Skip("no Qwen3.8 GGUF found (set AI_MUX_TEST_GGUF, or put one at ~/models/qwen3.8-27b-q5/Qwen3.8-27B.Q5_K_M.gguf)")
+	t.Skip("no Qwen3.8 GGUF found (set MUX_TEST_GGUF, or put one at ~/models/qwen3.8-27b-q5/Qwen3.8-27B.Q5_K_M.gguf)")
 	return ""
 }
 

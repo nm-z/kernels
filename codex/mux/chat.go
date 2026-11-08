@@ -128,7 +128,7 @@ func (s *Server) handleProps(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCompatModels is GET /v1/models on the compat listener: the one model, named as llama-server names
-// its GGUF. (The main listener's /v1/models is ai-mux's own, with service names as ids.)
+// its GGUF. (The main listener's /v1/models is mux's own, with service names as ids.)
 func (s *Server) handleCompatModels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w, "GET")
@@ -352,7 +352,7 @@ type chatChunk struct {
 
 // chatTimings is llama.cpp's timings object, which web chat reads for its speeds. Live (a chunk on every
 // engine stats tick) it has the counts and speeds so far; at the end the engine's measured values, with
-// prompt_ms and predicted_ms derived from them. idle_pct is ai-mux's own addition.
+// prompt_ms and predicted_ms derived from them. idle_pct is mux's own addition.
 type chatTimings struct {
 	PromptN            int      `json:"prompt_n"`
 	PromptMS           *float64 `json:"prompt_ms,omitempty"`

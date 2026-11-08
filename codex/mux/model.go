@@ -6,7 +6,7 @@ import (
 	"github.com/nm-z/kernels/codex/tmpl"
 )
 
-// Model is what ai-mux needs from a GGUF: the chat template and the vocabulary. *tmpl.Tokenizer is
+// Model is what mux needs from a GGUF: the chat template and the vocabulary. *tmpl.Tokenizer is
 // the real one; tests use a small fake.
 type Model interface {
 	Render(vars map[string]any) (string, error)

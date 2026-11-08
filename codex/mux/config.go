@@ -37,7 +37,7 @@ type ServiceConfig struct {
 	Restart  string            `yaml:"restart"`
 }
 
-// Config is a host's ai-mux.yaml with the services it names loaded from services_dir.
+// Config is a host's mux.yaml with the services it names loaded from services_dir.
 type Config struct {
 	Listen      string
 	Socket      string
@@ -53,7 +53,7 @@ type Config struct {
 
 var defaultEfforts = []string{"none", "low", "medium", "high", "xhigh"}
 
-// hostFile is ai-mux.yaml as written.
+// hostFile is mux.yaml as written.
 type hostFile struct {
 	Listen      string    `yaml:"listen"`
 	Socket      string    `yaml:"socket"`
@@ -98,7 +98,7 @@ func ParseHost(b []byte, base string) (*Host, error) {
 		if d == "" {
 			return nil, fmt.Errorf("socket: not set and there is no XDG_RUNTIME_DIR")
 		}
-		h.Socket = filepath.Join(d, "ai-mux.sock")
+		h.Socket = filepath.Join(d, "mux.sock")
 	}
 	if h.ServicesDir == "" {
 		return nil, fmt.Errorf("services_dir: required (the folder holding NAME/service.yaml)")

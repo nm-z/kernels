@@ -1,4 +1,4 @@
-// Package tmpl is ai-mux's model side: the GGUF tokenizer (byte-level BPE, qwen35 pre-tokenizer) and
+// Package tmpl is mux's model side: the GGUF tokenizer (byte-level BPE, qwen35 pre-tokenizer) and
 // the GGUF chat template (a Jinja interpreter), both in C (../c) linked through cgo.
 package tmpl
 
@@ -12,9 +12,9 @@ package tmpl
 #include "jinja.h"
 #include "json.h"
 
-// aimux_render parses vars (a JSON object) and renders the template with them. The result is
+// mux_render parses vars (a JSON object) and renders the template with them. The result is
 // malloc'ed (free it); on failure it returns NULL and fills err.
-static char *aimux_render(const jinja *t, const char *vars, size_t n, size_t *outn, char *err, size_t errcap) {
+static char *mux_render(const jinja *t, const char *vars, size_t n, size_t *outn, char *err, size_t errcap) {
 	arena *a = arena_new();
 	const char *je = NULL;
 	jv *v = json_parse(a, vars, n, &je);
@@ -85,7 +85,7 @@ func (t *Tokenizer) Render(vars map[string]any) (string, error) {
 	var errbuf [1024]C.char
 	cs := C.CString(string(js))
 	defer C.free(unsafe.Pointer(cs))
-	out := C.aimux_render(t.tpl, cs, C.size_t(len(js)), &n, &errbuf[0], C.size_t(len(errbuf)))
+	out := C.mux_render(t.tpl, cs, C.size_t(len(js)), &n, &errbuf[0], C.size_t(len(errbuf)))
 	if out == nil {
 		return "", errors.New(C.GoString(&errbuf[0]))
 	}

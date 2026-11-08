@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// runID is a run's id. ai-mux makes them (strings); a service may echo them as numbers.
+// runID is a run's id. mux makes them (strings); a service may echo them as numbers.
 type runID string
 
 func (r *runID) UnmarshalJSON(b []byte) error {
@@ -334,7 +334,7 @@ func (s *Server) handleConn(nc net.Conn) {
 		return
 	}
 	if uid != os.Getuid() {
-		refuse(nc, "peer uid %d is not ai-mux's", uid)
+		refuse(nc, "peer uid %d is not mux's", uid)
 		return
 	}
 	// the supervision loop records the process right after starting it; a very quick service may be first
@@ -349,8 +349,8 @@ func (s *Server) handleConn(nc net.Conn) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	if p == nil || !p.contains(pid) {
-		s.logf("register for %s refused: pid %d is not in the process ai-mux started", reg.Service, pid)
-		refuse(nc, "peer pid %d is not a process ai-mux started for service %s", pid, reg.Service)
+		s.logf("register for %s refused: pid %d is not in the process mux started", reg.Service, pid)
+		refuse(nc, "peer pid %d is not a process mux started for service %s", pid, reg.Service)
 		return
 	}
 	if reg.Kind != svc.kind {

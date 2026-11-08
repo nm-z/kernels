@@ -17,10 +17,10 @@ import (
 )
 
 // The test binary doubles as the engine: an endpoint's command is the test binary itself with
-// AIMUX_FAKE_ENGINE=<scenario>; TestMain turns that into fakeEngine().
+// MUX_FAKE_ENGINE=<scenario>; TestMain turns that into fakeEngine().
 func TestMain(m *testing.M) {
-	if sc := os.Getenv("AIMUX_FAKE_ENGINE"); sc != "" {
-		switch os.Getenv("AIMUX_FAKE_KIND") {
+	if sc := os.Getenv("MUX_FAKE_ENGINE"); sc != "" {
+		switch os.Getenv("MUX_FAKE_KIND") {
 		case KindShim:
 			fakeShim(sc)
 		case KindEmbed:
@@ -205,7 +205,7 @@ type fakeRun struct {
 }
 
 func fakeEngine(scenario string) {
-	out := os.Getenv("AIMUX_FAKE_OUT")
+	out := os.Getenv("MUX_FAKE_OUT")
 	note := func(name, s string) {
 		if out == "" {
 			return
@@ -217,7 +217,7 @@ func fakeEngine(scenario string) {
 		}
 	}
 	var model Model = fakeModel{}
-	if g := os.Getenv("AIMUX_FAKE_GGUF"); g != "" {
+	if g := os.Getenv("MUX_FAKE_GGUF"); g != "" {
 		tk, err := tmpl.Load(g)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "fake engine:", err)
@@ -225,7 +225,7 @@ func fakeEngine(scenario string) {
 		}
 		model = tk
 	}
-	conn, err := net.Dial("unix", os.Getenv("AI_MUX_SOCK"))
+	conn, err := net.Dial("unix", os.Getenv("MUX_SOCK"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "fake engine:", err)
 		os.Exit(2)
@@ -242,11 +242,11 @@ func fakeEngine(scenario string) {
 		positions = 10
 	}
 	maxNew := 8192
-	if s := os.Getenv("AIMUX_FAKE_MAXNEW"); s != "" {
+	if s := os.Getenv("MUX_FAKE_MAXNEW"); s != "" {
 		maxNew, _ = strconv.Atoi(s)
 	}
 	slots := 1
-	if s := os.Getenv("AIMUX_FAKE_SLOTS"); s != "" {
+	if s := os.Getenv("MUX_FAKE_SLOTS"); s != "" {
 		slots, _ = strconv.Atoi(s)
 	}
 	if scenario == "spawn" {
@@ -255,7 +255,7 @@ func fakeEngine(scenario string) {
 		note("child.pid", strconv.Itoa(child.Process.Pid)+"\n")
 	}
 	note("pid", strconv.Itoa(os.Getpid())+"\n")
-	send(map[string]any{"op": "register", "service": os.Getenv("AI_MUX_SERVICE"), "kind": "engine", "positions": positions, "max_new": maxNew, "slots": slots, "vision": true})
+	send(map[string]any{"op": "register", "service": os.Getenv("MUX_SERVICE"), "kind": "engine", "positions": positions, "max_new": maxNew, "slots": slots, "vision": true})
 
 	br := bufio.NewReaderSize(conn, 1<<20)
 	var mu sync.Mutex
@@ -312,7 +312,7 @@ func fakeEngine(scenario string) {
 			rj, _ := json.Marshal(map[string]any{"ids": len(m.IDs), "max_new": m.MaxNew, "stop": m.Stop, "images": m.Images})
 			note("run.json", string(rj)+"\n")
 			go func() {
-				// the slot is free before the last line goes out: ai-mux may send the next run at once
+				// the slot is free before the last line goes out: mux may send the next run at once
 				var once sync.Once
 				release := func() { once.Do(func() { mu.Lock(); active--; delete(runs, m.ID); mu.Unlock() }) }
 				defer release()
@@ -339,7 +339,7 @@ func fakeRunOne(scenario string, model Model, r *fakeRun, send func(map[string]a
 		return
 	}
 	if scenario == "silent" {
-		// the engine says nothing for a while: ai-mux still sends a stats event every 500 ms
+		// the engine says nothing for a while: mux still sends a stats event every 500 ms
 		send(map[string]any{"op": "prefill", "id": r.id, "done": 0, "total": np})
 		time.Sleep(1700 * time.Millisecond)
 		send(map[string]any{"op": "prefill", "id": r.id, "done": np, "total": np})

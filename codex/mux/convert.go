@@ -118,7 +118,7 @@ func prepare(body []byte, sc *ServiceConfig) (*prepared, *apiError) {
 		return nil, aerr
 	}
 	if v, ok := top["previous_response_id"]; ok && !isNull(v) {
-		return nil, badRequest("unsupported_parameter", "previous_response_id", "previous_response_id is not supported: ai-mux keeps no responses, send the whole input")
+		return nil, badRequest("unsupported_parameter", "previous_response_id", "previous_response_id is not supported: mux keeps no responses, send the whole input")
 	}
 	p := &prepared{toolInfo: map[string]*toolInfo{}}
 	if v, ok := top["model"]; ok {

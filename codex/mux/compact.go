@@ -32,7 +32,7 @@ type compactionPayload struct {
 
 // encodeCompaction is the opaque encrypted_content of a compaction item: base64 of a small JSON.
 func encodeCompaction(model, summary string) string {
-	b, _ := json.Marshal(compactionPayload{V: 1, By: "ai-mux", Model: model, Created: time.Now().UTC().Format(time.RFC3339), Summary: summary})
+	b, _ := json.Marshal(compactionPayload{V: 1, By: "mux", Model: model, Created: time.Now().UTC().Format(time.RFC3339), Summary: summary})
 	return base64.StdEncoding.EncodeToString(b)
 }
 
@@ -42,8 +42,8 @@ func decodeCompaction(enc string) (string, error) {
 		return "", errors.New("compaction encrypted_content is not base64")
 	}
 	var p compactionPayload
-	if err := json.Unmarshal(b, &p); err != nil || p.By != "ai-mux" || p.V != 1 {
-		return "", errors.New("compaction encrypted_content is not an ai-mux summary")
+	if err := json.Unmarshal(b, &p); err != nil || p.By != "mux" || p.V != 1 {
+		return "", errors.New("compaction encrypted_content is not a mux summary")
 	}
 	return p.Summary, nil
 }
@@ -155,7 +155,7 @@ func fitCompaction(m Model, pr *prepared, ctx int) (prompt string, ids []uint32,
 	return prompt, ids, k, nil
 }
 
-// estimateTokens is a rough token count for a provider ai-mux cannot tokenize for (about 4 bytes each).
+// estimateTokens is a rough token count for a provider mux cannot tokenize for (about 4 bytes each).
 func estimateTokens(v any) int {
 	b, _ := json.Marshal(v)
 	return (len(b) + 3) / 4

@@ -1,4 +1,4 @@
-# Using ai-mux
+# Using mux
 
 Point any Responses API client at `http://HOST:18100/v1`. A client chooses the model (a service's name) and the
 reasoning effort; the server sets context, sampling and budgets, and refuses (400) `temperature`, `top_p`,
@@ -8,11 +8,11 @@ service does not offer.
 ## Codex (`~/.codex/config.toml`)
 
     model = "qwen3.8-27b"
-    model_provider = "ai-mux"
+    model_provider = "mux"
     model_reasoning_effort = "high"         # none low medium high xhigh, as the service's `efforts`
 
-    [model_providers.ai-mux]
-    name = "ai-mux"
+    [model_providers.mux]
+    name = "mux"
     base_url = "http://HOST:18100/v1"
     wire_api = "responses"
     stream_idle_timeout_ms = 600000          # a long prompt prefills for minutes before the first token
@@ -25,7 +25,7 @@ A run that reaches the output budget ends with `response.incomplete` (`max_outpu
 `GET /v1/models` gives each model's `ctx`; a response's `usage` says how full it is; a prompt that does not
 fit is a 400 `context_length_exceeded`. To compact, send the conversation plus `{"type":"compaction_trigger"}`
 as the last input item: the answer is one `{"type":"compaction","id":"cmp_…","encrypted_content":…}` item
-(a summary, opaque to you). Keep it in the history in place of what it summarizes; ai-mux expands it back into
+(a summary, opaque to you). Keep it in the history in place of what it summarizes; mux expands it back into
 the summary in later requests.
 
 ## Extra stream event: `response.ai_mux.stats`

@@ -15,11 +15,11 @@ import (
 )
 
 // proc is a running service process. With systemd it lives in the transient scope
-// ai-mux-<name>.scope (BindsTo=ai-mux.service); without, it leads its own process group.
+// mux-<name>.scope (BindsTo=mux.service); without, it leads its own process group.
 type proc struct {
 	cmd    *exec.Cmd
 	pid    int
-	scope  string // "ai-mux-<name>.scope", or "" without systemd
+	scope  string // "mux-<name>.scope", or "" without systemd
 	log    *os.File
 	exited chan struct{}
 	err    error // cmd.Wait's result, valid after exited is closed
@@ -33,11 +33,11 @@ type proc struct {
 var unitUnsafe = regexp.MustCompile(`[^A-Za-z0-9:_.-]`)
 
 func scopeName(service string) string {
-	return "ai-mux-" + unitUnsafe.ReplaceAllString(service, "_") + ".scope"
+	return "mux-" + unitUnsafe.ReplaceAllString(service, "_") + ".scope"
 }
 
 // useSystemd decides how services are started: "systemd" always, "plain" never, "auto" (the
-// default) when ai-mux itself runs as ai-mux.service.
+// default) when mux itself runs as mux.service.
 func useSystemd(mode, unit string) bool {
 	switch mode {
 	case "systemd":
@@ -60,7 +60,7 @@ func (p *proc) mark(format string, args ...any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.log != nil && !p.logCl {
-		fmt.Fprintf(p.log, "ai-mux: %s %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
+		fmt.Fprintf(p.log, "mux: %s %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
 	}
 }
 
@@ -103,8 +103,8 @@ func (s *Server) startProc(e *Service) (*proc, error) {
 		return nil, err
 	}
 	cfg := e.cfg
-	env := append(os.Environ(), "AI_MUX_SOCK="+s.cfg.Socket, "AI_MUX_SERVICE="+e.name, "AI_MUX_SERVICE_DIR="+cfg.Dir)
-	setenv := []string{"--setenv=AI_MUX_SOCK=" + s.cfg.Socket, "--setenv=AI_MUX_SERVICE=" + e.name, "--setenv=AI_MUX_SERVICE_DIR=" + cfg.Dir}
+	env := append(os.Environ(), "MUX_SOCK="+s.cfg.Socket, "MUX_SERVICE="+e.name, "MUX_SERVICE_DIR="+cfg.Dir)
+	setenv := []string{"--setenv=MUX_SOCK=" + s.cfg.Socket, "--setenv=MUX_SERVICE=" + e.name, "--setenv=MUX_SERVICE_DIR=" + cfg.Dir}
 	keys := make([]string, 0, len(cfg.Env))
 	for k := range cfg.Env {
 		keys = append(keys, k)
@@ -118,7 +118,7 @@ func (s *Server) startProc(e *Service) (*proc, error) {
 	var cmd *exec.Cmd
 	if s.systemd {
 		p.scope = scopeName(e.name)
-		// a scope left by a crashed ai-mux must not block the unit name
+		// a scope left by a crashed mux must not block the unit name
 		exec.Command("systemctl", "--user", "stop", p.scope).Run()
 		args := []string{"--user", "--scope", "--unit=" + strings.TrimSuffix(p.scope, ".scope"), "--collect",
 			"-p", "BindsTo=" + s.unit, "-p", "After=" + s.unit, "-p", "TimeoutStopSec=10"}
@@ -139,7 +139,7 @@ func (s *Server) startProc(e *Service) (*proc, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	p.cmd = cmd
 	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(lf, "ai-mux: %s start failed: %v\n", time.Now().Format(time.RFC3339), err)
+		fmt.Fprintf(lf, "mux: %s start failed: %v\n", time.Now().Format(time.RFC3339), err)
 		lf.Close()
 		return nil, err
 	}
@@ -235,7 +235,7 @@ type syscallConn interface {
 	SyscallConn() (syscall.RawConn, error)
 }
 
-// inService reports whether pid is one of the processes ai-mux started for p: in its scope, or (no
+// inService reports whether pid is one of the processes mux started for p: in its scope, or (no
 // systemd) its descendant.
 func (p *proc) contains(pid int) bool {
 	if p.scope != "" {

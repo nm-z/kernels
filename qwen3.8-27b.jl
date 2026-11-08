@@ -3,7 +3,7 @@
 # runs a whole request: the prefill (GEMMs over as many positions as fit) then the decode loop (GEMVs).
 # Model: mradermacher/Qwen3.8-27B-GGUF Q5_K_M (static K-quants: Q5_K, Q6_K, F32; its MTP layer is blk.64).
 # Reports only: prefill tok/s, decode tok/s, idle time %.
-#   julia -t 24 qwen3.8-27b.jl --model FILE [--console SOCK]   (an ai-mux endpoint: ai-mux starts it, codex/PROTOCOL.md)
+#   julia -t 24 qwen3.8-27b.jl --model FILE [--console SOCK]   (a mux service: mux starts it, codex/PROTOCOL.md)
 using AMDGPU, Mmap, Printf, Sockets
 
 # ---------------------------------------------------------------------------------------------
@@ -1781,7 +1781,7 @@ const BDEC = let bs = [33:126; 161:172; 174:255], cs = copy(bs), n = 0
 end
 detok(vocab, ids) = String(UInt8[get(BDEC, ch, UInt8('?')) for i in ids for ch in vocab[i+1]])
 
-# ---- serving: runs come from ai-mux (codex/PROTOCOL.md) through AiMux.jl, which talks the protocol; this
+# ---- serving: runs come from mux (codex/PROTOCOL.md) through Mux.jl, which talks the protocol; this
 # engine only turns token ids into token ids. The weights load once and the persistent kernel compiles once.
 # A development console also listens on a Unix socket when --console SOCK is given, one command a connection:
 #   gen N ID ID ...            greedy: N tokens after the given token ids
@@ -1790,7 +1790,7 @@ detok(vocab, ids) = String(UInt8[get(BDEC, ch, UInt8('?')) for i in ids for ch i
 #   reload                     include this file again and recompile the kernel (the weights stay resident)
 #   eval CODE                  run Julia code in the server, print its value
 #   echo 'gen 32 9707 11' | socat - UNIX-CONNECT:SOCK
-isdefined(Main, :AiMux) || include(joinpath(@__DIR__, "codex", "julia", "AiMux.jl"))
+isdefined(Main, :Mux) || include(joinpath(@__DIR__, "codex", "julia", "Mux.jl"))
 if !isdefined(Main, :SRV)
     const SRV = Ref{Any}(nothing)
 end
@@ -1829,16 +1829,16 @@ function serve(path, console)
             end
         end
     end
-    if haskey(ENV, "AI_MUX_SOCK")
-        AiMux.serve(r -> lock(() -> Base.invokelatest(run!, r), ENGLK); positions = MAXCTX, max_new = PK[].maxgen, slots = 1)
-        println("ai-mux closed the connection"); flush(stdout)
+    if haskey(ENV, "MUX_SOCK")
+        Mux.serve(r -> lock(() -> Base.invokelatest(run!, r), ENGLK); positions = MAXCTX, max_new = PK[].maxgen, slots = 1)
+        println("mux closed the connection"); flush(stdout)
     else
-        console === nothing && error("neither AI_MUX_SOCK nor --console: nothing to serve")
+        console === nothing && error("neither MUX_SOCK nor --console: nothing to serve")
         wait(Condition())
     end
 end
-# one ai-mux run: the kernel writes tokens and the prompt positions it has run to host memory; they go out as it does,
-# and a cancel from ai-mux stops the kernel at its next check (a forward at decode, a layer in a prefill)
+# one mux run: the kernel writes tokens and the prompt positions it has run to host memory; they go out as it does,
+# and a cancel from mux stops the kernel at its next check (a forward at decode, a layer in a prefill)
 function run!(r)
     PE = PK[]; ids = r.ids; nnew = clamp(r.max_new, 1, min(PE.maxgen, MAXCTX - length(ids)))
     stops = (length(r.stop) >= 1 ? r.stop[1] : -1, length(r.stop) >= 2 ? r.stop[2] : -1)
@@ -1854,26 +1854,26 @@ function run!(r)
             t = unsafe_load(outp, n + 1); t < 0 && break
             n += 1; push!(new, t); (t == stops[1] || t == stops[2]) && (stopped = true)
         end
-        AiMux.tokens!(r, new)
+        Mux.tokens!(r, new)
     end
     # the idle % so far, measured off the token path (a copy can wait behind the kernels)
     st = liveidle_state()
     sampler = Threads.@spawn while !istaskdone(job)
         x = try liveidle!(st) catch; NaN end
-        isnan(x) || AiMux.idle!(r, x)
+        isnan(x) || Mux.idle!(r, x)
         sleep(0.4)
     end
     while !istaskdone(job)
-        n == 0 && AiMux.prefill!(r, Int(unsafe_load(hw(14))))
+        n == 0 && Mux.prefill!(r, Int(unsafe_load(hw(14))))
         pump()
-        AiMux.cancelled(r) && unsafe_store!(hw(13), UInt32(1))
+        Mux.cancelled(r) && unsafe_store!(hw(13), UInt32(1))
         sleep(0.005)
     end
     res = fetch(job); pump(); wait(sampler)
     pt = length(ids) / res[3]; dt = max(n - 1, 0) / max(res[4], 1e-9); idle = idlepct(res[2])
-    AiMux.done!(r; prefill_tps = pt, decode_tps = dt, idle_pct = idle, stopped)
+    Mux.done!(r; prefill_tps = pt, decode_tps = dt, idle_pct = idle, stopped)
     @printf("run %s: %d prompt, %d out, prefill %.2f tok/s, decode %.2f tok/s, idle time %.1f%%%s\n", r.id, length(ids), n,
-            pt, dt, idle, AiMux.cancelled(r) ? " (cancelled)" : ""); flush(stdout)
+            pt, dt, idle, Mux.cancelled(r) ? " (cancelled)" : ""); flush(stdout)
 end
 function handle(c, line)
     a = split(line); s = SRV[]
@@ -1898,7 +1898,7 @@ function handle(c, line)
     end
 end
 
-# julia -t 24 qwen3.8-27b.jl --model FILE [--console SOCK]   (started by ai-mux, which sets AI_MUX_SOCK)
+# julia -t 24 qwen3.8-27b.jl --model FILE [--console SOCK]   (started by mux, which sets MUX_SOCK)
 function main(args)
     k = findfirst(==("--model"), args); i = findfirst(==("--console"), args)
     k === nothing && error("usage: julia -t 24 qwen3.8-27b.jl --model FILE [--console SOCK]")

@@ -50,7 +50,7 @@ type jobResult struct {
 	message string
 }
 
-// Service is one thing ai-mux serves: its configuration, its process and its registered connection.
+// Service is one thing mux serves: its configuration, its process and its registered connection.
 type Service struct {
 	s       *Server
 	cfg     *ServiceConfig

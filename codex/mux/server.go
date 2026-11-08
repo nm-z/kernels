@@ -1,7 +1,7 @@
-// Package mux is ai-mux: the one process on a host that serves AI. Everything AI on the host (a model
-// engine, a shim over another provider, an embedding server, a job) is a service: one process ai-mux
+// Package mux is mux: the one process on a host that serves AI. Everything AI on the host (a model
+// engine, a shim over another provider, an embedding server, a job) is a service: one process mux
 // starts and stops itself, in a systemd scope, and that registers with it over a Unix socket. Clients
-// talk to ai-mux over HTTP. See ../PROTOCOL.md.
+// talk to mux over HTTP. See ../PROTOCOL.md.
 package mux
 
 import (
@@ -20,10 +20,10 @@ import (
 // Options configure a Server.
 type Options struct {
 	Config     *Config
-	LogDir     string                           // service logs and events.db; default $XDG_STATE_HOME/ai-mux or ~/.local/state/ai-mux
+	LogDir     string                           // service logs and events.db; default $XDG_STATE_HOME/mux or ~/.local/state/mux
 	EventsDB   string                           // default LogDir/events.db
-	Supervisor string                           // "auto" (default), "systemd" or "plain"; also AI_MUX_SUPERVISOR
-	Unit       string                           // the unit scopes are bound to (default ai-mux.service; also AI_MUX_UNIT)
+	Supervisor string                           // "auto" (default), "systemd" or "plain"; also MUX_SUPERVISOR
+	Unit       string                           // the unit scopes are bound to (default mux.service; also MUX_UNIT)
 	LoadModel  func(string) (Model, error)      // default LoadTokenizer
 	Logf       func(format string, args ...any) // default log.Printf
 	KillGrace  time.Duration                    // plain mode: SIGTERM to SIGKILL (default 10 s)
@@ -33,7 +33,7 @@ type Options struct {
 	JobFinishGrace   time.Duration // how long a job's process may linger after `finished` (default 30 s)
 }
 
-// Server is ai-mux.
+// Server is mux.
 type Server struct {
 	cfg         *Config
 	hub         *Hub
@@ -84,7 +84,7 @@ func New(o Options) (*Server, error) {
 			home, _ := os.UserHomeDir()
 			base = filepath.Join(home, ".local", "state")
 		}
-		s.logDir = filepath.Join(base, "ai-mux")
+		s.logDir = filepath.Join(base, "mux")
 	}
 	if err := os.MkdirAll(s.logDir, 0o755); err != nil {
 		return nil, err
@@ -100,7 +100,7 @@ func New(o Options) (*Server, error) {
 	s.hub = hub
 	mode := o.Supervisor
 	if mode == "" {
-		mode = os.Getenv("AI_MUX_SUPERVISOR")
+		mode = os.Getenv("MUX_SUPERVISOR")
 	}
 	s.minBack = o.MinBackoff
 	if s.minBack == 0 {
@@ -116,10 +116,10 @@ func New(o Options) (*Server, error) {
 	}
 	s.unit = o.Unit
 	if s.unit == "" {
-		s.unit = os.Getenv("AI_MUX_UNIT")
+		s.unit = os.Getenv("MUX_UNIT")
 	}
 	if s.unit == "" {
-		s.unit = "ai-mux.service"
+		s.unit = "mux.service"
 	}
 	s.systemd = useSystemd(mode, s.unit)
 	for _, c := range s.cfg.Services {
@@ -153,7 +153,7 @@ func (s *Server) Service(name string) *Service { return s.svcs[name] }
 // Hub is the event hub (GET /v1/events, events.db).
 func (s *Server) Hub() *Hub { return s.hub }
 
-// Addr is the HTTP address ai-mux listens on.
+// Addr is the HTTP address mux listens on.
 func (s *Server) Addr() string { return s.httpLn.Addr().String() }
 
 // CompatAddr is the address of the llama.cpp face (compat_listen), or "" if there is none.
@@ -172,7 +172,7 @@ func (s *Server) Start() error {
 	}
 	if c, err := net.DialTimeout("unix", sock, time.Second); err == nil {
 		c.Close()
-		return fmt.Errorf("%s: another ai-mux is already listening", sock)
+		return fmt.Errorf("%s: another mux is already listening", sock)
 	}
 	os.Remove(sock)
 	ln, err := net.Listen("unix", sock)
@@ -216,10 +216,10 @@ func (s *Server) Start() error {
 			e.loop()
 		}(e)
 	}
-	s.hub.Publish("ai-mux.start", map[string]any{"listen": hl.Addr().String(), "services": len(s.order)})
-	s.logf("ai-mux: listening on %s, services on %s (%s), %d services", hl.Addr(), sock, map[bool]string{true: "systemd scopes", false: "plain process groups"}[s.systemd], len(s.order))
+	s.hub.Publish("mux.start", map[string]any{"listen": hl.Addr().String(), "services": len(s.order)})
+	s.logf("mux: listening on %s, services on %s (%s), %d services", hl.Addr(), sock, map[bool]string{true: "systemd scopes", false: "plain process groups"}[s.systemd], len(s.order))
 	if s.compatLn != nil {
-		s.logf("ai-mux: llama.cpp face for %s on %s", s.cfg.CompatService, s.compatLn.Addr())
+		s.logf("mux: llama.cpp face for %s on %s", s.cfg.CompatService, s.compatLn.Addr())
 	}
 	return nil
 }
@@ -246,7 +246,7 @@ func (s *Server) Shutdown() {
 		s.sockLn.Close()
 		os.Remove(s.cfg.Socket)
 	}
-	s.hub.Publish("ai-mux.stop", nil)
+	s.hub.Publish("mux.stop", nil)
 	s.hub.Close()
 }
 

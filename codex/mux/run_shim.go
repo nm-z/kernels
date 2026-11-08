@@ -124,7 +124,7 @@ func (s *Server) finishShim(w http.ResponseWriter, pr *prepared, rb *respBuilder
 	if len(res.trying) > 0 {
 		am["route"] = res.trying
 	}
-	completeResponse(w, pr, rb, usage, false, map[string]any{"ai_mux": am})
+	completeResponse(w, pr, rb, usage, false, map[string]any{"mux": am})
 }
 
 func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q *shimReq) (res *shimResult) {

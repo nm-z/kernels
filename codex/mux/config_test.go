@@ -16,14 +16,14 @@ func TestConfigSentry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h.Listen != "0.0.0.0:18100" || h.Socket != "/run/user/1000/ai-mux.sock" || h.ServicesDir != "/data/ai-mux/services" ||
+	if h.Listen != "0.0.0.0:18100" || h.Socket != "/run/user/1000/mux.sock" || h.ServicesDir != "/data/mux/services" ||
 		len(h.Services) != 1 || h.Services[0].Name != "qwen3.8-27b" || !h.Services[0].Up ||
 		h.CompatListen != "0.0.0.0:18101" || h.CompatService != "qwen3.8-27b" {
 		t.Fatalf("host: %+v", h)
 	}
 	// the host file points at a checkout on sentry; load the same file against this repo's services/
-	here := strings.Replace(string(b), "/data/ai-mux/services", "../services", 1)
-	p := filepath.Join(t.TempDir(), "ai-mux.yaml")
+	here := strings.Replace(string(b), "/data/mux/services", "../services", 1)
+	p := filepath.Join(t.TempDir(), "mux.yaml")
 	os.WriteFile(p, []byte(strings.Replace(here, "../services", mustAbs(t, "../services"), 1)), 0o644)
 	c, err := LoadConfig(p)
 	if err != nil {
@@ -75,7 +75,7 @@ func TestConfigParseAndSetUp(t *testing.T) {
 	writeService(t, dir, "a", "kind: engine\ngguf: /g.gguf\nctx: 1000\ncommand: [sleep, \"1\"]\nenv: {N: 24, S: x}\n")
 	writeService(t, dir, "b", "kind: shim\nctx: 5000\ncommand: [./run.sh]\ncwd: sub\nrestart: no\n")
 	writeService(t, dir, "c", "kind: job\ncommand: [train]\n")
-	p := filepath.Join(dir, "ai-mux.yaml")
+	p := filepath.Join(dir, "mux.yaml")
 	os.WriteFile(p, []byte(strings.Replace(sampleHost, "SVCDIR", "'.'", 1)), 0o644) // relative to the file
 	c, err := LoadConfig(p)
 	if err != nil {

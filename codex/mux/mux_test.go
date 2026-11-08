@@ -189,7 +189,7 @@ func TestResponsesStreaming(t *testing.T) {
 		in.PID == 0 || in.Ctx != 100000 || in.Slots != 1 || in.Device != "test device" || in.Since == "" || !strings.HasSuffix(in.Log, "m1.log") {
 		t.Errorf("endpoint info %+v", in)
 	}
-	if lg, _ := os.ReadFile(in.Log); !strings.Contains(string(lg), "ai-mux:") || !strings.Contains(string(lg), "start pid=") {
+	if lg, _ := os.ReadFile(in.Log); !strings.Contains(string(lg), "mux:") || !strings.Contains(string(lg), "start pid=") {
 		t.Errorf("log %s: %q", in.Log, lg)
 	}
 
@@ -228,8 +228,8 @@ func TestResponsesNonStreaming(t *testing.T) {
 	if r["status"] != "completed" || r["object"] != "response" || len(out) != 4 || out[0].(map[string]any)["type"] != "reasoning" || out[3].(map[string]any)["type"] != "custom_tool_call" {
 		t.Fatalf("response %v", r)
 	}
-	if am := r["ai_mux"].(map[string]any); am["decode_tps"] != 67.8 || am["idle_pct"] != 4.2 {
-		t.Errorf("ai_mux %v", am)
+	if am := r["mux"].(map[string]any); am["decode_tps"] != 67.8 || am["idle_pct"] != 4.2 {
+		t.Errorf("mux %v", am)
 	}
 	// no stats events and no SSE in non-streaming mode
 	if r["usage"].(map[string]any)["output_tokens"] != float64(len(mustEncode(fakeAnswer))) {
@@ -602,10 +602,10 @@ func TestRestartNoStaysFailedUntilUp(t *testing.T) {
 
 func TestDownKillsEverythingAndRewritesYAML(t *testing.T) {
 	dir := shortDir(t)
-	cfgPath := filepath.Join(dir, "ai-mux.yaml")
+	cfgPath := filepath.Join(dir, "mux.yaml")
 	out := filepath.Join(dir, "out")
 	os.MkdirAll(out, 0o755)
-	svc := "kind: engine\ngguf: fake.gguf\nctx: 1000\ncommand: [" + os.Args[0] + "]\nenv: {AIMUX_FAKE_ENGINE: spawn, AIMUX_FAKE_OUT: " + out + "}\npost_stop: [sh, -c, \"echo stopped > " + filepath.Join(out, "post_stop") + "\"]\nrestart: no\n"
+	svc := "kind: engine\ngguf: fake.gguf\nctx: 1000\ncommand: [" + os.Args[0] + "]\nenv: {MUX_FAKE_ENGINE: spawn, MUX_FAKE_OUT: " + out + "}\npost_stop: [sh, -c, \"echo stopped > " + filepath.Join(out, "post_stop") + "\"]\nrestart: no\n"
 	writeService(t, filepath.Join(dir, "svcs"), "m", svc)
 	yaml := "# test\nlisten: 127.0.0.1:0\nsocket: " + filepath.Join(dir, "s.sock") + "\nservices_dir: svcs\nservices:\n  m: {up: true} # keep\n"
 	os.WriteFile(cfgPath, []byte(yaml), 0o644)

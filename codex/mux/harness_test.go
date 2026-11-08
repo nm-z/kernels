@@ -46,7 +46,7 @@ type tenv struct {
 // shortDir is a short temp dir (a Unix socket path is limited to about 100 bytes).
 func shortDir(t *testing.T) string {
 	t.Helper()
-	d, err := os.MkdirTemp("", "aimux")
+	d, err := os.MkdirTemp("", "mux")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,15 +65,15 @@ func startMuxOpts(t *testing.T, opts Options, specs ...epSpec) *tenv {
 	os.MkdirAll(out, 0o755)
 	cfg := &Config{Listen: "127.0.0.1:0", Socket: filepath.Join(dir, "s.sock")}
 	for _, sp := range specs {
-		env := map[string]string{"AIMUX_FAKE_ENGINE": sp.scenario, "AIMUX_FAKE_OUT": out}
+		env := map[string]string{"MUX_FAKE_ENGINE": sp.scenario, "MUX_FAKE_OUT": out}
 		if sp.slots > 0 {
-			env["AIMUX_FAKE_SLOTS"] = strconv.Itoa(sp.slots)
+			env["MUX_FAKE_SLOTS"] = strconv.Itoa(sp.slots)
 		}
 		if sp.maxNew > 0 {
-			env["AIMUX_FAKE_MAXNEW"] = strconv.Itoa(sp.maxNew)
+			env["MUX_FAKE_MAXNEW"] = strconv.Itoa(sp.maxNew)
 		}
 		if sp.gguf != "" {
-			env["AIMUX_FAKE_GGUF"] = sp.gguf
+			env["MUX_FAKE_GGUF"] = sp.gguf
 		}
 		for k, v := range sp.extraEnv {
 			env[k] = v
@@ -98,7 +98,7 @@ func startMuxOpts(t *testing.T, opts Options, specs ...epSpec) *tenv {
 		if kind == "" {
 			kind = KindEngine
 		}
-		env["AIMUX_FAKE_KIND"] = kind
+		env["MUX_FAKE_KIND"] = kind
 		if kind == KindEmbed || kind == KindJob {
 			ctxN, efforts, gguf = 0, nil, ""
 		}
@@ -307,7 +307,7 @@ func waitFor(t *testing.T, d time.Duration, what string, f func() bool) {
 
 func syscallKill(pid int) { syscall.Kill(pid, syscall.SIGKILL) }
 
-// rogueRegister connects to the engine socket from this process and registers; it returns what ai-mux answered.
+// rogueRegister connects to the engine socket from this process and registers; it returns what mux answered.
 func rogueRegister(t *testing.T, sock, endpoint string) string {
 	t.Helper()
 	c, err := net.Dial("unix", sock)

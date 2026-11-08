@@ -17,7 +17,7 @@ const (
 	imageWait   = 2 * time.Minute
 )
 
-// respondEngine answers a /v1/responses request on an engine service: ai-mux renders the chat template,
+// respondEngine answers a /v1/responses request on an engine service: mux renders the chat template,
 // tokenizes, and turns the engine's token ids back into the Responses stream.
 func (s *Server) respondEngine(w http.ResponseWriter, r *http.Request, svc *Service, conn *svcConn, pr *prepared) {
 	svc.mu.Lock()
@@ -152,7 +152,7 @@ func (s *Server) finishEngine(w http.ResponseWriter, pr *prepared, rb *respBuild
 	if d.IdlePct != nil {
 		am["idle_pct"] = *d.IdlePct
 	}
-	completeResponse(w, pr, rb, usage, incomplete, map[string]any{"ai_mux": am})
+	completeResponse(w, pr, rb, usage, incomplete, map[string]any{"mux": am})
 }
 
 // ---- running on the engine -------------------------------------------------------------------------------

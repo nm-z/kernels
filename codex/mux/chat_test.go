@@ -126,7 +126,7 @@ func TestChatCompletionsLikeTheGateway(t *testing.T) {
 	cs := readChatStream(t, resp.Body)
 	resp.Body.Close()
 
-	// plain chat completions: no event names, no comments, no ai-mux events; ends with [DONE]
+	// plain chat completions: no event names, no comments, no mux events; ends with [DONE]
 	if len(cs.other) != 0 || !cs.done {
 		t.Fatalf("other lines %q, [DONE] %v", cs.other, cs.done)
 	}

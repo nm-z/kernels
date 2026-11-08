@@ -110,7 +110,7 @@ func TestShimStreaming(t *testing.T) {
 	var r map[string]any
 	json.NewDecoder(resp.Body).Decode(&r)
 	resp.Body.Close()
-	if r["status"] != "completed" || len(r["output"].([]any)) != 4 || r["ai_mux"].(map[string]any)["ttft_ms"] != 123.5 {
+	if r["status"] != "completed" || len(r["output"].([]any)) != 4 || r["mux"].(map[string]any)["ttft_ms"] != 123.5 {
 		t.Errorf("non-streaming %v", r)
 	}
 }
