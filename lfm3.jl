@@ -87,13 +87,13 @@ end
 sync() = KernelAbstractions.synchronize(BE)
 
 # ---- device primitives; a BF16 is a Float32's upper half ----
-@inline ld(p::LP{T}, i) where {T} = unsafe_load(p, i + 1)
-@inline st!(p::LP{T}, v, i) where {T} = unsafe_store!(p, v, i + 1)
+@inline ld(p::LP{T}, i) where {T} = unsafe_load(p, i + 1, Val(sizeof(T)))   # (natural alignment: the default makes a 4-byte load four byte loads)
+@inline st!(p::LP{T}, v, i) where {T} = unsafe_store!(p, v, i + 1, Val(sizeof(T)))
 @inline bfr(x::Float32) = (u = reinterpret(UInt32, x); reinterpret(Float32, (u + 0x00007fff + ((u >> 16) & 0x1)) & 0xffff0000))
 @inline rdv(p::LP{UInt8}, dt::Int32, i::Int64) = dt == Int32(1) ? reinterpret(Float32, UInt32(ld(reinterpret(LP{UInt16}, p), i)) << 16) : ld(reinterpret(LP{Float32}, p), i)
 @inline wrv!(p::LP{UInt8}, dt::Int32, v::Float32, i::Int64) = dt == Int32(1) ? st!(reinterpret(LP{UInt16}, p), (reinterpret(UInt32, bfr(v)) >> 16) % UInt16, i) : st!(reinterpret(LP{Float32}, p), v, i)
 @inline sigm(x::Float32) = 1.0f0 / (1.0f0 + exp(-x))
-const SCOPE = CUDAON ? "syncscope(\"device\") " : "syncscope(\"agent\") "   # (the card's scope: a host flag still reaches memory, the fence is system-wide)
+const SCOPE = CUDAON ? "syncscope(\"device\") " : "syncscope(\"agent\") "
 @eval @inline atomadd!(p::LP{UInt32}, v::UInt32) = Base.llvmcall($("%p = inttoptr i64 %0 to ptr addrspace(1)\n%r = atomicrmw add ptr addrspace(1) %p, i32 %1 $(SCOPE)seq_cst\nret i32 %r"), UInt32, Tuple{Int64,UInt32}, Core.Intrinsics.bitcast(Int64, p), v)
 @eval @inline fadd!(p::LP{Float32}, v::Float32) = Base.llvmcall($("%p = inttoptr i64 %0 to ptr addrspace(1)\n%r = atomicrmw fadd ptr addrspace(1) %p, float %1 $(SCOPE)seq_cst\nret float %r"), Float32, Tuple{Int64,Float32}, Core.Intrinsics.bitcast(Int64, p), v)
 @eval @inline atomld(p::LP{UInt32}) = Base.llvmcall($("%p = inttoptr i64 %0 to ptr addrspace(1)\n%r = load atomic i32, ptr addrspace(1) %p $(SCOPE)seq_cst, align 4\nret i32 %r"), UInt32, Tuple{Int64}, Core.Intrinsics.bitcast(Int64, p))
@@ -104,7 +104,7 @@ const SCOPE = CUDAON ? "syncscope(\"device\") " : "syncscope(\"agent\") "   # (t
 @inline bar() = KI.barrier()
 
 # ---- the graph: nodes (a method each), edges (what flows between them), mats and vecs ----
-const EMB, NORM, GEMM, CONV, ROPE, ATTN, RESID, LSE, DLOG, NORMB, SILUB, ATTBKV, ATTBQ, ROTNB, CONVB1, CONVB2, CONVW, NORMW, EMBB, NRM, STEP, STEPV, NRMS, STAGE = Int32.(1:24)
+const EMB, NORM, GEMM, CONV, ROPE, ATTN, RESID, LSE, DLOG, NORMB, SILUB, ATTBKV, ATTBQ, ROTNB, CONVB1, CONVB2, CONVW, NORMW, EMBB, NRM, STEP, STEPV, NRMS, STAGE, MOMU = Int32.(1:25)
 const NG = 16                                              # the attention gate's rows
 const NQKV = NE + 2NKV * HD + NG                           # q | k | v | gate
 const ALL, LOSS, WT = Int32(1), Int32(2), Int32(3)        # a node's rows, an edge's rows: every position, the loss positions, a weight's shape
@@ -112,7 +112,7 @@ const SAME, SPREV, UPTO, SNEXT, FROM, DALL = Int32.(0:5)  # which tiles of its i
 const NF, EF, MF, VF = 26, 8, 8, 4
 const N_KIND, N_L, N_ROWS, N_DEP, N_CARD, N_LVL, N_I1, N_I2, N_I3, N_I4, N_O1, N_O2, N_M, N_NM, N_FL, N_EPI, N_RS, N_WV, N_D, N_K, N_NO, N_WIN, N_TBL, N_WR, N_O3, N_X = Int32.(0:25)
 const E_W, E_DT, E_ROWS, E_R, E_CACHE, E_REACH, E_PROD, E_CROSS = Int32.(0:7)   # cross: read on another card than its producer's
-const A_ROW, A_TR, B_MAT, B_TR, B_ROWK, A_NORM, O_MOM, B_NORM, B_MOM, A_MAT, A_MOM = Int32(1), Int32(2), Int32(4), Int32(8), Int32(16), Int32(32), Int32(64), Int32(128), Int32(256), Int32(512), Int32(1024)
+const A_ROW, A_TR, B_MAT, B_TR, B_ROWK = Int32(1), Int32(2), Int32(4), Int32(8), Int32(16)
 const EP_ST, EP_SILU, EP_ADD, EP_MOM, EP_AXPY, EP_LSE = Int32.(0:5)
 const BF, F32 = Int32(1), Int32(2)
 const LOGITS, LOSSW, GRAD, WEIGHTS = Int32.(1:4)          # a node's level; wanted is a set: 1 logits, 2 loss, 4 grad, 8 weights
@@ -158,6 +158,10 @@ done!(G::Graph, name) = edge!(G, name, 1, F32; rows = WT, r = 1)   # an edge for
 function recipe(; lr = 0.002, lrv = 0.0002, lre = 0.002)
     G = Graph(); me = mat!(G, "model.embed_tokens.weight"); onv = vec!(G, "model.embedding_norm.weight"); gdm = Dict{Int,Int}(); gdv = Dict{Int,Int}()
     dmat(m) = (gdm[m] = done!(G, Symbol(:gd, m))); dvec(v) = (gdv[v] = done!(G, Symbol(:gv, v)))
+    function gmat!(l, m, wr, no; kw...)                     # dW = A' B into an edge, then mo = f2 mo + dW / acc, contiguous
+        dW = edge!(G, Symbol(:dW, m), no, F32; rows = WT, r = wr); node!(G, GEMM, l, GRAD; rows = WT, dep = DALL, out = (dW, 0), m = m, K = -1, no = no, wr = wr, kw...)
+        node!(G, MOMU, l, GRAD; rows = WT, dep = DALL, in = (dW, 0, 0, 0), out = (dmat(m), 0), m = m, wr = wr, K = no)
+    end
     x = edge!(G, :x0, NE, F32); node!(G, EMB, 0, LOGITS; m = me, out = (x, 0))
     gx = 0; bwd = Tuple{Int,Vector{Any}}[]
     for l in 0:NL-1
@@ -168,11 +172,11 @@ function recipe(; lr = 0.002, lrv = 0.0002, lre = 0.002)
         for nm in ["operator_norm", "post_operator_norm", "ffn_norm", "post_ffn_norm"] ∪ (at ? ["self_attn.q_norm", "self_attn.k_norm"] : ["conv.conv"])
             vecs[nm] = vec!(G, "model.layers.$l.$nm.weight")
         end
-        rs1 = edge!(G, L(:rs1), 1, F32); n1 = node!(G, NORM, l, LOGITS; in = (x, 0, 0, 0), out = (rs1, 0), wv = vecs["operator_norm"], D = NE, K = NE)
+        rs1 = edge!(G, L(:rs1), 1, F32); xa = edge!(G, L(:xa), NE, F32); n1 = node!(G, NORM, l, LOGITS; in = (x, 0, 0, 0), out = (rs1, xa), wv = vecs["operator_norm"], D = NE, K = NE)
         o = edge!(G, L(:o), NE, BF)
         if at
             qkv = edge!(G, L(:qkv), NQKV, BF)   # q | k | v | gate: the four projections, one matrix product
-            nq = node!(G, GEMM, l, LOGITS; in = (x, 0, 0, 0), out = (qkv, 0), m = mats["self_attn.q_proj"], nm = 4, fl = A_ROW | B_MAT | A_NORM, rs = rs1, wv = vecs["operator_norm"], D = NE, K = NE, no = NQKV)
+            nq = node!(G, GEMM, l, LOGITS; in = (xa, 0, 0, 0), out = (qkv, 0), m = mats["self_attn.q_proj"], nm = 4, fl = A_ROW | B_MAT, K = NE, no = NQKV)
             rsq = edge!(G, L(:rsq), NH, F32); rsk = edge!(G, L(:rsk), NKV, F32)
             node!(G, NORM, l, LOGITS; in = (qkv, 0, 0, 0), out = (rsq, 0), wv = vecs["self_attn.q_norm"], D = HD, K = NE)
             node!(G, NORM, l, LOGITS; in = (qkv, 0, 0, 0), out = (rsk, 0), wv = vecs["self_attn.k_norm"], D = HD, K = NKV * HD, win = NE)   # win: the offset into qkv
@@ -183,46 +187,45 @@ function recipe(; lr = 0.002, lrv = 0.0002, lre = 0.002)
             node!(G, GEMM, l, LOGITS; in = (ao, 0, 0, 0), out = (o, 0), m = mats["self_attn.o_proj"], nm = 1, fl = A_ROW | B_MAT, K = NE, no = NE)
         else
             bcx = edge!(G, L(:bcx), 3NE, BF); h = edge!(G, L(:h), NE, BF; cache = 1, reach = 7); y = edge!(G, L(:y), NE, BF); cv = edge!(G, L(:cv), NE, BF)
-            node!(G, GEMM, l, LOGITS; in = (x, 0, 0, 0), out = (bcx, 0), m = mats["conv.in_proj"], nm = 1, fl = A_ROW | B_MAT | A_NORM, rs = rs1, wv = vecs["operator_norm"], D = NE, K = NE, no = 3NE)
+            node!(G, GEMM, l, LOGITS; in = (xa, 0, 0, 0), out = (bcx, 0), m = mats["conv.in_proj"], nm = 1, fl = A_ROW | B_MAT, K = NE, no = 3NE)
             node!(G, CONV, l, LOGITS; in = (bcx, 0, 0, 0), out = (h, 0))               # h = B x into the ring
             node!(G, CONV, l, LOGITS; dep = SPREV, in = (bcx, h, 0, 0), out = (y, cv), wv = vecs["conv.conv"], win = 1)   # y = C conv(h)
             node!(G, GEMM, l, LOGITS; in = (y, 0, 0, 0), out = (o, 0), m = mats["conv.out_proj"], nm = 1, fl = A_ROW | B_MAT, K = NE, no = NE)
         end
         rso = edge!(G, L(:rso), 1, F32); node!(G, NORM, l, LOGITS; in = (o, 0, 0, 0), out = (rso, 0), wv = vecs["post_operator_norm"], D = NE, K = NE)
         x1 = edge!(G, L(:x1), NE, F32); node!(G, RESID, l, LOGITS; in = (x, o, rso, 0), out = (x1, 0), wv = vecs["post_operator_norm"])
-        rsf = edge!(G, L(:rsf), 1, F32); node!(G, NORM, l, LOGITS; in = (x1, 0, 0, 0), out = (rsf, 0), wv = vecs["ffn_norm"], D = NE, K = NE)
+        rsf = edge!(G, L(:rsf), 1, F32); xb = edge!(G, L(:xb), NE, F32); node!(G, NORM, l, LOGITS; in = (x1, 0, 0, 0), out = (rsf, xb), wv = vecs["ffn_norm"], D = NE, K = NE)
         u = edge!(G, L(:u), 2NFF, BF); s = edge!(G, L(:s), NFF, BF)
-        node!(G, GEMM, l, LOGITS; in = (x1, 0, 0, 0), out = (u, s), m = mats["feed_forward.w1"], nm = 2, fl = A_ROW | B_MAT | A_NORM, rs = rsf, wv = vecs["ffn_norm"], D = NE, K = NE, no = NFF, epi = EP_SILU)
+        node!(G, GEMM, l, LOGITS; in = (xb, 0, 0, 0), out = (u, s), m = mats["feed_forward.w1"], nm = 2, fl = A_ROW | B_MAT, K = NE, no = NFF, epi = EP_SILU)
         f = edge!(G, L(:f), NE, BF); node!(G, GEMM, l, LOGITS; in = (s, 0, 0, 0), out = (f, 0), m = mats["feed_forward.w2"], nm = 1, fl = A_ROW | B_MAT, K = NFF, no = NE)
         rsff = edge!(G, L(:rsff), 1, F32); node!(G, NORM, l, LOGITS; in = (f, 0, 0, 0), out = (rsff, 0), wv = vecs["post_ffn_norm"], D = NE, K = NE)
         xn = edge!(G, Symbol(l + 1, :x0), NE, F32); node!(G, RESID, l, LOGITS; in = (x1, f, rsff, 0), out = (xn, 0), wv = vecs["post_ffn_norm"])
-        push!(bwd, (l, Any[x, x1, xn, mats, vecs, rs1, rso, rsf, rsff, o, f, u, s, at ? (qkv, rsq, rsk, qr, kr, v, ao, lse) : (bcx, h, y, cv)]))
+        push!(bwd, (l, Any[x, x1, xn, mats, vecs, rs1, rso, rsf, rsff, o, f, u, s, xa, xb, at ? (qkv, rsq, rsk, qr, kr, v, ao, lse) : (bcx, h, y, cv)]))
         x = xn
     end
     # the head over the loss positions
-    rsh = edge!(G, :rsh, 1, F32; rows = LOSS); node!(G, NORM, NL, LOGITS; rows = LOSS, in = (x, 0, 0, 0), out = (rsh, 0), wv = onv, D = NE, K = NE)
+    rsh = edge!(G, :rsh, 1, F32; rows = LOSS); xh = edge!(G, :xh, NE, F32; rows = LOSS); node!(G, NORM, NL, LOGITS; rows = LOSS, in = (x, 0, 0, 0), out = (rsh, xh), wv = onv, D = NE, K = NE)
     lg = edge!(G, :lg, NV, F32; rows = LOSS); lpart = edge!(G, :lpart, 2 * cld(NV, 16), F32; rows = LOSS)
-    node!(G, GEMM, NL, LOGITS; rows = LOSS, in = (x, 0, 0, 0), out = (lg, lpart), m = me, nm = 1, fl = A_ROW | B_MAT | A_NORM, rs = rsh, wv = onv, D = NE, K = NE, no = NV, epi = EP_LSE)
+    node!(G, GEMM, NL, LOGITS; rows = LOSS, in = (xh, 0, 0, 0), out = (lg, lpart), m = me, nm = 1, fl = A_ROW | B_MAT, K = NE, no = NV, epi = EP_LSE)
     lsev = edge!(G, :lse, 2, F32; rows = LOSS); node!(G, LSE, NL, LOSSW; rows = LOSS, in = (lpart, lg, 0, 0), out = (lsev, 0))
     # the adjoint: dlg, dxn = dlg E (+ the final norm's), dE = dlg' xn
     dlg = edge!(G, :dlg, NV, F32; rows = LOSS); node!(G, DLOG, NL, GRAD; rows = LOSS, in = (lg, lsev, 0, 0), out = (dlg, 0))
     dxh = edge!(G, :dxh, NE, F32; rows = LOSS)
     node!(G, GEMM, NL, GRAD; rows = LOSS, dep = DALL, in = (dlg, 0, 0, 0), out = (dxh, 0), m = me, nm = 1, fl = A_ROW | B_MAT | B_TR, K = NV, no = NE)
-    node!(G, GEMM, NL, GRAD; rows = WT, dep = DALL, in = (dlg, x, 0, 0), out = (done!(G, :gdE), 0), m = me, fl = A_ROW | A_TR | B_ROWK | B_NORM | O_MOM, rs = rsh, wv = onv, D = NE, K = -1, no = NE, wr = NV, epi = EP_MOM)
+    gmat!(NL, me, NV, NE; in = (dlg, xh, 0, 0), fl = A_ROW | A_TR | B_ROWK)
     gx = edge!(G, :gx, NE, F32); node!(G, NORMB, NL, GRAD; in = (dxh, x, rsh, 0), out = (gx, 0), wv = onv, D = NE, K = NE, win = 1)   # (win: from loss rows into every row)
     node!(G, NORMW, NL, GRAD; rows = WT, dep = DALL, in = (dxh, x, rsh, 0), out = (dvec(onv), 0), wv = onv, D = NE, K = NE, wr = NE, win = 1)
-    for (l, (x, x1, xn, mats, vecs, rs1, rso, rsf, rsff, o, f, u, s, rest)) in reverse(bwd)
+    for (l, (x, x1, xn, mats, vecs, rs1, rso, rsf, rsff, o, f, u, s, xa, xb, rest)) in reverse(bwd)
         L(s) = Symbol(l, s); at = isattn(l); M(nm) = mats[nm]; V(nm) = vecs[nm]
-        # x_{l+1} = x1 + post_ffn_norm(f): gf (BF16) from gx; the norm weight's gradient
         gf = edge!(G, L(:gf), NE, BF); node!(G, NORMB, l, GRAD; in = (gx, f, rsff, 0), out = (gf, 0), wv = V("post_ffn_norm"), D = NE, K = NE)
         node!(G, NORMW, l, GRAD; rows = WT, dep = DALL, in = (gx, f, rsff, 0), out = (dvec(V("post_ffn_norm")), 0), wv = V("post_ffn_norm"), D = NE, K = NE, wr = NE)
         gs = edge!(G, L(:gs), NFF, BF); node!(G, GEMM, l, GRAD; in = (gf, 0, 0, 0), out = (gs, 0), m = M("feed_forward.w2"), nm = 1, fl = A_ROW | B_MAT | B_TR, K = NE, no = NFF)
-        node!(G, GEMM, l, GRAD; rows = WT, dep = DALL, in = (gf, s, 0, 0), out = (dmat(M("feed_forward.w2")), 0), m = M("feed_forward.w2"), fl = A_ROW | A_TR | B_ROWK | O_MOM, K = -1, no = NFF, wr = NE, epi = EP_MOM)
+        gmat!(l, M("feed_forward.w2"), NE, NFF; in = (gf, s, 0, 0), fl = A_ROW | A_TR | B_ROWK)
         gu = edge!(G, L(:gu), 2NFF, BF); node!(G, SILUB, l, GRAD; in = (gs, u, 0, 0), out = (gu, 0))
         gxn = edge!(G, L(:gxn), NE, BF)
         node!(G, GEMM, l, GRAD; in = (gu, 0, 0, 0), out = (gxn, 0), m = M("feed_forward.w1"), nm = 2, fl = A_ROW | B_MAT | B_TR, K = 2NFF, no = NE)   # gxn = W1' gu1 + W3' gu3
-        node!(G, GEMM, l, GRAD; rows = WT, dep = DALL, in = (gu, x1, 0, 0), out = (dmat(M("feed_forward.w1")), 0), m = M("feed_forward.w1"), fl = A_ROW | A_TR | B_ROWK | B_NORM | O_MOM, rs = rsf, wv = V("ffn_norm"), D = NE, K = -1, no = NE, wr = NFF, epi = EP_MOM)
-        node!(G, GEMM, l, GRAD; rows = WT, dep = DALL, in = (gu, x1, 0, 0), out = (dmat(M("feed_forward.w3")), 0), m = M("feed_forward.w3"), fl = A_ROW | A_TR | B_ROWK | B_NORM | O_MOM, rs = rsf, wv = V("ffn_norm"), D = NE, K = -1, no = NE, wr = NFF, win = NFF, epi = EP_MOM)
+        gmat!(l, M("feed_forward.w1"), NFF, NE; in = (gu, xb, 0, 0), fl = A_ROW | A_TR | B_ROWK)
+        gmat!(l, M("feed_forward.w3"), NFF, NE; in = (gu, xb, 0, 0), fl = A_ROW | A_TR | B_ROWK, win = NFF)
         gx1 = edge!(G, L(:gx1), NE, F32); node!(G, NORMB, l, GRAD; in = (gxn, x1, rsf, gx), out = (gx1, 0), wv = V("ffn_norm"), D = NE, K = NE)   # gx1 = gx + ffn_norm'(gxn)
         node!(G, NORMW, l, GRAD; rows = WT, dep = DALL, in = (gxn, x1, rsf, 0), out = (dvec(V("ffn_norm")), 0), wv = V("ffn_norm"), D = NE, K = NE, wr = NE)
         go = edge!(G, L(:go), NE, BF); node!(G, NORMB, l, GRAD; in = (gx1, o, rso, 0), out = (go, 0), wv = V("post_operator_norm"), D = NE, K = NE)
@@ -231,7 +234,7 @@ function recipe(; lr = 0.002, lrv = 0.0002, lre = 0.002)
         if at
             qkv, rsq, rsk, qr, kr, v, ao, lse = rest
             gao = edge!(G, L(:gao), NE, BF); node!(G, GEMM, l, GRAD; in = (go, 0, 0, 0), out = (gao, 0), m = M("self_attn.o_proj"), nm = 1, fl = A_ROW | B_MAT | B_TR, K = NE, no = NE)
-            node!(G, GEMM, l, GRAD; rows = WT, dep = DALL, in = (go, ao, 0, 0), out = (dmat(M("self_attn.o_proj")), 0), m = M("self_attn.o_proj"), fl = A_ROW | A_TR | B_ROWK | O_MOM, K = -1, no = NE, wr = NE, epi = EP_MOM)
+            gmat!(l, M("self_attn.o_proj"), NE, NE; in = (go, ao, 0, 0), fl = A_ROW | A_TR | B_ROWK)
             gkv = edge!(G, L(:gkv), 2NKV * HD, F32); gqg = edge!(G, L(:gqg), NE + NG, F32)
             node!(G, ATTBKV, l, GRAD; dep = FROM, in = (qr, kr, v, qkv), out = (gkv, 0), m = ao, nm = gao, D = lse, win = isfull(l) ? 0 : WIN)
             node!(G, ATTBQ, l, GRAD; dep = UPTO, in = (qr, kr, v, qkv), out = (gqg, 0), m = ao, nm = gao, D = lse, win = isfull(l) ? 0 : WIN)
@@ -242,24 +245,24 @@ function recipe(; lr = 0.002, lrv = 0.0002, lre = 0.002)
             node!(G, GEMM, l, GRAD; in = (gqkv, 0, 0, 0), out = (gxn2, 0), m = M("self_attn.q_proj"), nm = 4, fl = A_ROW | B_MAT | B_TR, K = NQKV, no = NE)
             for (i, nm) in enumerate(["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.gate_proj"])
                 off = [0, NE, NE + NKV * HD, NE + 2NKV * HD][i]; rows = [NE, NKV * HD, NKV * HD, NG][i]
-                node!(G, GEMM, l, GRAD; rows = WT, dep = DALL, in = (gqkv, x, 0, 0), out = (dmat(M(nm)), 0), m = M(nm), fl = A_ROW | A_TR | B_ROWK | B_NORM | O_MOM, rs = rs1, wv = V("operator_norm"), D = NE, K = -1, no = NE, wr = rows, win = off, epi = EP_MOM)
+                gmat!(l, M(nm), rows, NE; in = (gqkv, xa, 0, 0), fl = A_ROW | A_TR | B_ROWK, win = off)
             end
         else
             bcx, h, y, cv = rest
             gy = edge!(G, L(:gy), NE, BF); node!(G, GEMM, l, GRAD; in = (go, 0, 0, 0), out = (gy, 0), m = M("conv.out_proj"), nm = 1, fl = A_ROW | B_MAT | B_TR, K = NE, no = NE)
-            node!(G, GEMM, l, GRAD; rows = WT, dep = DALL, in = (go, y, 0, 0), out = (dmat(M("conv.out_proj")), 0), m = M("conv.out_proj"), fl = A_ROW | A_TR | B_ROWK | O_MOM, K = -1, no = NE, wr = NE, epi = EP_MOM)
+            gmat!(l, M("conv.out_proj"), NE, NE; in = (go, y, 0, 0), fl = A_ROW | A_TR | B_ROWK)
             gc = edge!(G, L(:gc), NE, BF); gbcx = edge!(G, L(:gbcx), 3NE, BF)
             node!(G, CONVB1, l, GRAD; in = (gy, bcx, cv, 0), out = (gc, gbcx))
             node!(G, CONVB2, l, GRAD; dep = SNEXT, in = (gc, bcx, 0, 0), out = (gbcx, 0), wv = V("conv.conv"))
             node!(G, CONVW, l, GRAD; rows = WT, dep = DALL, in = (gc, h, 0, 0), out = (dvec(V("conv.conv")), 0), wv = V("conv.conv"), wr = NE)
             node!(G, GEMM, l, GRAD; in = (gbcx, 0, 0, 0), out = (gxn2, 0), m = M("conv.in_proj"), nm = 1, fl = A_ROW | B_MAT | B_TR, K = 3NE, no = NE)
-            node!(G, GEMM, l, GRAD; rows = WT, dep = DALL, in = (gbcx, x, 0, 0), out = (dmat(M("conv.in_proj")), 0), m = M("conv.in_proj"), fl = A_ROW | A_TR | B_ROWK | B_NORM | O_MOM, rs = rs1, wv = V("operator_norm"), D = NE, K = -1, no = NE, wr = 3NE, epi = EP_MOM)
+            gmat!(l, M("conv.in_proj"), 3NE, NE; in = (gbcx, xa, 0, 0), fl = A_ROW | A_TR | B_ROWK)
         end
         gx0 = edge!(G, L(:gx0), NE, F32); node!(G, NORMB, l, GRAD; in = (gxn2, x, rs1, gx1), out = (gx0, 0), wv = V("operator_norm"), D = NE, K = NE)
         node!(G, NORMW, l, GRAD; rows = WT, dep = DALL, in = (gxn2, x, rs1, 0), out = (dvec(V("operator_norm")), 0), wv = V("operator_norm"), D = NE, K = NE, wr = NE)
         gx = gx0
     end
-    node!(G, EMBB, 0, GRAD; rows = WT, dep = DALL, in = (gx, G.names[:gdE], 0, 0), out = (dmat(me), 0), m = me, wr = 0)
+    node!(G, EMBB, 0, GRAD; rows = WT, dep = DALL, in = (gx, gdm[me], 0, 0), out = (dmat(me), 0), m = me, wr = 0)
     # the update: Muon for every matrix, momentum for the vectors
     for m in 1:G.nmat
         R, K = matdims(G.matname[m]); muon!(G, m, R, K, m == me ? lre : lr, gdm[m])
@@ -288,7 +291,7 @@ struct RQ
 end
 # the plan: a header; per edge; per node; per segment; the holes
 const PHN, PL_LOC, PL_OFF, PL_MOD, PL_LAST, PL_CA, PL_CB, PL_SZ = 16, 0, 1, 2, 3, 4, 5, 6
-const NP_F0, NP_NT, NP_NC, NP_RT, NP_CT, NP_T0, NP_ON, NP_FL = 0, 1, 2, 3, 4, 5, 6, 7
+const NP_F0, NP_NT, NP_NC, NP_RT, NP_CT, NP_T0, NP_ON, NP_FL, NP_WAR = 0, 1, 2, 3, 4, 5, 6, 7, 8   # (WAR: the last reader of the memory this node's outputs reuse)
 const PH_NT, PH_NFLAG, PH_STAT, PH_ORDER, PH_S0, PH_S1, PH_SECT, PH_T0S, PH_T1S, PH_VUSE, PH_HUSE, PH_SLOT = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
 const NSEG, NHOLE = 64, 512
 @inline nd(R::RQ, n, f) = ld(R.node, Int64(n - 1) * NF + f)
@@ -298,8 +301,8 @@ const NSEG, NHOLE = 64, 512
 @inline vp(R::RQ, v) = lp(Float32, ld(R.vec, Int64(v - 1) * VF)); @inline vmo(R::RQ, v) = lp(Float32, ld(R.vec, Int64(v - 1) * VF + 2))
 @inline rw(R::RQ, r, f) = ld(R.rows, Int64(r) * 4 + f)
 @inline pl(R::RQ, i) = ld(R.plan, Int64(i)); @inline pl!(R::RQ, i, v) = st!(R.plan, Int64(v), Int64(i))
-@inline PE(R::RQ, e, f) = PHN + 8 * (Int64(e) - 1) + f; @inline PN(R::RQ, n, f) = PHN + 8 * Int64(R.ne) + 8 * (Int64(n) - 1) + f
-@inline PS(R::RQ, s, f) = PHN + 8 * Int64(R.ne) + 8 * Int64(R.nn) + 2 * Int64(s) + f; @inline PO(R::RQ, h, f) = PS(R, NSEG, 0) + 3 * Int64(h) + f
+@inline PE(R::RQ, e, f) = PHN + 8 * (Int64(e) - 1) + f; @inline PN(R::RQ, n, f) = PHN + 8 * Int64(R.ne) + 9 * (Int64(n) - 1) + f
+@inline PS(R::RQ, s, f) = PHN + 8 * Int64(R.ne) + 9 * Int64(R.nn) + 2 * Int64(s) + f; @inline PO(R::RQ, h, f) = PS(R, NSEG, 0) + 4 * Int64(h) + f
 @inline ple(R::RQ, e, f) = pl(R, PE(R, e, f)); @inline pln(R::RQ, n, f) = pl(R, PN(R, n, f)); @inline pls(R::RQ, s, f) = pl(R, PS(R, s, f))
 @inline ebytes(R::RQ, e) = Int64(ed(R, e, E_W)) * (ed(R, e, E_DT) == BF ? 2 : 4)
 @inline ebase(R::RQ, e) = (ple(R, e, PL_LOC) == 1 ? R.aV : R.aH) + ple(R, e, PL_OFF)
@@ -362,14 +365,16 @@ end
     f0 = Int64(0); t0 = Int64(0); s0 = 0; s1 = 0
     for n in 1:nn
         k = nd(R, n, N_KIND); rk = nd(R, n, N_ROWS); on = lvlmask(nd(R, n, N_LVL)) & w != 0 && nd(R, n, N_CARD) == R.card
-        rt = (k == ATTN || k == ATTBKV || k == ATTBQ) ? 16 : rk == ALL ? Int(pow2ge(Int64(min(Int(P), 64)))) : rk == LOSS ? Int(pow2ge(Int64(min(Int(R.PL), 64)))) : (k == NRM ? 1024 : 64)
-        nr = nrows(R, n); nt = max(Int64(1), (Int64(nr) + rt - 1) ÷ rt); ct = 64
-        nc = k == GEMM ? (Int64(nd(R, n, N_NO)) + ct - 1) ÷ ct : k == ATTN || k == ATTBQ ? Int64(NH) : k == ATTBKV ? Int64(NKV) : k == DLOG ? Int64(cld(NV, 4096)) : Int64(1)
+        nr = nrows(R, n); att = k == ATTN || k == ATTBKV || k == ATTBQ; ct = 64   # the tiles, from the request's rows
+        rt = att ? 16 : k == NRM ? 1024 : rk == WT ? 64 : Int(max(Int64(8), pow2ge(Int64(min(Int(nr), 64)))))
+        nc = k == GEMM ? (Int64(nd(R, n, N_NO)) + ct - 1) ÷ ct : att && k != ATTBKV ? Int64(NH) : k == ATTBKV ? Int64(NKV) : k == DLOG ? Int64(cld(NV, 4096)) : Int64(1)
+        k == GEMM && nr >= 128 && (Int64(nr) ÷ 128) * nc >= 2 * R.nblk && (rt = 128)
+        nt = max(Int64(1), (Int64(nr) + rt - 1) ÷ rt)
         while k == GEMM && nt * nc < R.nblk && ct > 16; ct >>= 1; nc = (Int64(nd(R, n, N_NO)) + ct - 1) ÷ ct; end
         fl = 1                                             # an output read on another card: the cells in host memory
         for f in (N_O1, N_O2, N_O3); e = nd(R, n, f); e > 0 && ed(R, e, E_CROSS) != 0 && (fl = 2); end
         pl!(R, PN(R, n, NP_F0), f0); pl!(R, PN(R, n, NP_NT), nt); pl!(R, PN(R, n, NP_NC), nc); pl!(R, PN(R, n, NP_RT), rt); pl!(R, PN(R, n, NP_CT), ct)
-        pl!(R, PN(R, n, NP_ON), on ? 1 : 0); pl!(R, PN(R, n, NP_FL), fl); pl!(R, PN(R, n, NP_T0), t0)
+        pl!(R, PN(R, n, NP_ON), on ? 1 : 0); pl!(R, PN(R, n, NP_FL), fl); pl!(R, PN(R, n, NP_T0), t0); pl!(R, PN(R, n, NP_WAR), 0)
         f0 += nt * nc + 1; on && (t0 += nt * nc)
         nd(R, n, N_LVL) == LOGITS && rk == ALL && (s0 == 0 && (s0 = n); s1 = n)
     end
@@ -384,10 +389,11 @@ end
             (e > 0 && pl(R, PE(R, e, PL_LAST)) == n - 1 && pl(R, PE(R, e, PL_SZ)) > 0 && ed(R, e, E_CACHE) == 0) || continue
             for h in 0:NHOLE-1
                 pl(R, PO(R, h, 1)) == 0 || continue
-                pl!(R, PO(R, h, 0), pl(R, PE(R, e, PL_OFF))); pl!(R, PO(R, h, 1), pl(R, PE(R, e, PL_SZ))); pl!(R, PO(R, h, 2), pl(R, PE(R, e, PL_LOC))); break
+                pl!(R, PO(R, h, 0), pl(R, PE(R, e, PL_OFF))); pl!(R, PO(R, h, 1), pl(R, PE(R, e, PL_SZ))); pl!(R, PO(R, h, 2), pl(R, PE(R, e, PL_LOC))); pl!(R, PO(R, h, 3), pl(R, PE(R, e, PL_LAST))); break
             end
             pl!(R, PE(R, e, PL_SZ), 0)
         end
+        war = Int64(0)
         for f in (N_O1, N_O2, N_O3)
             e = nd(R, n, f); (e > 0 && ed(R, e, E_CACHE) == 0 && pl(R, PE(R, e, PL_SZ)) == 0) || continue
             rk = ed(R, e, E_ROWS); nr = rk == ALL ? Int64(P) : rk == LOSS ? Int64(R.PL) : Int64(ed(R, e, E_R))
@@ -398,13 +404,14 @@ end
                 sz2 = pl(R, PO(R, h, 1)); (sz2 >= sz && sz2 < best && (pl(R, PO(R, h, 2)) == 2 || !cross)) && (best = sz2; hb = h)
             end
             if hb >= 0
-                loc = pl(R, PO(R, hb, 2)); off = pl(R, PO(R, hb, 0)); pl!(R, PO(R, hb, 0), off + sz); pl!(R, PO(R, hb, 1), best - sz)
+                loc = pl(R, PO(R, hb, 2)); off = pl(R, PO(R, hb, 0)); pl!(R, PO(R, hb, 0), off + sz); pl!(R, PO(R, hb, 1), best - sz); war = max(war, pl(R, PO(R, hb, 3)))
             elseif !cross && vtop + sz <= R.nV; loc = 1; off = vtop; vtop += sz
             elseif htop + sz <= R.nH; loc = 2; off = htop; htop += sz
             else; pl!(R, PH_STAT, 1); return
             end
             pl!(R, PE(R, e, PL_LOC), loc); pl!(R, PE(R, e, PL_OFF), off); pl!(R, PE(R, e, PL_SZ), sz)
         end
+        pl!(R, PN(R, n, NP_WAR), war)
     end
     pl!(R, PH_VUSE, vtop); pl!(R, PH_HUSE, htop)
 end
@@ -421,130 +428,138 @@ end
     Int32(n), Int32(r ÷ nc), Int32(r % nc)
 end
 # a task's waits (thread 0)
+@inline function waitnode(R::RQ, p)                          # every task of node p done
+    ntp = pln(R, p, NP_NT); d = cellp(R, p, ntp, 0); nn = ntp * pln(R, p, NP_NC); i = Int64(0)
+    while atomldr(d) < nn; i += 1; i == Int64(1) << 24 && (pl!(R, PH_STAT, 3); pl!(R, PH_S0, p); return); end
+    fence()
+end
 @inline function waitin!(R::RQ, n, t)
     dep = nd(R, n, N_DEP); rt = pln(R, n, NP_RT); rk = nd(R, n, N_ROWS); nr = Int64(nrows(R, n))
     for f in 0:7
         e = nin(R, n, f); e > 0 || continue; p = ed(R, e, E_PROD); (p > 0 && p != n && lvlmask(nd(R, p, N_LVL)) & R.wanted != 0) || continue
-        ntp = pln(R, p, NP_NT); rtp = pln(R, p, NP_RT)
+        rtp = pln(R, p, NP_RT)
         if dep == DALL || rk == WT || nd(R, p, N_ROWS) != rk
-            i = Int64(0); d = cellp(R, p, ntp, 0); nn = ntp * pln(R, p, NP_NC)
-            while atomldr(d) < nn; i += 1; i == Int64(1) << 24 && (pl!(R, PH_STAT, 3); pl!(R, PH_S0, p); pl!(R, PH_S1, Int64(atomldr(d)) << 40); return); end
-            fence()
+            waitnode(R, p)
         else
             a = Int64(t) * rt; b = min(nr, (Int64(t) + 1) * rt) - 1
             dep == SPREV && (a = max(Int64(0), a - 7)); dep == SNEXT && (b = min(nr - 1, b + 6)); dep == UPTO && (a = 0); dep == FROM && (b = nr - 1)
             for t2 in a ÷ rtp:b ÷ rtp; waittile(R, p, t2); end
         end
     end
+    w = pln(R, n, NP_WAR); (w > 0 && w != n && pln(R, w, NP_ON) == 1) && waitnode(R, w)   # the memory reused: its last reader done
 end
 
 # ---- the matrix product, written once: out[m, n] = Σ_k a(m, k) b(n, k); an operand a row edge (or transposed), a strided
 # matrix, or weights, a norm or scale applied as it is read ----
-struct OPD; p::LP{UInt8}; dt::Int32; mode::Int32; e::Int32; nk::Int32; ms::Int64; ks::Int64; rs::Int32; wv::LP{Float32}; D::Int32; off::Int32; m0::Int32; nm::Int32; end
+struct OPD; p::LP{UInt8}; dt::Int32; mode::Int32; e::Int32; nk::Int32; ms::Int64; ks::Int64; off::Int32; m0::Int32; nm::Int32; end
 @inline sp!(sm, i, v::Int64) = (sm[i + 1] = reinterpret(Float32, UInt32(v & 0xffffffff)); sm[i + 2] = reinterpret(Float32, UInt32((v >>> 32) & 0xffffffff)))
 @inline sp(sm, i) = Int64(reinterpret(UInt32, sm[i + 1])) | (Int64(reinterpret(UInt32, sm[i + 2])) << 32)
 @inline pint(p::LP{UInt8}) = reinterpret(Int64, Core.Intrinsics.bitcast(UInt64, p))
-@inline bfp(u::UInt64) = reinterpret(Float32, UInt32(u & 0xffff) << 16)
-@inline function rd4(p::LP{UInt8}, dt::Int32, j::Int64)   # 4 elements from j, a multiple of 4: one 8-byte load (two for Float32)
-    q = reinterpret(LP{UInt64}, p)
-    if dt == BF; u = ld(q, j >> 2); return (bfp(u), bfp(u >> 16), bfp(u >> 32), bfp(u >> 48)); end
-    u0 = ld(q, j >> 1); u1 = ld(q, (j >> 1) + 1)
-    (reinterpret(Float32, UInt32(u0 & 0xffffffff)), reinterpret(Float32, UInt32(u0 >> 32)), reinterpret(Float32, UInt32(u1 & 0xffffffff)), reinterpret(Float32, UInt32(u1 >> 32)))
+@inline bfp(u::UInt64, i) = reinterpret(Float32, UInt32((u >> (16i)) & 0xffff) << 16)
+@inline f32p(u::UInt64, i) = reinterpret(Float32, UInt32((u >> (32i)) & 0xffffffff))
+@inline ld16(p::LP{UInt8}, i) = unsafe_load(reinterpret(LP{NTuple{2,VecElement{UInt64}}}, p), i + 1, Val(16))   # 16 bytes, the i-th
+@inline function rd8(p::LP{UInt8}, dt::Int32, j::Int64)   # 8 elements from j, a multiple of 8: one 16-byte load (two for Float32)
+    if dt == BF; u = ld16(p, j >> 3); a = u[1].value; b = u[2].value; return (bfp(a, 0), bfp(a, 1), bfp(a, 2), bfp(a, 3), bfp(b, 0), bfp(b, 1), bfp(b, 2), bfp(b, 3)); end
+    u = ld16(p, j >> 2); w = ld16(p, (j >> 2) + 1); a = u[1].value; b = u[2].value; c = w[1].value; d = w[2].value
+    (f32p(a, 0), f32p(a, 1), f32p(b, 0), f32p(b, 1), f32p(c, 0), f32p(c, 1), f32p(d, 0), f32p(d, 1))
 end
-# an operand's 32-k slice: the lines' addresses, then the elements (k-major: sm[k * 68 + m])
 @inline ld4(sm, i) = unsafe_load(reinterpret(Core.LLVMPtr{NTuple{4,VecElement{Float32}},3}, pointer(sm)), (i >> 2) + 1, Val(16))
 @inline isk(o::OPD) = o.mode == 1 || o.mode == 4 || (o.mode == 3 && o.ks == 1)
-@inline function ldtile!(R::RQ, sm, so, o::OPD, nrow, mmax, m0, k0, K, tid, lines::Bool)
-    kfast = isk(o); eb = o.dt == BF ? Int64(2) : Int64(4); sp0 = so == 0 ? 4352 : 4480
+@inline function ldtile!(R::RQ, sm, so, o::OPD, nrow, mmax, m0, k0, K, tid, lines::Bool, sa)
+    kfast = isk(o); eb = o.dt == BF ? Int64(2) : Int64(4); sp0 = so == 0 ? 6400 : 6912
     nl = kfast ? Int64(nrow) : Int64(32); lmax = kfast ? mmax : K; l0 = kfast ? m0 : k0
     if lines && tid < nl                                
-        i = l0 + tid; a = Int64(0); rsp = Int64(0)
+        i = l0 + tid; a = Int64(0)
         if i < lmax
             if o.mode == 3; a = pint(o.p) + i * (kfast ? o.ms : o.ks) * eb
             elseif o.mode >= 4; j = Int64(o.m0); while j < o.m0 + o.nm - 1 && i >= mt(R, j, 1); i -= mt(R, j, 1); j += 1; end; a = mt(R, j, 0) + i * mt(R, j, 2) * 2
-            else; r = rowof(R, o.nk, i); a = pint(eaddr(R, o.e, r)) + Int64(o.off) * eb; o.rs != 0 && (rsp = pint(eaddr(R, o.rs, r))); end
+            else; r = rowof(R, o.nk, i); a = pint(eaddr(R, o.e, r)) + Int64(o.off) * eb; end
         end
-        sp!(sm, sp0 + 2tid, a); sp!(sm, sp0 + 256 + 2tid, rsp)
+        sp!(sm, sp0 + 2tid, a)
     end
     lines && bar()
-    es = o.mode == 3 ? (kfast ? o.ks : o.ms) : Int64(1); sc = o.mode == 3 && o.rs != 0 ? ld(lp(Float32, waddr(R, o.rs, 0)), 0) : 1.0f0; dsh = o.D > 0 ? trailing_zeros(Int64(o.D)) : 0
-    jl = kfast ? Int64(32) : Int64(nrow); j0 = kfast ? k0 : m0; jmax = kfast ? K : mmax; ng = nl * (jl >> 2); i = Int64(tid)   # 4 elements along the contiguous index a thread
-    while i < ng
-        l = i ÷ (jl >> 2); g = (i % (jl >> 2)) << 2; jj = j0 + g; a = lp(UInt8, sp(sm, sp0 + 2l)); v1 = 0.0f0; v2 = 0.0f0; v3 = 0.0f0; v4 = 0.0f0
-        if l0 + l < lmax && jj < jmax
-            if es == 1 && jj + 3 < jmax; v1, v2, v3, v4 = rd4(a, o.dt, jj)
-            else; v1 = rdv(a, o.dt, jj * es); jj + 1 < jmax && (v2 = rdv(a, o.dt, (jj + 1) * es)); jj + 2 < jmax && (v3 = rdv(a, o.dt, (jj + 2) * es)); jj + 3 < jmax && (v4 = rdv(a, o.dt, (jj + 3) * es)); end
-            if o.rs != 0 && o.mode <= 2
-                c = jj + o.off; f = ld(lp(Float32, sp(sm, sp0 + 256 + 2l)), o.D == 0 ? Int64(0) : c >> dsh)
-                o.D == 0 ? (v1 *= f; v2 *= f; v3 *= f; v4 *= f) : (v1 *= f * ld(o.wv, c); v2 *= f * ld(o.wv, c + 1); v3 *= f * ld(o.wv, c + 2); v4 *= f * ld(o.wv, c + 3))
-            else; v1 *= sc; v2 *= sc; v3 *= sc; v4 *= sc
-            end
+    es = o.mode == 3 ? (kfast ? o.ks : o.ms) : Int64(1)
+    jl = kfast ? Int64(32) : Int64(nrow); j0 = kfast ? k0 : m0; jmax = kfast ? K : mmax; sh = trailing_zeros(jl) - 3; ng = nl << sh
+    Base.Cartesian.@nexprs 2 q -> begin
+        i_q = Int64(tid) + 256 * (q - 1); l_q = i_q >> sh; g_q = (i_q & ((Int64(1) << sh) - 1)) << 3; jj_q = j0 + g_q; ok_q = i_q < ng && l0 + l_q < lmax && jj_q < jmax
+        a_q = lp(UInt8, ok_q ? sp(sm, sp0 + 2l_q) : Int64(0)); v_q = (0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0)   # (an unwritten entry is any bits)
+        if ok_q
+            if es == 1 && jj_q + 7 < jmax; v_q = rd8(a_q, o.dt, jj_q)
+            else; v_q = Base.Cartesian.@ntuple 8 e -> (jj_q + e - 1 < jmax ? rdv(a_q, o.dt, (jj_q + e - 1) * es) : 0.0f0); end
         end
-        if kfast; b = so + g * 68 + l + 1; sm[b] = v1; sm[b + 68] = v2; sm[b + 136] = v3; sm[b + 204] = v4   # (k-major: sm[k * 68 + m])
-        else; b = so + l * 68 + g + 1; sm[b] = v1; sm[b + 1] = v2; sm[b + 2] = v3; sm[b + 3] = v4; end
-        i += 256
     end
+    Base.Cartesian.@nexprs 2 q -> (i_q < ng && Base.Cartesian.@nexprs 8 e -> (sm[so + (kfast ? (g_q + e - 1) * sa + ((l_q + g_q) & (nl - 1)) : l_q * sa + ((g_q + 8 * (l_q >> 3)) & (nrow - 1)) + e - 1) + 1] = v_q[e]))   # (row k of a slice rotated by 8 (k >> 3): no bank conflicts)
 end
-@inline function kloop(R::RQ, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk)
-    act = tid < ntm * ntn * ntk; tk = tid ÷ (ntm * ntn); rem = tid % (ntm * ntn); tm = rem ÷ ntn; tn = rem % ntn
-    Base.Cartesian.@nexprs 16 i -> (c_i = 0.0f0)
-    k0 = Int64(0); tq = tick(); tl = Int64(0); ka = isk(oA); kb = isk(oB)
-    ka && ldtile!(R, sm, 0, oA, rt, nr, m0, k0, K, tid, true); kb && ldtile!(R, sm, 2176, oB, ct, no, n0, k0, K, tid, true)
+@inline function kloop(R::RQ, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk, t8::Bool)
+    act = tid < ntm * ntn * ntk; tk = tid ÷ (ntm * ntn); rem = tid % (ntm * ntn); tm = rem ÷ ntn; tn = rem % ntn; sa = Int64(rt) + 4; sb = 32 * sa
+    Base.Cartesian.@nexprs 32 i -> (c_i = 0.0f0)
+    k0 = Int64(0); tq = tick(); tl = Int64(0); ts = Int64(0); ka = isk(oA); kb = isk(oB)
+    ka && ldtile!(R, sm, 0, oA, rt, nr, m0, k0, K, tid, true, sa); kb && ldtile!(R, sm, sb, oB, ct, no, n0, k0, K, tid, true, 68)
     while k0 < K
-        bar(); t0 = tick(); ldtile!(R, sm, 0, oA, rt, nr, m0, k0, K, tid, !ka); ldtile!(R, sm, 2176, oB, ct, no, n0, k0, K, tid, !kb); bar(); tl += tick() - t0
-        if act                                              # a k: the thread's 4 rows and 4 columns, two 16-byte smem loads
-            if ntk == 1
-                Base.Cartesian.@nexprs 32 k -> (a = ld4(sm, (k - 1) * 68 + tm * 4); b = ld4(sm, 2176 + (k - 1) * 68 + tn * 4); Base.Cartesian.@nexprs 4 i -> Base.Cartesian.@nexprs 4 j -> (c_{(i - 1) * 4 + j} = fma(a[i].value, b[j].value, c_{(i - 1) * 4 + j})))
+        bar(); t0 = tick(); ldtile!(R, sm, 0, oA, rt, nr, m0, k0, K, tid, !ka, sa); ldtile!(R, sm, sb, oB, ct, no, n0, k0, K, tid, !kb, 68); t1 = tick(); bar(); tl += tick() - t0; ts += t1 - t0
+        if act                                              # a k: the thread's 8 (or 4) rows and 4 columns, 16-byte smem loads
+            kend = Int32(32) + Int32(K < 0)                  # (an opaque bound: the loop stays a loop, its body in the instruction cache)
+            if t8
+                kq = Int32(0)
+                while kq < kend
+                    rk = Int64((kq >> 3) << 3); pa = (tm * 8 + rk) & (rt - 1); pb = (tn * 4 + rk) & (ct - 1)
+                    Base.Cartesian.@nexprs 2 k -> (a = ld4(sm, (kq + k - 1) * sa + pa); a2 = ld4(sm, (kq + k - 1) * sa + pa + 4); b = ld4(sm, sb + (kq + k - 1) * 68 + pb); Base.Cartesian.@nexprs 4 i -> Base.Cartesian.@nexprs 4 j -> (c_{(i - 1) * 4 + j} = fma(a[i].value, b[j].value, c_{(i - 1) * 4 + j}); c_{16 + (i - 1) * 4 + j} = fma(a2[i].value, b[j].value, c_{16 + (i - 1) * 4 + j})))
+                    kq += Int32(2)
+                end
+            elseif ntk == 1
+                kq = Int32(0)
+                while kq < kend
+                    rk = Int64((kq >> 3) << 3); pa = (tm * 4 + rk) & (rt - 1); pb = (tn * 4 + rk) & (ct - 1)
+                    Base.Cartesian.@nexprs 2 k -> (a = ld4(sm, (kq + k - 1) * sa + pa); b = ld4(sm, sb + (kq + k - 1) * 68 + pb); Base.Cartesian.@nexprs 4 i -> Base.Cartesian.@nexprs 4 j -> (c_{(i - 1) * 4 + j} = fma(a[i].value, b[j].value, c_{(i - 1) * 4 + j})))
+                    kq += Int32(2)
+                end
             else
                 k = Int32(tk)
                 while k < 32
-                    a = ld4(sm, k * 68 + tm * 4); b = ld4(sm, 2176 + k * 68 + tn * 4); Base.Cartesian.@nexprs 4 i -> Base.Cartesian.@nexprs 4 j -> (c_{(i - 1) * 4 + j} = fma(a[i].value, b[j].value, c_{(i - 1) * 4 + j})); k += ntk
+                    rk = Int64((k >> 3) << 3); a = ld4(sm, k * sa + ((tm * 4 + rk) & (rt - 1))); b = ld4(sm, sb + k * 68 + ((tn * 4 + rk) & (ct - 1))); Base.Cartesian.@nexprs 4 i -> Base.Cartesian.@nexprs 4 j -> (c_{(i - 1) * 4 + j} = fma(a[i].value, b[j].value, c_{(i - 1) * 4 + j})); k += ntk
                 end
             end
         end
         k0 += 32
     end
-    if tid == 0 && R.dbg & 64 != 0; s0 = R.cnt + 4 * (R.nflag - 4 * (Int64(R.nn) + 1)); atomadd!(s0 + 4, UInt32(tl >> 10)); atomadd!(s0 + 8, UInt32((tick() - tq) >> 10)); end   # (debug 64)
+    if tid == 0 && R.dbg & 64 != 0; s0 = R.cnt + 4 * (R.nflag - 4 * (Int64(R.nn) + 1)); atomadd!(s0 + 4, UInt32(tl >> 10)); atomadd!(s0 + 8, UInt32((tick() - tq) >> 10)); atomadd!(s0 + 12, UInt32(ts >> 10)); end   # (debug 64)
     if ntk > 1                                             # the k slices of a thread group added
         bar(); act && (Base.Cartesian.@nexprs 16 i -> (sm[(tk * ntm * ntn + rem) * 16 + i] = c_i)); bar()
         if act && tk == 0
             for t2 in 1:ntk-1; Base.Cartesian.@nexprs 16 i -> (c_i += sm[(t2 * ntm * ntn + rem) * 16 + i]); end
         end
     end
-    Base.Cartesian.@ntuple 16 i -> c_i
+    Base.Cartesian.@ntuple 32 i -> c_i
 end
 @inline function gemm!(R::RQ, sm, n, tile, col, tid)
     fl = nd(R, n, N_FL); epi = nd(R, n, N_EPI); rt = Int32(pln(R, n, NP_RT)); ct = Int32(pln(R, n, NP_CT)); m0 = Int64(tile) * rt; n0 = Int64(col) * ct
     K = Int64(nd(R, n, N_K)); e1 = nd(R, n, N_I1); e2 = nd(R, n, N_I2); rk = nd(R, n, N_ROWS); kk = rk; nr = Int64(nrows(R, n)); no = Int64(nd(R, n, N_NO))
     K < 0 && (kk = ed(R, e1, E_ROWS); K = kk == LOSS ? Int64(R.PL) : Int64(R.P))
-    rs = nd(R, n, N_RS); wvi = nd(R, n, N_WV); wv = wvi > 0 ? vp(R, wvi) : lp(Float32, 0); D = nd(R, n, N_D); m = nd(R, n, N_M)
+    rs = nd(R, n, N_RS); m = nd(R, n, N_M)
     if fl & A_ROW != 0
-        oA = fl & A_TR != 0 ? OPD(LP0, ed(R, e1, E_DT), Int32(2), e1, kk, 0, 0, fl & A_NORM != 0 ? rs : Int32(0), wv, D, nd(R, n, N_WIN), 0, 0) :
-                              OPD(LP0, ed(R, e1, E_DT), Int32(1), e1, rk, 0, 0, fl & A_NORM != 0 ? rs : Int32(0), wv, D, 0, 0, 0)
+        oA = fl & A_TR != 0 ? OPD(LP0, ed(R, e1, E_DT), Int32(2), e1, kk, 0, 0, nd(R, n, N_WIN), 0, 0) : OPD(LP0, ed(R, e1, E_DT), Int32(1), e1, rk, 0, 0, 0, 0, 0)
     else
-        W = Int64(ed(R, e1, E_W)); tr = fl & A_TR != 0; oA = OPD(ebase(R, e1), ed(R, e1, E_DT), Int32(3), 0, 0, tr ? 1 : W, tr ? W : 1, 0, wv, 0, 0, 0, 0)
+        W = Int64(ed(R, e1, E_W)); tr = fl & A_TR != 0; oA = OPD(ebase(R, e1), ed(R, e1, E_DT), Int32(3), 0, 0, tr ? 1 : W, tr ? W : 1, 0, 0, 0)
     end
     nB = epi == EP_SILU ? 2 : 1
     if fl & B_MAT != 0
-        oB = OPD(LP0, BF, fl & B_TR != 0 ? Int32(5) : Int32(4), 0, 0, 0, 0, 0, wv, 0, 0, m, nB == 2 ? Int32(1) : nd(R, n, N_NM))
+        oB = OPD(LP0, BF, fl & B_TR != 0 ? Int32(5) : Int32(4), 0, 0, 0, 0, 0, m, nB == 2 ? Int32(1) : nd(R, n, N_NM))
     elseif fl & B_ROWK != 0
-        oB = OPD(LP0, ed(R, e2, E_DT), Int32(2), e2, kk, 0, 0, fl & B_NORM != 0 ? rs : Int32(0), wv, D, 0, 0, 0)
+        oB = OPD(LP0, ed(R, e2, E_DT), Int32(2), e2, kk, 0, 0, 0, 0, 0)
     else
-        W = Int64(ed(R, e2, E_W)); tr = fl & B_TR != 0; oB = OPD(ebase(R, e2), ed(R, e2, E_DT), Int32(3), 0, 0, tr ? 1 : W, tr ? W : 1, 0, wv, 0, 0, 0, 0)
+        W = Int64(ed(R, e2, E_W)); tr = fl & B_TR != 0; oB = OPD(ebase(R, e2), ed(R, e2, E_DT), Int32(3), 0, 0, tr ? 1 : W, tr ? W : 1, 0, 0, 0)
     end
-    ntn = Int32(ct ÷ 4); ntm = Int32((rt + 3) ÷ 4); ntk = Int32(1); while ntk * 2 * ntm * ntn <= 256; ntk *= Int32(2); end
-    c1 = kloop(R, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk)
-    c2 = nB == 2 ? kloop(R, sm, oA, OPD(oB.p, oB.dt, oB.mode, oB.e, oB.nk, oB.ms, oB.ks, oB.rs, oB.wv, oB.D, oB.off, m + Int32(1), oB.nm), rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk) : c1
+    t8 = rt == 128; tr = t8 ? 8 : 4; ntn = Int32(ct ÷ 4); ntm = Int32((rt + tr - 1) ÷ tr); ntk = Int32(1); while ntk * 2 * ntm * ntn <= 256; ntk *= Int32(2); end
+    c1 = kloop(R, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk, t8)
+    c2 = nB == 2 ? kloop(R, sm, oA, OPD(oB.p, oB.dt, oB.mode, oB.e, oB.nk, oB.ms, oB.ks, oB.off, m + Int32(1), oB.nm), rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk, t8) : c1
     act = tid < ntm * ntn * ntk; tk = tid ÷ (ntm * ntn); rem = tid % (ntm * ntn); tm = rem ÷ ntn; tn = rem % ntn
     o1 = nd(R, n, N_O1); o2 = nd(R, n, N_O2); e3 = nd(R, n, N_I3); f1 = ndf(R, n, 0); f2 = ndf(R, n, 1)
     epi == EP_LSE && bar()
     if act && tk == 0
-        Base.Cartesian.@nexprs 4 i -> Base.Cartesian.@nexprs 4 j -> begin
-            mm = Int64(tm * 4 + i - 1); nn = Int64(tn * 4 + j - 1); mr = m0 + mm; nc = n0 + nn; v = c1[(i - 1) * 4 + j]
-            if mm < rt && mr < nr && nc < no
-                if epi == EP_MOM                           # the momentum: f2 mo + (1 / acc) dW
-                    p = lp(Float32, mt(R, m, 4)) + 4 * (mr * no + nc); st!(p, R.f2 * ld(p, 0) + R.iacc * v, 0)
-                elseif epi == EP_SILU
+        Base.Cartesian.@nexprs 8 i -> Base.Cartesian.@nexprs 4 j -> begin
+            mm = Int64(tm * tr + i - 1); nn = Int64(tn * 4 + j - 1); mr = m0 + mm; nc = n0 + nn; v = c1[(i - 1) * 4 + j]
+            if i <= tr && mm < rt && mr < nr && nc < no
+                if epi == EP_SILU
                     a = eaddr(R, o1, rowof(R, rk, mr)); wrv!(a, ed(R, o1, E_DT), v, nc); wrv!(a, ed(R, o1, E_DT), c2[(i - 1) * 4 + j], Int64(NFF) + nc)
                     wrv!(eaddr(R, o2, rowof(R, rk, mr)), ed(R, o2, E_DT), v * sigm(v) * c2[(i - 1) * 4 + j], nc)
                 elseif epi == EP_AXPY                     # f1 acc + f2 other: other a weight-shaped edge, or the momentum scaled
@@ -582,7 +597,7 @@ end
     an = rope(R, tbl, pos, q); cs = cos(an); sn = sin(an); q < 64 ? a * cs - b * sn : a * cs + b * sn
 end
 @inline function norm!(R::RQ, sm, n, tile, tid)            # rs[r][b] = rsqrt(mean x[r][off + b D + q]^2 + eps)
-    rt = pln(R, n, NP_RT); nr = nrows(R, n); rk = nd(R, n, N_ROWS); e = nd(R, n, N_I1); o = nd(R, n, N_O1); D = nd(R, n, N_D); nb = nd(R, n, N_K) ÷ D; off = nd(R, n, N_WIN)
+    rt = pln(R, n, NP_RT); nr = nrows(R, n); rk = nd(R, n, N_ROWS); e = nd(R, n, N_I1); o = nd(R, n, N_O1); o2 = nd(R, n, N_O2); D = nd(R, n, N_D); nb = nd(R, n, N_K) ÷ D; off = nd(R, n, N_WIN); wv = nd(R, n, N_WV) > 0 ? vp(R, nd(R, n, N_WV)) : lp(Float32, 0)
     g = tid ÷ 16; lane = tid % 16; tot = min(rt, nr - Int64(tile) * rt) * nb; i = Int64(g)
     while i - g < tot
         s = 0.0f0; r = Int32(0); b = Int64(0)
@@ -593,7 +608,11 @@ end
         sm[tid + 1] = s; bar()
         if lane == 0 && i < tot
             t = 0.0f0; for j in 0:15; t += sm[g * 16 + j + 1]; end
-            wrv!(eaddr(R, o, r), F32, 1.0f0 / sqrt(t / Float32(D) + EPS), b)
+            sm[300 + g] = 1.0f0 / sqrt(t / Float32(D) + EPS); wrv!(eaddr(R, o, r), F32, sm[300 + g], b)
+        end
+        bar()
+        if o2 > 0 && i < tot                                 # the normalized row, x rs w, for the matrix products that read it
+            for q in lane:16:D-1; c = off + b * D + q; ev!(R, o2, r, ev(R, e, r, c) * sm[300 + g] * ld(wv, c), c); end
         end
         bar(); i += 16
     end
@@ -825,7 +844,7 @@ end
     out = nd(R, n, N_O1); E = lp(UInt8, mt(R, nd(R, n, N_M), 0))
     foreach_el(R, n, tile, NE, tid) do r, k; ev!(R, out, r, rdv(E, BF, Int64(rw(R, r, 2)) * NE + k), k); end
 end
-@inline function embb!(R::RQ, n, tile, tid)                 # the input rows' gradient into the embedding's momentum, a unique token a row
+@inline function embb!(R::RQ, n, tile, tid)              
     gx = nd(R, n, N_I1); mo = lp(Float32, mt(R, nd(R, n, N_M), 4)); i = Int64(tid); u0 = Int64(tile) * 64
     while i < 64 * NE
         u = u0 + i ÷ NE; k = i % NE
@@ -880,6 +899,11 @@ end
     i = Int64(tile) * 64 * K + tid; hi = min(Int64(tile + 1) * 64, Rr) * K
     while i < hi; wrv!(waddr(R, X, i ÷ K), F32, sc * ld(mo, i), i % K); i += 256; end
 end
+@inline function momu!(R::RQ, n, tile, tid)                 # mo = f2 mo + dW / acc, the rows contiguous
+    m = nd(R, n, N_M); dW = nd(R, n, N_I1); mo = lp(Float32, mt(R, m, 4)); K = mt(R, m, 2); Rr = mt(R, m, 1)
+    i = Int64(tile) * 64 * K + tid; hi = min(Int64(tile + 1) * 64, Rr) * K
+    while i < hi; st!(mo, R.f2 * ld(mo, i) + R.iacc * rdv(waddr(R, dW, i ÷ K), F32, i % K), i); i += 256; end
+end
 @inline function stepv!(R::RQ, n, tid)                      # a vector by its momentum
     v = nd(R, n, N_WV); p = vp(R, v); mo = vmo(R, v); len = ld(R.vec, Int64(v - 1) * VF + 1); f = ndf(R, n, 0); i = Int64(tid)
     while i < len; st!(p, ld(p, i) - f * ld(mo, i), i); i += 256; end
@@ -911,6 +935,7 @@ end
     elseif k == NRM || k == NRMS; nrm!(R, sm, n, tile, tid)
     elseif k == STEP; step!(R, n, tile, tid)
     elseif k == STAGE; stage!(R, n, tile, tid)
+    elseif k == MOMU; momu!(R, n, tile, tid)
     elseif k == STEPV; stepv!(R, n, tid)
     end
 end
@@ -1022,12 +1047,12 @@ function load(dir; train = false, ncard = ndev(), hostgb = 6.0, reserve = 3.5e9,
         node = dalloc(4 * length(G.node)); up!(node, 0, G.node); edge = dalloc(4 * length(G.edge)); up!(edge, 0, G.edge)
         nodef = dalloc(4 * length(G.nodef)); up!(nodef, 0, G.nodef); push!(bufs, nodef)
         matd = dalloc(8 * length(mat)); up!(matd, 0, mat); vecd = dalloc(8 * length(vec)); up!(vecd, 0, vec)
-        np = PHN + 8ne + 8nn + 2NSEG + 3NHOLE; plan = dalloc(8np); cnt = dalloc(4NFLAG); fill!(cnt, 0); q = dalloc(16); fill!(q, 0)
+        np = PHN + 8ne + 9nn + 2NSEG + 4NHOLE; plan = dalloc(8np); cnt = dalloc(4NFLAG); fill!(cnt, 0); q = dalloc(16); fill!(q, 0)
         NPM = 1 << 16; rows = dalloc(16NPM); lrows = dalloc(4NPM); linv = dalloc(4NPM); wgt = dalloc(4NPM); uniq = dalloc(8NPM); urows = dalloc(4NPM); segs = dalloc(8NSEG)
         k = krun!(BE, 256); C = Card(c, k, 0, nV, bufs, mat, vec, aV, node, edge, matd, vecd, rope, plan, cnt, q, rows, lrows, linv, wgt, uniq, urows, segs)
         push!(bufs, nodef); C.nblk = resident(C, S); push!(S.cards, C)
     end
-    S.plan = Vector{Int64}(undef, PHN + 8ne + 8nn + 2NSEG + 3NHOLE)
+    S.plan = Vector{Int64}(undef, PHN + 8ne + 9nn + 2NSEG + 4NHOLE)
     @printf("loaded %s: %d nodes, %d edges, %d cards (%.0f s)\n", dir, nn, ne, ncard, time() - t0); flush(stdout)
     S
 end
@@ -1067,7 +1092,6 @@ function request!(S::Sys, rows::Matrix{Int32}, segs::Matrix{Int32}, lrows::Vecto
     end
     await!(S); for C in S.cards; dev!(C.i + 1); sync(); pop!(C.bufs); end
     dev!(1); dn!(S.plan, S.cards[1].plan, 0)
-    if S.plan[PH_STAT+1] == 3; p = S.plan[PH_S0+1]; ne = S.G.ne; for q in p-2:p+1; f = PHN + 8ne + 8(q - 1); np = S.plan[f+1:f+8]; cells = dn!(Vector{UInt32}(undef, max(1, np[NP_NT+1] * np[NP_NC+1])), S.cards[1].cnt, 4np[NP_F0+1]); @printf("node %d kind %d rows %d: F0 %d nt %d nc %d rt %d on %d fl %d t0 %d cells %s\n", q, S.G.node[NF*(q-1)+N_KIND+1], S.G.node[NF*(q-1)+N_ROWS+1], np[NP_F0+1], np[NP_NT+1], np[NP_NC+1], np[NP_RT+1], np[NP_ON+1], np[NP_FL+1], np[NP_T0+1], string(cells[1:min(end, 8)])); end; q = dn!(zeros(UInt32, 4), S.cards[1].q, 0); println("q ", q); end
     DBG[] & 64 != 0 && for C in S.cards; prof(S, C); end
     st = S.plan[PH_STAT+1]; st == 0 || error("request: status $st, node $(S.plan[PH_S0+1]) ($(S.G.node[NF*(S.plan[PH_S0+1]-1)+N_KIND+1]), m $(S.G.node[NF*(S.plan[PH_S0+1]-1)+N_M+1])) $(S.plan[PH_S1+1] & 0xfffff) $((S.plan[PH_S1+1] >> 20) & 0xfffff) cell $(S.plan[PH_S1+1] >> 40) gen $(S.gen) (VRAM $(S.plan[PH_VUSE+1]), host $(S.plan[PH_HUSE+1]))")
     nothing
@@ -1076,16 +1100,16 @@ const WATCH = Ref(parse(Float64, get(ENV, "LFM3_WATCH", "0")))
 function await!(S::Sys)                                   # (LFM3_WATCH=s: progress every s seconds)
     (WATCH[] > 0 && CUDAON) || return; p = Ptr{UInt32}(S.cntH); last = -1; t = time()
     ev = [(dev!(C.i + 1); e = CUDA.CuEvent(); CUDA.record(e); e) for C in S.cards]
-    while !all(CUDA.isdone, ev)
-        sleep(0.2); time() - t >= WATCH[] || continue; t = time(); h = Int(unsafe_load(p, NFLAG - 2)); c = Int(unsafe_load(p, NFLAG - 1)); n = clamp(Int(unsafe_load(p, NFLAG)), 1, S.G.nn)
-        @printf("watch: %d / %d tasks%s, node %d kind %d l %d, status %d\n", c, h >> 4, c == last ? " (still)" : "", n, S.G.node[NF*(n-1)+N_KIND+1], S.G.node[NF*(n-1)+N_L+1], h & 15)
-        c == last && println("  blocks (task, 1 waiting / 2 running): ", join(["$(unsafe_load(p, NFLAG - 79 + 2b)):$(unsafe_load(p, NFLAG - 78 + 2b))" for b in 0:min(31, S.cards[1].nblk - 1)], " ")); flush(stdout); last = c
-    end
+    say(m) = (h = Int(unsafe_load(p, NFLAG - 2)); c = Int(unsafe_load(p, NFLAG - 1)); n = clamp(Int(unsafe_load(p, NFLAG)), 1, S.G.nn);
+              @printf("%s: %d / %d tasks, node %d kind %d l %d\n", m, c, h >> 4, n, S.G.node[NF*(n-1)+N_KIND+1], S.G.node[NF*(n-1)+N_L+1]); flush(stdout); c)
+    try
+        while !all(CUDA.isdone, ev); sleep(0.05); time() - t >= WATCH[] || continue; t = time(); c = say("watch"); c == last && println("  (still)"); last = c; end
+    catch; say("fault after"); rethrow(); end
 end
 function prof(S::Sys, C::Card)                            # (debug 64: the cycles per node kind, then cleared)
     nn = S.G.nn; st = dn!(Vector{UInt32}(undef, 4(nn + 1)), C.cnt, 4(NFLAG - 4(nn + 1))); up!(C.cnt, 4(NFLAG - 4(nn + 1)), zeros(UInt32, 4(nn + 1)))
     by = Dict{Int,Vector{Float64}}(); for n in 1:nn; v = get!(by, S.G.node[NF*(n-1)+N_KIND+1], zeros(3)); v .+= st[4n+1:4n+3]; end
-    @printf("card %d (%d blocks): derive %.1f Mcyc; gemm loads %.1f of %.1f Mcyc\n", C.i, C.nblk, st[1] * 256 / 1e6, st[2] * 1024 / 1e6, st[3] * 1024 / 1e6)
+    @printf("card %d (%d blocks): derive %.1f Mcyc; gemm loads %.1f (own %.1f) of %.1f Mcyc\n", C.i, C.nblk, st[1] * 256 / 1e6, st[2] * 1024 / 1e6, st[4] * 1024 / 1e6, st[3] * 1024 / 1e6)
     for (k, v) in sort(collect(by); by = x -> -x[2][2]); @printf("  kind %2d: wait %8.1f  run %8.1f Mcyc  %6d tasks\n", k, v[1] * 256 / 1e6, v[2] * 256 / 1e6, v[3]); end
     for n in sort(1:nn; by = n -> -Int(st[4n+2]))[1:6]; @printf("  node %4d kind %2d l %2d: wait %8.1f  run %8.1f Mcyc  %6d tasks\n", n, S.G.node[NF*(n-1)+N_KIND+1], S.G.node[NF*(n-1)+N_L+1], st[4n+1] * 256 / 1e6, st[4n+2] * 256 / 1e6, st[4n+3]); end
 end
