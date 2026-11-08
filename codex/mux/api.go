@@ -12,6 +12,8 @@ import (
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/responses", s.handleResponses)
+	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
+	mux.HandleFunc("/props", s.handleProps)
 	mux.HandleFunc("/v1/embeddings", s.handleEmbeddings)
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/services", s.handleServices)

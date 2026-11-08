@@ -24,6 +24,7 @@ type ServiceConfig struct {
 	Dir      string            `yaml:"-"` // the service folder (services_dir/NAME)
 	Up       bool              `yaml:"-"` // desired state, from the host file
 	Kind     string            `yaml:"kind"`
+	Display  string            `yaml:"display"` // the name web chat shows; the llama.cpp face lists NAME.gguf
 	GGUF     string            `yaml:"gguf"`
 	Ctx      int               `yaml:"ctx"`
 	Efforts  []string          `yaml:"efforts"`
@@ -42,7 +43,12 @@ type Config struct {
 	Socket      string
 	ServicesDir string
 	Services    []*ServiceConfig // in host-file order
-	Path        string           // where the host file was read from ("" for a built one)
+	// CompatListen is a second HTTP address that serves only the llama.cpp face (/v1/models as llama-server
+	// lists it, /props, /v1/chat/completions) for web chat; CompatService is the service it fronts, and the
+	// model a chat completion without one runs on.
+	CompatListen  string
+	CompatService string
+	Path          string // where the host file was read from ("" for a built one)
 }
 
 var defaultEfforts = []string{"none", "low", "medium", "high", "xhigh"}
@@ -53,6 +59,9 @@ type hostFile struct {
 	Socket      string    `yaml:"socket"`
 	ServicesDir string    `yaml:"services_dir"`
 	Services    yaml.Node `yaml:"services"`
+
+	CompatListen  string `yaml:"compat_listen"`
+	CompatService string `yaml:"compat_service"`
 }
 
 // HostService is one entry of the host file's services.
@@ -63,10 +72,12 @@ type HostService struct {
 
 // Host is the host file alone (what the CLI and the tests of the file need).
 type Host struct {
-	Listen      string
-	Socket      string
-	ServicesDir string
-	Services    []HostService
+	Listen        string
+	Socket        string
+	ServicesDir   string
+	Services      []HostService
+	CompatListen  string
+	CompatService string
 }
 
 // ParseHost reads the text of a host file. Relative services_dir is resolved against base (the
@@ -77,7 +88,8 @@ func ParseHost(b []byte, base string) (*Host, error) {
 		return nil, err
 	}
 	home, _ := os.UserHomeDir()
-	h := &Host{Listen: raw.Listen, Socket: expandHome(raw.Socket, home), ServicesDir: expandHome(raw.ServicesDir, home)}
+	h := &Host{Listen: raw.Listen, Socket: expandHome(raw.Socket, home), ServicesDir: expandHome(raw.ServicesDir, home),
+		CompatListen: raw.CompatListen, CompatService: raw.CompatService}
 	if h.Listen == "" {
 		h.Listen = "127.0.0.1:18100"
 	}
@@ -146,7 +158,7 @@ func loadConfig(b []byte, base string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &Config{Listen: h.Listen, Socket: h.Socket, ServicesDir: h.ServicesDir}
+	c := &Config{Listen: h.Listen, Socket: h.Socket, ServicesDir: h.ServicesDir, CompatListen: h.CompatListen, CompatService: h.CompatService}
 	for _, hs := range h.Services {
 		sc, err := LoadService(h.ServicesDir, hs.Name)
 		if err != nil {
@@ -154,6 +166,23 @@ func loadConfig(b []byte, base string) (*Config, error) {
 		}
 		sc.Up = hs.Up
 		c.Services = append(c.Services, sc)
+	}
+	if c.CompatListen != "" && c.CompatService == "" {
+		return nil, fmt.Errorf("compat_listen: needs compat_service (the service it fronts)")
+	}
+	if c.CompatService != "" {
+		var sc *ServiceConfig
+		for _, s := range c.Services {
+			if s.Name == c.CompatService {
+				sc = s
+			}
+		}
+		if sc == nil {
+			return nil, fmt.Errorf("compat_service: %q is not one of services", c.CompatService)
+		}
+		if sc.Kind != KindEngine && sc.Kind != KindShim {
+			return nil, fmt.Errorf("compat_service: %q is a %s; chat needs an engine or a shim", c.CompatService, sc.Kind)
+		}
 	}
 	return c, nil
 }
@@ -308,3 +337,14 @@ func ReadListen(path string) (string, error) {
 	}
 	return raw.Listen, nil
 }
+
+// Label is the name web chat shows for the service: display, else the service name.
+func (c *ServiceConfig) Label() string {
+	if c.Display != "" {
+		return c.Display
+	}
+	return c.Name
+}
+
+// LlamaID is the model id the llama.cpp face lists: llama-server names models after their GGUF file.
+func (c *ServiceConfig) LlamaID() string { return strings.TrimSuffix(c.Label(), ".gguf") + ".gguf" }

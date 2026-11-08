@@ -95,3 +95,36 @@ func TestRealTokenizerEndToEnd(t *testing.T) {
 		}
 	}
 }
+
+// TestRealTokenizerChatCompletions runs /v1/chat/completions through the real Qwen chat template: a tool
+// call in the history renders as the template's XML, and the answer streams back as chat chunks.
+func TestRealTokenizerChatCompletions(t *testing.T) {
+	gguf := findGGUF(t)
+	e := startMuxOpts(t, Options{LoadModel: LoadTokenizer}, epSpec{name: "q", scenario: "normal", gguf: gguf, compat: true, display: "Qwen3.8-27B"})
+	e.waitState("q", StateUp, 20*time.Second)
+	resp := e.at(e.compat, "POST", "/v1/chat/completions", `{"cache_prompt":true,"max_tokens":1024,"stream":true,"tool_choice":"auto",`+
+		`"tools":[{"type":"function","function":{"name":"get_weather","description":"weather","parameters":{"type":"object","properties":{"city":{"type":"string"},"days":{"type":"integer"}}}}}],`+
+		`"messages":[{"role":"system","content":"Be brief."},{"role":"user","content":"weather in Paris?"},`+
+		`{"role":"assistant","content":"","reasoning_content":"need the tool","tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\",\"days\":3}"}}]},`+
+		`{"role":"tool","tool_call_id":"call_1","content":"sunny"},{"role":"user","content":"thanks, and Rome?"}]}`)
+	cs := readChatStream(t, resp.Body)
+	resp.Body.Close()
+	if len(cs.other) != 0 || !cs.done || cs.text("content") != "Let me check." || len(cs.toolCalls()) != 2 {
+		t.Fatalf("stream: other %q done %v content %q tool calls %v", cs.other, cs.done, cs.text("content"), cs.toolCalls())
+	}
+	if f, _ := cs.finish(); f != "tool_calls" {
+		t.Errorf("finish %q", f)
+	}
+	p := e.readOut("prompt")
+	for _, w := range []string{
+		"<|im_start|>system\n# Tools",
+		`"name": "get_weather"`,
+		"Be brief.<|im_end|>\n<|im_start|>user\nweather in Paris?<|im_end|>\n",
+		"<|im_start|>assistant\n<think>\nneed the tool\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n<parameter=days>\n3\n</parameter>\n</function>\n</tool_call><|im_end|>\n",
+		"<|im_start|>user\n<tool_response>\nsunny\n</tool_response><|im_end|>\n<|im_start|>user\nthanks, and Rome?<|im_end|>\n<|im_start|>assistant\n<think>\n",
+	} {
+		if !strings.Contains(p, w) {
+			t.Errorf("prompt lacks %q:\n%s", w, p)
+		}
+	}
+}

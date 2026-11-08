@@ -8,11 +8,41 @@ import (
 	"strings"
 )
 
-// refusedFields steer generation; the server sets them, so a request that sets one is refused.
-var refusedFields = []string{
-	"temperature", "top_p", "top_k", "seed", "max_output_tokens", "presence_penalty", "frequency_penalty", "stop",
-	"max_tokens", "max_completion_tokens", "repetition_penalty", "repeat_penalty", "min_p", "typical_p",
-	"logit_bias", "logprobs", "top_logprobs", "n", "best_of", "stop_sequences", "max_tool_calls",
+// steeringFields steer generation; the server sets them, so a request that sets one is refused on every API.
+var steeringFields = []string{
+	"temperature", "top_p", "top_k", "seed", "presence_penalty", "frequency_penalty", "stop",
+	"repetition_penalty", "repeat_penalty", "min_p", "typical_p", "logit_bias", "logprobs", "top_logprobs", "n", "best_of",
+	"stop_sequences",
+}
+
+// responsesRefused are refused on /v1/responses besides the steering fields: the output budget is the server's.
+// (/v1/chat/completions ignores max_tokens and max_completion_tokens instead: see PROTOCOL.md.)
+var responsesRefused = []string{"max_output_tokens", "max_tokens", "max_completion_tokens", "max_tool_calls"}
+
+// chatRefused are refused on /v1/chat/completions besides the steering fields.
+var chatRefused = []string{"response_format"}
+
+// refuseSet is the 400 for the first of fields that top sets (null counts as not set).
+func refuseSet(top map[string]json.RawMessage, lists ...[]string) *apiError {
+	for _, fields := range lists {
+		for _, f := range fields {
+			if v, ok := top[f]; ok && !isNull(v) {
+				return badRequest("unsupported_parameter", f, "%s is set by the server and cannot be set by a client (a client chooses only the model and the reasoning effort)", f)
+			}
+		}
+	}
+	return nil
+}
+
+// checkEffort is the 400 for an effort the service does not offer.
+func checkEffort(sc *ServiceConfig, effort, param string) *apiError {
+	for _, e := range sc.Efforts {
+		if e == effort {
+			return nil
+		}
+	}
+	return badRequest("unsupported_reasoning_effort", param,
+		"reasoning effort %q is not offered by %s (efforts: %s)", effort, sc.Name, strings.Join(sc.Efforts, ", "))
 }
 
 // imageData is one input_image: its bytes (from a data: URL) and its hash, in prompt order.
@@ -41,6 +71,7 @@ type prepared struct {
 	toolInfo map[string]*toolInfo
 	images   []imageData
 	compact  bool // the input ended in compaction_trigger: the answer is a summary of the conversation
+	chat     bool // the request came in as /v1/chat/completions: the answer goes out as chat completion chunks
 }
 
 // chatFn / chatTool are the OpenAI chat tool shape, with a stable field order (it is part of the prompt).
@@ -83,10 +114,8 @@ func prepare(body []byte, sc *ServiceConfig) (*prepared, *apiError) {
 	if err := json.Unmarshal(body, &top); err != nil {
 		return nil, badRequest("invalid_json", "", "the body is not a JSON object: %v", err)
 	}
-	for _, f := range refusedFields {
-		if v, ok := top[f]; ok && !isNull(v) {
-			return nil, badRequest("unsupported_parameter", f, "%s is set by the server and cannot be set by a client (a client chooses only the model and the reasoning effort)", f)
-		}
+	if aerr := refuseSet(top, steeringFields, responsesRefused); aerr != nil {
+		return nil, aerr
 	}
 	if v, ok := top["previous_response_id"]; ok && !isNull(v) {
 		return nil, badRequest("unsupported_parameter", "previous_response_id", "previous_response_id is not supported: ai-mux keeps no responses, send the whole input")
@@ -115,15 +144,8 @@ func prepare(body []byte, sc *ServiceConfig) (*prepared, *apiError) {
 		}
 		if r.Effort != nil && *r.Effort != "" {
 			p.effort = *r.Effort
-			ok := false
-			for _, e := range sc.Efforts {
-				if e == p.effort {
-					ok = true
-				}
-			}
-			if !ok {
-				return nil, badRequest("unsupported_reasoning_effort", "reasoning.effort",
-					"reasoning effort %q is not offered by %s (efforts: %s)", p.effort, sc.Name, strings.Join(sc.Efforts, ", "))
+			if aerr := checkEffort(sc, p.effort, "reasoning.effort"); aerr != nil {
+				return nil, aerr
 			}
 		}
 	}

@@ -17,7 +17,8 @@ func TestConfigSentry(t *testing.T) {
 		t.Fatal(err)
 	}
 	if h.Listen != "0.0.0.0:18100" || h.Socket != "/run/user/1000/ai-mux.sock" || h.ServicesDir != "/data/ai-mux/services" ||
-		len(h.Services) != 1 || h.Services[0].Name != "qwen3.8-27b" || !h.Services[0].Up {
+		len(h.Services) != 1 || h.Services[0].Name != "qwen3.8-27b" || !h.Services[0].Up ||
+		h.CompatListen != "0.0.0.0:18101" || h.CompatService != "qwen3.8-27b" {
 		t.Fatalf("host: %+v", h)
 	}
 	// the host file points at a checkout on sentry; load the same file against this repo's services/
@@ -29,6 +30,9 @@ func TestConfigSentry(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := c.Services[0]
+	if c.CompatService != "qwen3.8-27b" || e.Display != "Qwen3.8-27B" || e.LlamaID() != "Qwen3.8-27B.gguf" {
+		t.Fatalf("compat: %+v display %q", c, e.Display)
+	}
 	if e.Name != "qwen3.8-27b" || e.Kind != KindEngine || !e.Up || e.Ctx != 262144 || e.Restart != "on-failure" || e.Vision ||
 		e.Cwd != "/data/models/q27" || e.Env["JULIA_DEPOT_PATH"] != "/data/julia-depot" ||
 		len(e.Efforts) != 5 || e.Command[0] != "/usr/bin/julia" || e.Command[1] != "-t" || e.Command[2] != "24" ||

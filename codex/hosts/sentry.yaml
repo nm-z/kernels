@@ -2,5 +2,7 @@
 listen: 0.0.0.0:18100
 socket: /run/user/1000/ai-mux.sock
 services_dir: /data/ai-mux/services      # a checkout of codex/services
+compat_listen: 0.0.0.0:18101             # the llama.cpp face for web chat (nm-z.com/chat's gateway): host:port is all it takes
+compat_service: qwen3.8-27b
 services:
   qwen3.8-27b: {up: true}

@@ -37,6 +37,9 @@ on each route change (auto shims) and at the first token. `: keepalive` comments
 
 ## Other endpoints
 
+    POST /v1/chat/completions        OpenAI Chat Completions (stream or not; tools; reasoning_effort) on an engine or shim;
+                                     max_tokens is ignored: the server owns the output budget
+    GET  /props                      {"default_generation_settings":{"n_ctx"},"modalities":{"vision"},…}: llama.cpp's, for web chat
     POST /v1/embeddings              OpenAI embeddings on an embed service (string or strings; float or base64)
     GET  /v1/models                  {"data":[{"id","kind","ctx","efforts","vision","state"}]}   (embed: "dims")
     GET  /v1/services                {"data":[{name,kind,state,device,pid,ctx,slots,since,last,progress,log,reason}]}

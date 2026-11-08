@@ -8,11 +8,12 @@ Unix socket. Clients use HTTP.
 
 ## Services and the host file
 
-`services/NAME/service.yaml` (+ the service's code): `kind` (`engine|shim|embed|job`), `gguf` (engines:
+`services/NAME/service.yaml` (+ the service's code): `kind` (`engine|shim|embed|job`), `display` (the name web chat shows), `gguf` (engines:
 tokenizer + chat template), `ctx`, `efforts`, `vision`, `device`, `command`, `cwd` (default: the folder),
 `env`, `post_stop`, `restart` (`on-failure`: 10 s, 20 s … 5 min; jobs default to `no`).
 `~/.config/ai-mux/ai-mux.yaml` (example: hosts/sentry.yaml): `listen`, `socket`, `services_dir`,
-`services: {NAME: {up: bool}}`. The process gets `AI_MUX_SOCK`, `AI_MUX_SERVICE`, `AI_MUX_SERVICE_DIR`.
+`services: {NAME: {up: bool}}`, and for web chat `compat_listen` + `compat_service` (a second address that serves only
+the llama.cpp face of one service: `/v1/models`, `/props`, `/v1/chat/completions`). The process gets `AI_MUX_SOCK`, `AI_MUX_SERVICE`, `AI_MUX_SERVICE_DIR`.
 A service that breaks rule 5 is killed and `failed`: an engine run without prefill lines, stats lines or its
 measured `done`; a shim delta before `ttft` (or an auto shim without `route`); wrong embed vectors; a job with
 no `progress` for 12.5 s or a `pct` outside 0-100. A shim's `run` has `messages` (chat form; images are

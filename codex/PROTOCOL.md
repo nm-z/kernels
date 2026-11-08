@@ -22,7 +22,8 @@ client (Codex, TUI, curl) ──HTTP──▶ ai-mux ──unix socket──▶ 
 3. **Only ai-mux's own processes register.** A registration whose peer process is not in the scope ai-mux
    started for that service is refused.
 4. **The server sets the context window, sampling and budgets.** A client chooses only the model and the
-   reasoning effort. Requests that set anything else that steers generation are refused (400). The
+   reasoning effort. Requests that set anything else that steers generation are refused (400; the one exception,
+   `max_tokens` on the llama.cpp face, is below). The
    context window is broadcast (`/v1/models`, every stats event); filling it is handled by compaction.
 5. **A service streams or it is dropped.** What each kind must stream is below. A service that ends a
    run or job without it is disconnected and marked `failed`.
@@ -34,6 +35,7 @@ Each service is a folder `codex/services/NAME/` with its code and `service.yaml`
 ```yaml
 # codex/services/qwen3.8-27b/service.yaml
 kind: engine                       # engine | shim | embed | job
+display: Qwen3.8-27B               # optional: the name web chat shows (see the llama.cpp face)
 gguf: /data/models/qwen3.8-27b-q5/Qwen3.8-27B.Q5_K_M.gguf   # engine: tokenizer + chat template
 ctx: 262144                        # engine, shim: context window broadcast to clients
 efforts: [none, low, medium, high, xhigh]
@@ -51,6 +53,8 @@ restart: on-failure                # or: no (jobs: no)
 listen: 0.0.0.0:18100
 socket: /run/user/1000/ai-mux.sock
 services_dir: /data/ai-mux/services          # a checkout of codex/services
+compat_listen: 0.0.0.0:18101                 # optional: the llama.cpp face (below) on its own address
+compat_service: qwen3.8-27b                  # the service that face fronts
 services:
   qwen3.8-27b: {up: true}                    # desired state; `ai-mux up|down NAME` rewrites it
   bge-small:   {up: true}
@@ -125,6 +129,7 @@ ai-mux → embed: `run` with `id`, `texts`.
 | request | answer |
 |---|---|
 | `POST /v1/responses` | the OpenAI Responses API, streamed (SSE); engine and shim services |
+| `POST /v1/chat/completions`, `GET /props` | the llama.cpp-compatible face for web chat, below |
 | `POST /v1/embeddings` | the OpenAI embeddings API; embed services |
 | `GET /v1/models` | `{"data":[{"id","kind","ctx","efforts","vision","state"}]}` |
 | `GET /v1/services` | every service: `name, kind, state, device, pid, ctx, slots, since, last, progress, log, reason` |
@@ -164,3 +169,34 @@ conversation (dropping the oldest turns first if even that prompt does not fit) 
 (ai-mux's own encoding of the summary). The client replaces the compacted history with that item, keeping
 whatever it retains after it (Codex keeps its recent user messages). In later requests ai-mux expands a
 `compaction` item into the summary at its place in the conversation.
+
+## llama.cpp-compatible face for web chat
+
+A web chat gateway (nm-z.com/chat's) polls each backend as it would a llama.cpp server and chats with it. ai-mux
+answers in that shape, from the same services, the same prompts and the same rules; nothing here changes
+what `/v1/responses` does.
+
+| request | answer |
+|---|---|
+| `GET /props` | `{"default_generation_settings":{"n_ctx":CTX},"modalities":{"vision":BOOL},"chat_template":"","model_path":GGUF}` for the compat service if it is up, else for the first engine that is up (the service name if it has no gguf); 404 if none |
+| `GET /v1/models` | only on the compat listener: `{"object":"list","data":[{"id":"<display>.gguf","object":"model"}]}`, the one model named as llama-server names its GGUF (`display` of service.yaml, else the service name); listed whether or not it is up, which `/props` says |
+| `POST /v1/chat/completions` | OpenAI Chat Completions, streamed or not, on an engine or shim; `model` is a service name or its display name (with or without `.gguf`), and without one the compat service |
+
+`/props` and chat completions are on the main address too. `GET /v1/models` there stays ai-mux's own (service names are the
+ids clients send), so a client that can only be given host:port, as the gateway can, is given `compat_listen`, a second
+address that serves only these three paths, in front of `compat_service`.
+
+Chat completions follow rule 4 like `/v1/responses`: `temperature`, `top_p`, `top_k`, `seed`, `presence_penalty`,
+`frequency_penalty`, `stop`, `n`, `logit_bias`, `response_format` and an effort not in the service's `efforts` are refused with 400.
+**The exception:** `max_tokens` and `max_completion_tokens` are ignored, not refused, because the gateway hard-codes `max_tokens`
+and the server owns the output budget (a run ends at `min(ctx - prompt, the engine's max_new)` with `finish_reason: "length"`); the llama.cpp
+transport fields `cache_prompt` and `stream_options` (usage is always sent) are ignored too. The effort is `reasoning_effort` or
+`effort`, by default the middle of the service's `efforts`. Messages (system, developer, user, assistant, tool; content a string or
+parts, images as `image_url` `data:` URLs) and tools go in the OpenAI chat shape and are folded into the same chat template as
+`/v1/responses` input; an assistant message's `reasoning_content` is kept. A prompt that does not fit is a 400
+`context_length_exceeded`.
+
+The stream is plain chat completions, `data: {…}` lines and `data: [DONE]`, with no event names and no ai-mux events: a first chunk with
+the role, `delta.reasoning_content`, `delta.content` and `delta.tool_calls` (each call whole, with its `index`) as they are made, then one
+chunk with an empty delta, `finish_reason` (`stop`, `tool_calls`, `length`) and `usage`. During a long silence an empty-delta chunk
+goes out every 10 s instead of an SSE comment. A run that fails after the stream began ends with `data: {"error":{…}}` and `[DONE]`.

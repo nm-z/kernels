@@ -1,4 +1,5 @@
 kind: engine
+display: Qwen3.8-27B
 gguf: /data/models/qwen3.8-27b-q5/Qwen3.8-27B.Q5_K_M.gguf
 ctx: 262144
 efforts: [none, low, medium, high, xhigh]

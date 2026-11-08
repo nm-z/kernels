@@ -49,9 +49,11 @@ type Server struct {
 	jobEvery    time.Duration
 	finishGrace time.Duration
 
-	sockLn  net.Listener
-	httpLn  net.Listener
-	httpSrv *http.Server
+	sockLn    net.Listener
+	httpLn    net.Listener
+	httpSrv   *http.Server
+	compatLn  net.Listener // the llama.cpp face (compat_listen), if configured
+	compatSrv *http.Server
 
 	quit     chan struct{}
 	quitOnce sync.Once
@@ -154,6 +156,14 @@ func (s *Server) Hub() *Hub { return s.hub }
 // Addr is the HTTP address ai-mux listens on.
 func (s *Server) Addr() string { return s.httpLn.Addr().String() }
 
+// CompatAddr is the address of the llama.cpp face (compat_listen), or "" if there is none.
+func (s *Server) CompatAddr() string {
+	if s.compatLn == nil {
+		return ""
+	}
+	return s.compatLn.Addr().String()
+}
+
 // Start opens the service socket and the HTTP listener, and starts every service that should be up.
 func (s *Server) Start() error {
 	sock := s.cfg.Socket
@@ -178,6 +188,21 @@ func (s *Server) Start() error {
 	}
 	s.httpLn = hl
 	s.httpSrv = &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	if s.cfg.CompatListen != "" {
+		cl, err := net.Listen("tcp", s.cfg.CompatListen)
+		if err != nil {
+			hl.Close()
+			ln.Close()
+			return fmt.Errorf("compat_listen: %w", err)
+		}
+		s.compatLn = cl
+		s.compatSrv = &http.Server{Handler: s.compatHandler(), ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			if err := s.compatSrv.Serve(cl); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				s.logf("compat http: %v", err)
+			}
+		}()
+	}
 	go s.serveSocket()
 	go func() {
 		if err := s.httpSrv.Serve(hl); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -193,6 +218,9 @@ func (s *Server) Start() error {
 	}
 	s.hub.Publish("ai-mux.start", map[string]any{"listen": hl.Addr().String(), "services": len(s.order)})
 	s.logf("ai-mux: listening on %s, services on %s (%s), %d services", hl.Addr(), sock, map[bool]string{true: "systemd scopes", false: "plain process groups"}[s.systemd], len(s.order))
+	if s.compatLn != nil {
+		s.logf("ai-mux: llama.cpp face for %s on %s", s.cfg.CompatService, s.compatLn.Addr())
+	}
 	return nil
 }
 
@@ -206,11 +234,13 @@ func (s *Server) Shutdown() {
 	case <-time.After(2 * time.Minute):
 		s.logf("shutdown: services did not stop within 2 minutes")
 	}
-	if s.httpSrv != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		s.httpSrv.Shutdown(ctx)
-		cancel()
-		s.httpSrv.Close()
+	for _, srv := range []*http.Server{s.httpSrv, s.compatSrv} {
+		if srv != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			srv.Shutdown(ctx)
+			cancel()
+			srv.Close()
+		}
 	}
 	if s.sockLn != nil {
 		s.sockLn.Close()

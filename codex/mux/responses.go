@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 )
 
@@ -31,15 +30,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	svc := s.svcs[probe.Model]
 	if svc == nil || svc.kind == KindJob {
-		names := make([]string, 0, len(s.svcs))
-		for n, e := range s.svcs {
-			if e.kind != KindJob {
-				names = append(names, n)
-			}
-		}
-		sort.Strings(names)
-		writeAPIError(w, &apiError{Status: http.StatusNotFound, Type: "invalid_request_error", Code: "model_not_found", Param: "model",
-			Message: fmt.Sprintf("model %q is not served here (models: %s)", probe.Model, strings.Join(names, ", "))})
+		writeAPIError(w, s.modelNotFound(probe.Model))
 		return
 	}
 	if svc.kind == KindEmbed {
@@ -51,6 +42,12 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, aerr)
 		return
 	}
+	s.dispatch(w, r, svc, pr)
+}
+
+// dispatch runs a prepared request on its service: an engine or a shim, answered as the request asked
+// (Responses events, or chat completion chunks).
+func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, svc *Service, pr *prepared) {
 	conn, state := svc.currentConn()
 	if conn == nil {
 		writeAPIError(w, &apiError{Status: http.StatusServiceUnavailable, Type: "server_error", Code: "service_unavailable",
@@ -69,7 +66,12 @@ func openStream(w http.ResponseWriter, pr *prepared) sink {
 	if !pr.stream {
 		return nil
 	}
-	sk := newSSESink(w)
+	var sk sink
+	if pr.chat {
+		sk = newChatSink(w, pr.model)
+	} else {
+		sk = newSSESink(w)
+	}
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
@@ -108,6 +110,10 @@ func completeResponse(w http.ResponseWriter, pr *prepared, rb *respBuilder, usag
 		} else {
 			rb.completed(usage)
 		}
+		return
+	}
+	if pr.chat {
+		writeJSON(w, http.StatusOK, chatCompletionObj(rb, usage, incomplete))
 		return
 	}
 	status := "completed"

@@ -29,14 +29,18 @@ type epSpec struct {
 	efforts  []string
 	extraEnv map[string]string
 	gguf     string
+	display  string // service.yaml display:
+	cfgGGUF  string // the gguf: in service.yaml, when the engine process must not be given it
+	compat   bool   // this service is the compat service, fronted by a compat listener
 }
 
 type tenv struct {
-	t    *testing.T
-	srv  *Server
-	base string
-	dir  string
-	out  string
+	t      *testing.T
+	srv    *Server
+	base   string
+	compat string // the compat listener's base URL, if any
+	dir    string
+	out    string
 }
 
 // shortDir is a short temp dir (a Unix socket path is limited to about 100 bytes).
@@ -101,10 +105,16 @@ func startMuxOpts(t *testing.T, opts Options, specs ...epSpec) *tenv {
 		if kind == KindShim {
 			gguf = ""
 		}
+		if sp.cfgGGUF != "" {
+			gguf = sp.cfgGGUF
+		}
 		cfg.Services = append(cfg.Services, &ServiceConfig{
-			Name: sp.name, Dir: dir, Up: true, Kind: kind, GGUF: gguf, Ctx: ctxN, Efforts: efforts, Vision: kind == KindEngine || kind == KindShim,
+			Name: sp.name, Display: sp.display, Dir: dir, Up: true, Kind: kind, GGUF: gguf, Ctx: ctxN, Efforts: efforts, Vision: kind == KindEngine || kind == KindShim,
 			Device: "test device", Command: []string{os.Args[0]}, Cwd: dir, Env: env, PostStop: sp.postStop, Restart: restart,
 		})
+		if sp.compat {
+			cfg.CompatListen, cfg.CompatService = "127.0.0.1:0", sp.name
+		}
 	}
 	if opts.Config == nil {
 		opts.Config = cfg
@@ -137,7 +147,11 @@ func startMuxOpts(t *testing.T, opts Options, specs ...epSpec) *tenv {
 		t.Fatal(err)
 	}
 	t.Cleanup(srv.Shutdown)
-	return &tenv{t: t, srv: srv, base: "http://" + srv.Addr(), dir: dir, out: out}
+	te := &tenv{t: t, srv: srv, base: "http://" + srv.Addr(), dir: dir, out: out}
+	if a := srv.CompatAddr(); a != "" {
+		te.compat = "http://" + a
+	}
+	return te
 }
 
 func (e *tenv) waitState(name, state string, d time.Duration) ServiceInfo {
