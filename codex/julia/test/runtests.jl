@@ -2,7 +2,7 @@
 # and done, a cancel, and the JSON round trip. Under a few seconds.
 include(joinpath(@__DIR__, "..", "AiMux.jl")); using .AiMux, Sockets, Test
 sock = tempname() * ".sock"; srv = listen(sock)
-ENV["AI_MUX_SOCK"] = sock; ENV["AI_MUX_ENDPOINT"] = "fake"
+ENV["AI_MUX_SOCK"] = sock; ENV["AI_MUX_SERVICE"] = "fake"
 engine = Threads.@spawn AiMux.serve(positions = 1000, max_new = 50, slots = 1) do r
     for p in (256, 512, length(r.ids)); AiMux.prefill!(r, p); sleep(0.3); end
     for t in 1:10
@@ -13,7 +13,7 @@ engine = Threads.@spawn AiMux.serve(positions = 1000, max_new = 50, slots = 1) d
 end
 c = accept(srv)
 reg = AiMux.jparse(readline(c))
-@test reg["op"] == "register" && reg["endpoint"] == "fake" && reg["positions"] == 1000 && reg["max_new"] == 50
+@test reg["op"] == "register" && reg["service"] == "fake" && reg["kind"] == "engine" && reg["positions"] == 1000 && reg["max_new"] == 50
 println(c, """{"op":"registered","ctx":900}""")
 println(c, """{"op":"run","id":"r1","ids":[$(join(1:600, ','))],"max_new":10,"stop":[7],"images":[]}""")
 lines = Dict{String,Any}[]

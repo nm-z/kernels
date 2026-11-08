@@ -13,7 +13,7 @@
 #
 # The live prefill and decode tok/s ai-mux streams while a run goes are measured here from when the
 # engine reports progress and tokens; the final ones are the engine's own. serve returns when ai-mux
-# closes the connection (it stops the endpoint's process then anyway).
+# closes the connection (it stops the service's process then anyway).
 module AiMux
 using Sockets, Printf
 
@@ -145,14 +145,14 @@ fail!(r::Run, msg) = (r.finished || send(r, jobj(:op => "error", :id => r.id, :m
 """
     serve(f; positions, max_new, slots = 1, vision = false, encode = nothing)
 
-Connect to `ENV["AI_MUX_SOCK"]` as endpoint `ENV["AI_MUX_ENDPOINT"]`, register, and run `f(r::Run)` for
+Connect to `ENV["AI_MUX_SOCK"]` as service `ENV["AI_MUX_SERVICE"]`, register, and run `f(r::Run)` for
 each run (at most `slots` at once). `encode(img, bytes) -> positions` handles image encoding when
 `vision`. Returns ai-mux's configured context window when the connection closes.
 """
 function serve(f; positions::Integer, max_new::Integer, slots::Integer = 1, vision::Bool = false, encode = nothing)
-    sock = ENV["AI_MUX_SOCK"]; ep = ENV["AI_MUX_ENDPOINT"]
+    sock = ENV["AI_MUX_SOCK"]; ep = ENV["AI_MUX_SERVICE"]
     c = Conn(connect(sock), ReentrantLock())
-    send(c, jobj(:op => "register", :endpoint => ep, :positions => positions, :max_new => max_new, :slots => slots, :vision => vision))
+    send(c, jobj(:op => "register", :service => ep, :kind => "engine", :positions => positions, :max_new => max_new, :slots => slots, :vision => vision))
     ctx = 0; runs = Dict{String,Run}(); free = Base.Semaphore(slots)
     while !eof(c.io)
         m = jparse(readline(c.io)); op = m["op"]
