@@ -3,7 +3,7 @@
 # runs a whole request: the prefill (GEMMs over as many positions as fit) then the decode loop (GEMVs).
 # Model: mradermacher/Qwen3.8-27B-GGUF Q5_K_M (static K-quants: Q5_K, Q6_K, F32; its MTP layer is blk.64).
 # Reports only: prefill tok/s, decode tok/s, idle time %.
-#   julia -t 24 qwen3.8-27b.jl --model FILE --serve SOCK
+#   julia -t 24 qwen3.8-27b.jl --model FILE [--console SOCK]   (an ai-mux endpoint: ai-mux starts it, codex/PROTOCOL.md)
 using AMDGPU, Mmap, Printf, Sockets
 
 # ---------------------------------------------------------------------------------------------
@@ -1775,13 +1775,16 @@ const BDEC = let bs = [33:126; 161:172; 174:255], cs = copy(bs), n = 0
 end
 detok(vocab, ids) = String(UInt8[get(BDEC, ch, UInt8('?')) for i in ids for ch in vocab[i+1]])
 
-# ---- the resident server: the weights load once, the persistent kernel compiles once; one command a connection ----
+# ---- serving: runs come from ai-mux (codex/PROTOCOL.md) through AiMux.jl, which talks the protocol; this
+# engine only turns token ids into token ids. The weights load once and the persistent kernel compiles once.
+# A development console also listens on a Unix socket when --console SOCK is given, one command a connection:
 #   gen N ID ID ...            greedy: N tokens after the given token ids
 #   gen2 N1 N2 F.ids L1 L2     two requests at once (each in a resident slot of MAXCTX positions): L1 then L2 prompt ids from F
 #   kl N REF.logits.f16        KL against BF16 reference logits over the first N tokens of REF's sequence
 #   reload                     include this file again and recompile the kernel (the weights stay resident)
 #   eval CODE                  run Julia code in the server, print its value
 #   echo 'gen 32 9707 11' | socat - UNIX-CONNECT:SOCK
+isdefined(Main, :AiMux) || include(joinpath(@__DIR__, "codex", "julia", "AiMux.jl"))
 if !isdefined(Main, :SRV)
     const SRV = Ref{Any}(nothing)
 end
@@ -1791,92 +1794,73 @@ end
 if !isdefined(Main, :PK)
     const PK = Ref{Any}(nothing)                           # the persistent kernel engine
 end
+if !isdefined(Main, :ENGLK)
+    const ENGLK = ReentrantLock()                          # one dispatch at a time (runs and console commands)
+end
 function pinit()
     t0 = time(); PK[] === nothing || (foreach(K -> foreach(a -> a isa ROCArray && AMDGPU.unsafe_free!(a), (getfield(K, f) for f in fieldnames(typeof(K)))), PK[].K); AMDGPU.HIP.hipHostFree(PK[].hx.p); hasproperty(PK[].hx, :c) && AMDGPU.HIP.hipHostFree(PK[].hx.c))
     PK[] = PEngine(SRV[].dies)
     @printf("persistent kernel: %d workgroups a die, %d positions a prefill forward, clock %.2f MHz, compiled in %.0f s\n", PK[].nwg, PK[].npos, PK[].hz / 1e6, time() - t0); flush(stdout)
 end
-function serve(path, sock)
+function serve(path, console)
     dies, g = load_engine(path)
     dpm!(dies, "auto")                                    # (a previous engine killed mid-request left them forced high)
     SRV[] =(dies = dies, g = g, vocab = g.kv["tokenizer.ggml.tokens"], file = abspath(@__FILE__))
     SLOTS[] = [newstate(dies, MAXCTX) for _ in 1:NR]
     pinit()
-    lk = ReentrantLock()
-    ispath(sock) && rm(sock)
-    srv = listen(sock); println("serving on $sock"); flush(stdout)
-    while true
-        c = accept(srv)
-        @async try
-            Base.invokelatest(session, c, lk)              # the newest definitions, after a reload
-        catch e
-            println(c, "error: ", sprint(showerror, e, catch_backtrace()))
-        finally
-            close(c)
+    if console !== nothing
+        ispath(console) && rm(console)
+        srv = listen(console); println("console on $console"); flush(stdout)
+        @async while true
+            c = accept(srv)
+            @async try
+                line = readline(c)
+                lock(() -> Base.invokelatest(handle, c, line), ENGLK)   # the newest definitions, after a reload
+            catch e
+                println(c, "error: ", sprint(showerror, e, catch_backtrace()))
+            finally
+                close(c)
+            end
         end
     end
-end
-# flashd's engine protocol (flash-sass kern/flashd.c): "timings 1" and "cancel_on_eof 1" are acknowledged, "stop A B"
-# sets the stop tokens, "sample ..." (greedy here), "img" and "snap" are taken and ignored, "info" answers the positions,
-# "chat N ID ..." runs the request and streams "tok ID" lines as the kernel writes them to host memory, then
-# "done ngen ended nprompt run_ms first_ms 0 0". Any other first line is one of handle's commands.
-function session(c, lk)
-    stops = (-1, -1)
-    while !eof(c)
-        line = readline(c); a = split(line); isempty(a) && continue
-        if a[1] in ("timings", "cancel_on_eof")
-            println(c, "ok: ", line)
-        elseif a[1] == "stop"
-            v = parse.(Int, a[2:end]); stops = (length(v) >= 1 ? v[1] : -1, length(v) >= 2 && v[2] != 0xffffffff ? v[2] : -1)
-        elseif a[1] in ("sample", "img", "snap")
-        elseif a[1] == "info"
-            println(c, "info ", MAXCTX, " 0")
-        elseif a[1] == "chat"
-            lock(() -> chat(c, parse(Int, a[2]), parse.(Int, a[3:end]), stops), lk); return
-        else
-            lock(() -> handle(c, line), lk); return
-        end
+    if haskey(ENV, "AI_MUX_SOCK")
+        AiMux.serve(r -> lock(() -> Base.invokelatest(run!, r), ENGLK); positions = MAXCTX, max_new = PK[].maxgen, slots = 1)
+        println("ai-mux closed the connection"); flush(stdout)
+    else
+        console === nothing && error("neither AI_MUX_SOCK nor --console: nothing to serve")
+        wait(Condition())
     end
 end
-function chat(c, nnew, ids, stops)
-    PE = PK[]; nnew = clamp(nnew, 1, min(PE.maxgen, MAXCTX - length(ids)))
+# one ai-mux run: the kernel writes tokens and the prompt positions it has run to host memory; they go out as it does,
+# and a cancel from ai-mux stops the kernel at its next check (a forward at decode, a layer in a prefill)
+function run!(r)
+    PE = PK[]; ids = r.ids; nnew = clamp(r.max_new, 1, min(PE.maxgen, MAXCTX - length(ids)))
+    stops = (length(r.stop) >= 1 ? r.stop[1] : -1, length(r.stop) >= 2 ? r.stop[2] : -1)
     outp = Ptr{Int32}(PE.hx.c + PE.hx.tok)
     for i in 1:nnew; unsafe_store!(outp, Int32(-1), i); end
     hw(i) = Ptr{UInt32}(PE.hx.c + PE.hx.out + 4i)         # host words: 13 cancel, 14 the prompt positions run
     for i in 12:15; unsafe_store!(hw(i), UInt32(0)); end
-    t0 = time(); job = Threads.@spawn request!(PE, [(ids, nnew)], SLOTS[][1:1], 0; stops, ctl = false)
-    n = 0; t1 = 0.0; ended = 0; pr = 0; tp = 0.0; gone = false
-    # a write to a client that has gone fails: the request is cancelled, and this still waits for the kernel (the
-    # lock is held until it stops, so no request starts under it)
-    say(a...) = gone || try
-        println(c, a...)
-    catch
-        gone = true; unsafe_store!(hw(13), UInt32(1))
+    job = Threads.@spawn request!(PE, [(ids, nnew)], SLOTS[][1:1], 0; stops, ctl = false)
+    n = 0; stopped = false
+    function pump()
+        new = Int[]
+        while n < nnew
+            t = unsafe_load(outp, n + 1); t < 0 && break
+            n += 1; push!(new, t); (t == stops[1] || t == stops[2]) && (stopped = true)
+        end
+        AiMux.tokens!(r, new)
     end
-    function progress()                                    # "prog ran total cached", at most one every 500 ms
-        n == 0 || return
-        ran = Int(unsafe_load(hw(14))); now = time()
-        (ran > pr && now - tp >= 0.5) && (say("prog ", ran, " ", length(ids), " 0"); pr = ran; tp = now)
+    while !istaskdone(job)
+        n == 0 && AiMux.prefill!(r, Int(unsafe_load(hw(14))))
+        pump()
+        AiMux.cancelled(r) && unsafe_store!(hw(13), UInt32(1))
+        sleep(0.005)
     end
-    pump() = while n < nnew
-        t = unsafe_load(outp, n + 1); t < 0 && break
-        n += 1; n == 1 && (t1 = time()); say("tok ", t); (t == stops[1] || t == stops[2]) && (ended = 1)
-    end
-    # cancel_on_eof: flashd closes its side when the client goes; the kernel stops at its next check (a forward at
-    # decode, a layer in a prefill)
-    @async try
-        eof(c) && !istaskdone(job) && unsafe_store!(hw(13), UInt32(1))
-    catch
-        unsafe_store!(hw(13), UInt32(1))
-    end
-    while !istaskdone(job); progress(); pump(); gone || try flush(c) catch; gone = true end; sleep(0.005); end
     res = fetch(job); pump()
-    gone || try
-        @printf(c, "done %d %d %d %.1f %.1f 0 0\n", n, ended, length(ids), 1e3(time() - t0), 1e3(t1 - t0)); flush(c)
-    catch
-    end
-    @printf("chat: %d prompt, %d out, prefill %.2f tok/s, decode %.2f tok/s, idle time %.1f%%%s\n", length(ids), n,
-            length(ids) / res[3], max(n - 1, 0) / max(res[4], 1e-9), idlepct(res[2]), unsafe_load(hw(13)) != 0 ? " (cancelled)" : ""); flush(stdout)
+    pt = length(ids) / res[3]; dt = max(n - 1, 0) / max(res[4], 1e-9); idle = idlepct(res[2])
+    AiMux.done!(r; prefill_tps = pt, decode_tps = dt, idle_pct = idle, stopped)
+    @printf("run %s: %d prompt, %d out, prefill %.2f tok/s, decode %.2f tok/s, idle time %.1f%%%s\n", r.id, length(ids), n,
+            pt, dt, idle, AiMux.cancelled(r) ? " (cancelled)" : ""); flush(stdout)
 end
 function handle(c, line)
     a = split(line); s = SRV[]
@@ -1901,10 +1885,11 @@ function handle(c, line)
     end
 end
 
+# julia -t 24 qwen3.8-27b.jl --model FILE [--console SOCK]   (started by ai-mux, which sets AI_MUX_SOCK)
 function main(args)
-    k = findfirst(==("--model"), args); i = findfirst(==("--serve"), args)
-    (k === nothing || i === nothing) && error("usage: julia -t 24 qwen3.8-27b.jl --model FILE --serve SOCK")
-    serve(args[k+1], args[i+1])
+    k = findfirst(==("--model"), args); i = findfirst(==("--console"), args)
+    k === nothing && error("usage: julia -t 24 qwen3.8-27b.jl --model FILE [--console SOCK]")
+    serve(args[k+1], i === nothing ? nothing : args[i+1])
 end
 if abspath(PROGRAM_FILE) == @__FILE__() && SRV[] === nothing
     main(ARGS)
