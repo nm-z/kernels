@@ -9,7 +9,7 @@ const CUDAON = Base.find_package("CUDA") !== nothing
 @static if CUDAON; using CUDA; const BE = CUDABackend(); else; using AMDGPU; const BE = ROCBackend(); end
 const KI = KernelAbstractions.KernelInterface
 
-# ---- safetensors (mapped) and JSON ----
+# ---- safetensors (mapped) ----
 struct ST; t::Dict{String,Tuple{Vector{Int},Int,Int}}; map::Vector{UInt8}; end
 function sft(path)
     m = Mmap.mmap(path); n = Int(reinterpret(UInt64, view(m, 1:8))[1]); h = String(m[9:8+n]); t = Dict{String,Tuple{Vector{Int},Int,Int}}()
@@ -21,40 +21,6 @@ function sft(path)
 end
 tensor(g::ST, name) = (t = g.t[name]; reinterpret(UInt16, view(g.map, t[2]+1:t[2]+t[3])))
 bf32(u::UInt16) = reinterpret(Float32, UInt32(u) << 16)
-function jparse(s::String)
-    i = Ref(1); ws() = while s[i[]] in (' ', '\n', '\t', '\r'); i[] = nextind(s, i[]); end
-    function str()
-        i[] += 1; io = IOBuffer()
-        while true
-            c = s[i[]]; i[] = nextind(s, i[]); c == '"' && return String(take!(io))
-            if c == '\\'
-                e = s[i[]]; i[] += 1
-                if e == 'u'
-                    u = parse(UInt32, s[i[]:i[]+3], base = 16); i[] += 4
-                    0xd800 <= u < 0xdc00 && (v = parse(UInt32, s[i[]+2:i[]+5], base = 16); i[] += 6; u = 0x10000 + ((u - 0xd800) << 10) + (v - 0xdc00))
-                    print(io, Char(u))
-                else; print(io, get(Dict('n' => '\n', 't' => '\t', 'r' => '\r', 'b' => '\b', 'f' => '\f'), e, e)); end
-            else; print(io, c); end
-        end
-    end
-    function val()
-        ws(); c = s[i[]]
-        if c == '{'
-            d = Dict{String,Any}(); i[] += 1; ws(); s[i[]] == '}' && (i[] += 1; return d)
-            while true; ws(); k = str(); ws(); i[] += 1; d[k] = val(); ws(); e = s[i[]]; i[] += 1; e == '}' && return d; end
-        elseif c == '['
-            a = Any[]; i[] += 1; ws(); s[i[]] == ']' && (i[] += 1; return a)
-            while true; push!(a, val()); ws(); e = s[i[]]; i[] += 1; e == ']' && return a; end
-        elseif c == '"'; return str()
-        elseif startswith(SubString(s, i[]), "true"); i[] += 4; return true
-        elseif startswith(SubString(s, i[]), "false"); i[] += 5; return false
-        elseif startswith(SubString(s, i[]), "null"); i[] += 4; return nothing
-        end
-        j = i[]; while s[j] in "+-.eE0123456789"; j += 1; end
-        v = s[i[]:j-1]; i[] = j; occursin(r"[.eE]", v) ? parse(Float64, v) : parse(Int, v)
-    end
-    val()
-end
 
 # ---- the model and the card ----
 const NE, NFF, NV, NL, HD, NH, NKV, WIN = 2048, 7680, 128000, 24, 128, 16, 4, 256
@@ -465,38 +431,55 @@ struct OPD; p::LP{UInt8}; dt::Int32; mode::Int32; e::Int32; nk::Int32; ms::Int64
 end
 @inline ld4(sm, i) = unsafe_load(reinterpret(Core.LLVMPtr{NTuple{4,VecElement{Float32}},3}, pointer(sm)), (i >> 2) + 1, Val(16))
 @inline isk(o::OPD) = o.mode == 1 || o.mode == 4 || (o.mode == 3 && o.ks == 1)
-@inline function ldtile!(R::RQ, sm, so, o::OPD, nrow, mmax, m0, k0, K, tid, lines::Bool, sa)
-    kfast = isk(o); eb = o.dt == BF ? Int64(2) : Int64(4); sp0 = so == 0 ? 6400 : 6912
-    nl = kfast ? Int64(nrow) : Int64(32); lmax = kfast ? mmax : K; l0 = kfast ? m0 : k0
-    if lines && tid < nl                                
-        i = l0 + tid; a = Int64(0)
-        if i < lmax
-            if o.mode == 3; a = pint(o.p) + i * (kfast ? o.ms : o.ks) * eb
-            elseif o.mode >= 4; j = Int64(o.m0); while j < o.m0 + o.nm - 1 && i >= mt(R, j, 1); i -= mt(R, j, 1); j += 1; end; a = mt(R, j, 0) + i * mt(R, j, 2) * 2
-            else; r = rowof(R, o.nk, i); a = pint(eaddr(R, o.e, r)) + Int64(o.off) * eb; end
-        end
-        sp!(sm, sp0 + 2tid, a)
+# an operand's 32-k slice into smem, k-major (sm[so + k * stride + m], each k row rotated by 8 (k >> 3)); a line is the operand's row along k
+# (kfast: one per m, its address held for the task) or along m (one per k, resolved each slice)
+@inline function lin(R::RQ, o::OPD, i, lmax, kfast)          # the address of line i (0 past lmax)
+    eb = o.dt == BF ? Int64(2) : Int64(4); a = Int64(0)
+    if i < lmax
+        if o.mode == 3; a = pint(o.p) + i * (kfast ? o.ms : o.ks) * eb
+        elseif o.mode >= 4; j = Int64(o.m0); while j < o.m0 + o.nm - 1 && i >= mt(R, j, 1); i -= mt(R, j, 1); j += 1; end; a = mt(R, j, 0) + i * mt(R, j, 2) * 2
+        else; r = rowof(R, o.nk, i); a = pint(eaddr(R, o.e, r)) + Int64(o.off) * eb; end
     end
-    lines && bar()
-    es = o.mode == 3 ? (kfast ? o.ks : o.ms) : Int64(1)
-    jl = kfast ? Int64(32) : Int64(nrow); j0 = kfast ? k0 : m0; jmax = kfast ? K : mmax; sh = trailing_zeros(jl) - 3; ng = nl << sh
+    a
+end
+@inline ltab!(R::RQ, sm, so, o::OPD, base, lmax, nlines, kfast, tid) = (tid < nlines && sp!(sm, (so == 0 ? 6400 : 6912) + 2tid, lin(R, o, base + tid, lmax, kfast)); bar())
+@inline function kdesc(sm, so, o::OPD, nl, tid, st)          # a thread's two groups (8 k of one held line): (pointer, store offset or -1) each
+    sp0 = so == 0 ? 6400 : 6912; eb = o.dt == BF ? Int64(2) : Int64(4); g = (Int64(tid) & 3) << 3; l1 = Int64(tid) >> 2
+    ok1 = Int64(tid) < (nl << 2); p1 = ok1 ? sp(sm, sp0 + 2l1) : Int64(0); ok2 = Int64(tid) + 256 < (nl << 2); p2 = ok2 ? sp(sm, sp0 + 2l1 + 128) : Int64(0)
+    (p1 != 0 ? p1 + g * eb : Int64(0), ok1 ? g * st + ((l1 + g) & (nl - 1)) : Int64(-1), p2 != 0 ? p2 + g * eb : Int64(0), ok2 ? g * st + ((l1 + 64 + g) & (nl - 1)) : Int64(-1))
+end
+@inline function kld!(sm, so, dt, d, k0, K, g, st)            # the held lines' next 32 k
+    eb = dt == BF ? Int64(2) : Int64(4); jj = k0 + g
     Base.Cartesian.@nexprs 2 q -> begin
-        i_q = Int64(tid) + 256 * (q - 1); l_q = i_q >> sh; g_q = (i_q & ((Int64(1) << sh) - 1)) << 3; jj_q = j0 + g_q; ok_q = i_q < ng && l0 + l_q < lmax && jj_q < jmax
+        v = (0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0)
+        if d[2q - 1] != 0 && jj < K
+            a = lp(UInt8, d[2q - 1] + k0 * eb)
+            v = jj + 7 < K ? rd8(a, dt, Int64(0)) : (Base.Cartesian.@ntuple 8 e -> (jj + e - 1 < K ? rdv(a, dt, Int64(e - 1)) : 0.0f0))
+        end
+        d[2q] >= 0 && Base.Cartesian.@nexprs 8 e -> (sm[so + d[2q] + (e - 1) * st + 1] = v[e])
+    end
+end
+@inline function ldtile!(R::RQ, sm, so, o::OPD, nrow, mmax, m0, k0, K, tid, sa)   # a transposed operand's slice: its lines are k's
+    ltab!(R, sm, so, o, k0, K, 32, false, tid); sp0 = so == 0 ? 6400 : 6912
+    es = o.mode == 3 ? o.ms : Int64(1); sh = trailing_zeros(Int64(nrow)) - 3; ng = Int64(32) << sh
+    Base.Cartesian.@nexprs 2 q -> begin
+        i_q = Int64(tid) + 256 * (q - 1); l_q = i_q >> sh; g_q = (i_q & ((Int64(1) << sh) - 1)) << 3; jj_q = m0 + g_q; ok_q = i_q < ng && k0 + l_q < K && jj_q < mmax
         a_q = lp(UInt8, ok_q ? sp(sm, sp0 + 2l_q) : Int64(0)); v_q = (0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0)   # (an unwritten entry is any bits)
         if ok_q
-            if es == 1 && jj_q + 7 < jmax; v_q = rd8(a_q, o.dt, jj_q)
-            else; v_q = Base.Cartesian.@ntuple 8 e -> (jj_q + e - 1 < jmax ? rdv(a_q, o.dt, (jj_q + e - 1) * es) : 0.0f0); end
+            if es == 1 && jj_q + 7 < mmax; v_q = rd8(a_q, o.dt, jj_q)
+            else; v_q = Base.Cartesian.@ntuple 8 e -> (jj_q + e - 1 < mmax ? rdv(a_q, o.dt, (jj_q + e - 1) * es) : 0.0f0); end
         end
     end
-    Base.Cartesian.@nexprs 2 q -> (i_q < ng && Base.Cartesian.@nexprs 8 e -> (sm[so + (kfast ? (g_q + e - 1) * sa + ((l_q + g_q) & (nl - 1)) : l_q * sa + ((g_q + 8 * (l_q >> 3)) & (nrow - 1)) + e - 1) + 1] = v_q[e]))   # (row k of a slice rotated by 8 (k >> 3): no bank conflicts)
+    Base.Cartesian.@nexprs 2 q -> (i_q < ng && Base.Cartesian.@nexprs 8 e -> (sm[so + l_q * sa + ((g_q + 8 * (l_q >> 3)) & (nrow - 1)) + e] = v_q[e]))
 end
 @inline function kloop(R::RQ, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk, t8::Bool)
-    act = tid < ntm * ntn * ntk; tk = tid ÷ (ntm * ntn); rem = tid % (ntm * ntn); tm = rem ÷ ntn; tn = rem % ntn; sa = Int64(rt) + 4; sb = 32 * sa
+    act = tid < ntm * ntn * ntk; tk = tid ÷ (ntm * ntn); rem = tid % (ntm * ntn); tm = rem ÷ ntn; tn = rem % ntn; sa = Int64(132); sb = Int64(4224)   # (constant strides: the stores take immediate offsets)
     Base.Cartesian.@nexprs 32 i -> (c_i = 0.0f0)
-    k0 = Int64(0); tq = tick(); tl = Int64(0); ts = Int64(0); ka = isk(oA); kb = isk(oB)
-    ka && ldtile!(R, sm, 0, oA, rt, nr, m0, k0, K, tid, true, sa); kb && ldtile!(R, sm, sb, oB, ct, no, n0, k0, K, tid, true, 68)
+    k0 = Int64(0); ka = isk(oA); kb = isk(oB)
+    g = (Int64(tid) & 3) << 3; ka && ltab!(R, sm, 0, oA, m0, nr, rt, true, tid); kb && ltab!(R, sm, sb, oB, n0, no, ct, true, tid)
+    dA = ka ? kdesc(sm, 0, oA, Int64(rt), tid, sa) : (Int64(0), Int64(-1), Int64(0), Int64(-1)); dB = kb ? kdesc(sm, sb, oB, Int64(ct), tid, Int64(68)) : (Int64(0), Int64(-1), Int64(0), Int64(-1))
     while k0 < K
-        bar(); t0 = tick(); ldtile!(R, sm, 0, oA, rt, nr, m0, k0, K, tid, !ka, sa); ldtile!(R, sm, sb, oB, ct, no, n0, k0, K, tid, !kb, 68); t1 = tick(); bar(); tl += tick() - t0; ts += t1 - t0
+        bar(); if ka; kld!(sm, 0, oA.dt, dA, k0, K, g, sa) else ldtile!(R, sm, 0, oA, rt, nr, m0, k0, K, tid, sa) end; if kb; kld!(sm, sb, oB.dt, dB, k0, K, g, Int64(68)) else ldtile!(R, sm, sb, oB, ct, no, n0, k0, K, tid, Int64(68)) end; bar()
         if act                                              # a k: the thread's 8 (or 4) rows and 4 columns, 16-byte smem loads
             kend = Int32(32) + Int32(K < 0)                  # (an opaque bound: the loop stays a loop, its body in the instruction cache)
             if t8
@@ -522,7 +505,6 @@ end
         end
         k0 += 32
     end
-    if tid == 0 && R.dbg & 64 != 0; s0 = R.cnt + 4 * (R.nflag - 4 * (Int64(R.nn) + 1)); atomadd!(s0 + 4, UInt32(tl >> 10)); atomadd!(s0 + 8, UInt32((tick() - tq) >> 10)); atomadd!(s0 + 12, UInt32(ts >> 10)); end   # (debug 64)
     if ntk > 1                                             # the k slices of a thread group added
         bar(); act && (Base.Cartesian.@nexprs 16 i -> (sm[(tk * ntm * ntn + rem) * 16 + i] = c_i)); bar()
         if act && tk == 0
@@ -1109,7 +1091,7 @@ end
 function prof(S::Sys, C::Card)                            # (debug 64: the cycles per node kind, then cleared)
     nn = S.G.nn; st = dn!(Vector{UInt32}(undef, 4(nn + 1)), C.cnt, 4(NFLAG - 4(nn + 1))); up!(C.cnt, 4(NFLAG - 4(nn + 1)), zeros(UInt32, 4(nn + 1)))
     by = Dict{Int,Vector{Float64}}(); for n in 1:nn; v = get!(by, S.G.node[NF*(n-1)+N_KIND+1], zeros(3)); v .+= st[4n+1:4n+3]; end
-    @printf("card %d (%d blocks): derive %.1f Mcyc; gemm loads %.1f (own %.1f) of %.1f Mcyc\n", C.i, C.nblk, st[1] * 256 / 1e6, st[2] * 1024 / 1e6, st[4] * 1024 / 1e6, st[3] * 1024 / 1e6)
+    @printf("card %d (%d blocks): derive %.1f Mcyc\n", C.i, C.nblk, st[1] * 256 / 1e6)
     for (k, v) in sort(collect(by); by = x -> -x[2][2]); @printf("  kind %2d: wait %8.1f  run %8.1f Mcyc  %6d tasks\n", k, v[1] * 256 / 1e6, v[2] * 256 / 1e6, v[3]); end
     for n in sort(1:nn; by = n -> -Int(st[4n+2]))[1:6]; @printf("  node %4d kind %2d l %2d: wait %8.1f  run %8.1f Mcyc  %6d tasks\n", n, S.G.node[NF*(n-1)+N_KIND+1], S.G.node[NF*(n-1)+N_L+1], st[4n+1] * 256 / 1e6, st[4n+2] * 256 / 1e6, st[4n+3]); end
 end
