@@ -255,7 +255,7 @@ struct RQ
     rows::LP{Int32}; lrows::LP{Int32}; linv::LP{Int32}; wgt::LP{Float32}; uniq::LP{Int32}; urows::LP{Int32}; segs::LP{Int32}
     node::LP{Int32}; nodef::LP{Float32}; edge::LP{Int32}; mat::LP{Int64}; vec::LP{Int64}; rope::LP{Float32}
     plan::LP{Int64}; cnt::LP{UInt32}; cntH::LP{UInt32}; q::LP{UInt32}
-    aV::LP{UInt8}; nV::Int64; aH::LP{UInt8}; nH::Int64; slots::LP{UInt8}; slotsz::Int64; dbg::Int32; nflag::Int64
+    aV::LP{UInt8}; nV::Int64; aH::LP{UInt8}; nH::Int64; slots::LP{UInt8}; slotsz::Int64; dbg::Int32; reuse::Int32; nflag::Int64
 end
 # the plan: a header; per edge; per node; per segment; the holes
 const PHN, PL_LOC, PL_OFF, PL_MOD, PL_LAST, PL_CA, PL_CB, PL_SZ = 16, 0, 1, 2, 3, 4, 5, 6
@@ -476,6 +476,22 @@ end
         d[2q] >= 0 && Base.Cartesian.@nexprs 8 e -> (sm[so + d[2q] + (e - 1) * st + 1] = v[e])
     end
 end
+const RAW0 = ((UInt64(0), UInt64(0), UInt64(0), UInt64(0)), (UInt64(0), UInt64(0), UInt64(0), UInt64(0)))
+@inline function kget(dt, d, k0)                             # a whole slice of the held lines into registers, raw (BF16: 2 words a group, Float32: 4)
+    eb = dt == BF ? Int64(2) : Int64(4)
+    Base.Cartesian.@ntuple 2 q -> begin
+        p = d[2q - 1]
+        if p > 0; a = lp(UInt8, p + k0 * eb); u = ld16(a, 0); w = dt == BF ? u : ld16(a, 1); (u[1].value, u[2].value, w[1].value, w[2].value)
+        else; (UInt64(0), UInt64(0), UInt64(0), UInt64(0)); end
+    end
+end
+@inline function kput!(sm, so, dt, d, r, st)                  # the registers into the slice in smem
+    Base.Cartesian.@nexprs 2 q -> begin
+        a = r[q][1]; b = r[q][2]; c = r[q][3]; e = r[q][4]
+        v = dt == BF ? (bfp(a, 0), bfp(a, 1), bfp(a, 2), bfp(a, 3), bfp(b, 0), bfp(b, 1), bfp(b, 2), bfp(b, 3)) : (f32p(a, 0), f32p(a, 1), f32p(b, 0), f32p(b, 1), f32p(c, 0), f32p(c, 1), f32p(e, 0), f32p(e, 1))
+        d[2q] >= 0 && Base.Cartesian.@nexprs 8 i -> (sm[so + d[2q] + (i - 1) * st + 1] = v[i])
+    end
+end
 @inline function ldtile!(R::RQ, sm, so, o::OPD, nrow, mmax, m0, k0, K, tid, sa)   # a transposed operand's slice: its lines are k's
     t3 = o.mode == 3; t3 || ltab!(R, sm, so, o, k0, K, 32, false, tid); sp0 = so == 0 ? 8448 : 8704; eb = o.dt == BF ? Int64(2) : Int64(4)
     es = t3 ? o.ms : Int64(1); sh = trailing_zeros(Int64(nrow)) - 3; ng = Int64(32) << sh
@@ -496,7 +512,13 @@ end
     g = (Int64(tid) & 3) << 3; ka && ltab!(R, sm, 0, oA, m0, nr, rt, true, tid); kb && ltab!(R, sm, sb, oB, n0, no, ct, true, tid)
     dA = ka ? kdesc(sm, 0, oA, Int64(rt), tid, sa) : (Int64(0), Int64(-1), Int64(0), Int64(-1)); dB = kb ? kdesc(sm, sb, oB, Int64(ct), tid, sbs) : (Int64(0), Int64(-1), Int64(0), Int64(-1))
     while k0 < K
-        bar(); if ka; kld!(sm, 0, oA.dt, dA, k0, K, g, sa) else ldtile!(R, sm, 0, oA, rt, nr, m0, k0, K, tid, sa) end; if kb; kld!(sm, sb, oB.dt, dB, k0, K, g, sbs) else ldtile!(R, sm, sb, oB, ct, no, n0, k0, K, tid, sbs) end; bar()
+        bar()
+        if ka && kb && k0 + 32 <= K                           # a whole slice of both operands: every load first, then every store (one memory round trip)
+            ra = kget(oA.dt, dA, k0); rb = kget(oB.dt, dB, k0); kput!(sm, 0, oA.dt, dA, ra, sa); kput!(sm, sb, oB.dt, dB, rb, sbs)
+        else
+            if ka; kld!(sm, 0, oA.dt, dA, k0, K, g, sa) else ldtile!(R, sm, 0, oA, rt, nr, m0, k0, K, tid, sa) end; if kb; kld!(sm, sb, oB.dt, dB, k0, K, g, sbs) else ldtile!(R, sm, sb, oB, ct, no, n0, k0, K, tid, sbs) end
+        end
+        bar()
         if act                                              # a k: 8 (or 4) rows, 4 columns
             kend = Int32(32) + Int32(K < 0)                  # (opaque: the loop stays a loop)
             if t8
@@ -1000,7 +1022,7 @@ end
     sm = @localmem Float32 (SMW,); si = @localmem Int32 (4,)
     tid = Int32(KI.get_local_id(Int32).x - 1); gid = Int32(KI.get_group_id(Int32).x - 1)
     if gid == 0 && tid == 0
-        t0 = tick(); derive!(R); fence(); R.dbg & 64 != 0 && atomst!(R.cnt + 4 * (R.nflag - 4 * (Int64(R.nn) + 1)), UInt32((tick() - t0) >> 8))
+        t0 = tick(); R.reuse == 0 && derive!(R); fence(); R.dbg & 64 != 0 && atomst!(R.cnt + 4 * (R.nflag - 4 * (Int64(R.nn) + 1)), UInt32((tick() - t0) >> 8))
         atomst!(R.cntH + 4 * (R.nflag - 3), UInt32(pl(R, PH_STAT) + 16 * pl(R, PH_NT))); atomst!(R.q + 4, R.gen)
     end
     if tid == 0; while atomld(R.q + 4) != R.gen; end; end
@@ -1121,14 +1143,14 @@ function load(dir; train = false, ncard = ndev(), hostgb = 6.0, reserve = 3.5e9,
     S
 end
 const DBG = Ref(parse(Int, get(ENV, "LFM3_DBG", "0")))
-function rq(S::Sys, C::Card, P, PL, NU, NS, wanted; f2 = 1.0, iacc = 1.0)
+function rq(S::Sys, C::Card, P, PL, NU, NS, wanted; f2 = 1.0, iacc = 1.0, reuse = 0)
     G = S.G; nf = dalloc(4 * length(G.nodef)); up!(nf, 0, G.nodef); push!(C.bufs, nf)   # (nodef: its own copy, the lr may change)
     RQ(Int32(P), Int32(PL), Int32(NU), Int32(NS), Int64(wanted), Int32(C.nblk), Int32(C.i), Int32(length(S.cards)), S.gen, Int32(G.nn), Int32(G.ne), Int32(S.cap),
        Float32(f2), Float32(iacc), Float32(1 / max(PL, 1)),
        lp(Int32, addr(C.rows)), lp(Int32, addr(C.lrows)), lp(Int32, addr(C.linv)), lp(Float32, addr(C.wgt)), lp(Int32, addr(C.uniq)), lp(Int32, addr(C.urows)), lp(Int32, addr(C.segs)),
        lp(Int32, addr(C.node)), lp(Float32, addr(nf)), lp(Int32, addr(C.edge)), lp(Int64, addr(C.matd)), lp(Int64, addr(C.vecd)), lp(Float32, addr(C.rope)),
        lp(Int64, addr(C.plan)), lp(UInt32, addr(C.cnt)), lp(UInt32, S.cntHd), lp(UInt32, addr(C.q)),
-       lp(UInt8, addr(C.aV)), Int64(C.nV), lp(UInt8, S.aHd), Int64(S.nH), lp(UInt8, S.slots), Int64(S.slotsz), Int32(DBG[]), Int64(NFLAG))
+       lp(UInt8, addr(C.aV)), Int64(C.nV), lp(UInt8, S.aHd), Int64(S.nH), lp(UInt8, S.slots), Int64(S.slotsz), Int32(DBG[]), Int32(reuse), Int64(NFLAG))
 end
 function resident(C::Card, S::Sys)                         # the blocks the card runs at once
     k = C.k; A = rq(S, C, 1, 1, 1, 1, 1)
@@ -1143,21 +1165,24 @@ function resident(C::Card, S::Sys)                         # the blocks the card
     max(1, Int(nb[])) * KI.multiprocessor_count(BE)
 end
 # a request: rows, segments, loss rows and weights, wanted
+const SIGS = Dict{Any,UInt}(); const HUSED = Dict{Any,Int}()   # per system: the shape of the last request (its plan stands), the host cells a request has written
 function request!(S::Sys, rows::Matrix{Int32}, segs::Matrix{Int32}, lrows::Vector{Int32}, wgt::Vector{Float32}, wanted; f2 = 1.0, iacc = 1.0)
     P = size(rows, 2); PL = length(lrows); NS = size(segs, 2); S.gen += 1
     linv = fill(Int32(-1), P); for (i, r) in enumerate(lrows); linv[r+1] = i - 1; end
     order = sortperm(rows[3, :]); urows = Int32.(order .- 1); uniq = Int32[]; i = 1
     while i <= P; j = i; while j < P && rows[3, order[j+1]] == rows[3, order[i]]; j += 1; end; push!(uniq, i - 1, j - i + 1); i = j + 1; end
-    ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), S.cntH, 0, 4NFLAG)
+    sig = hash((P, PL, length(uniq) ÷ 2, NS, wanted, DBG[], [(segs[1, j], segs[1, j] >= 0 ? Int32(0) : segs[2, j]) for j in 1:NS])); reuse = get(SIGS, S, UInt(0)) == sig ? 1 : 0   # the plan of the last request stands if it was this shape (a slot segment's length is not read by the planner)
+    hu0 = get(HUSED, S, -1); hu = hu0 < 0 ? NFLAG : hu0; ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), S.cntH, 0, 4 * min(NFLAG, hu + 4096)); ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), S.cntH + 4 * (NFLAG - 256), 0, 4 * 256)   # (the cells a request wrote are below the largest plan seen; the rest were never written)
     for C in S.cards
         dev!(C.i + 1); up!(C.rows, 0, vec(rows)); up!(C.segs, 0, vec(segs)); up!(C.lrows, 0, lrows); up!(C.linv, 0, linv); up!(C.wgt, 0, wgt); up!(C.uniq, 0, uniq); up!(C.urows, 0, urows)
         up!(C.q, 0, UInt32[0, 0, 0, 0]); fill!(C.cnt, 0)
-        R = rq(S, C, P, PL, length(uniq) ÷ 2, NS, wanted; f2, iacc); C.k(R; ndrange = 256 * C.nblk)
+        R = rq(S, C, P, PL, length(uniq) ÷ 2, NS, wanted; f2, iacc, reuse); C.k(R; ndrange = 256 * C.nblk)
     end
     await!(S); for C in S.cards; dev!(C.i + 1); sync(); pop!(C.bufs); end
     dev!(1); dn!(S.plan, S.cards[1].plan, 0)
     DBG[] & 64 != 0 && for C in S.cards; prof(S, C); end
-    st = S.plan[PH_STAT+1]; st == 0 || (n = S.plan[PH_S0+1]; error("request: status $st, node $n (kind $(S.G.node[NF*(n-1)+N_KIND+1])), VRAM $(S.plan[PH_VUSE+1]), host $(S.plan[PH_HUSE+1])"))
+    st = S.plan[PH_STAT+1]; st == 0 && (SIGS[S] = sig; HUSED[S] = max(hu0, Int(S.plan[PH_NFLAG+1])))
+    st == 0 || (delete!(SIGS, S); delete!(HUSED, S); n = S.plan[PH_S0+1]; error("request: status $st, node $n (kind $(S.G.node[NF*(n-1)+N_KIND+1])), VRAM $(S.plan[PH_VUSE+1]), host $(S.plan[PH_HUSE+1])"))
     nothing
 end
 # the update, a request a slice: consecutive groups (a matrix's nodes) packed up to `seconds` of the rate measured on the slices before (Muon: flops a second; momentum steps: elements a second)
