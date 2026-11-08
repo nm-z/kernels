@@ -1641,10 +1641,11 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing, stops = (-1,
     for i in 1:(ctl ? 8 : 6); unsafe_store!(Ptr{UInt64}(PE.hx.c + PE.hx.out), 0, i); end   # the counters
     Libc.memset(PE.hx.p, 0, 8 * 2 * ND * DW * NE)         # the decode exchange words (their tags restart)
     DPMLOCK[] && dpm!(dies, "high")                       # the clocks up for the request (the dies can't tell it's coming)
-    accts = ROCVector{UInt64}[]; ibs = ROCVector{Int32}[]
+    accts = Vector{UInt64}[]; ibs = ROCVector{Int32}[]   # accts: host views of fine-grained device memory (the kernels write them, liveidle reads them in place)
     for d in 1:ND
         AMDGPU.device!(dies[d].dev); K = PE.K[d]
-        a = AMDGPU.zeros(UInt64, 3 + 2nphase); ah = zeros(UInt64, 3 + 2nphase); ah[1] = typemax(UInt64); ah[4:2:end] .= typemax(UInt64); up!(a, ah); push!(accts, a)
+        fp = Ref{Ptr{Cvoid}}(); AMDGPU.HIP.hipExtMallocWithFlags(fp, 8 * (3 + 2nphase), AMDGPU.HIP.hipDeviceMallocFinegrained)
+        ah = unsafe_wrap(Array, Ptr{UInt64}(fp[]), 3 + 2nphase); fill!(ah, 0); ah[1] = typemax(UInt64); ah[4:2:end] .= typemax(UInt64); push!(accts, ah); a = pointer(ah)
         up!(K.bar, [UInt32[0, 0, 0, NLRUN[]]; zeros(UInt32, 60)]); up!(K.rq, rq)
         for r in 1:nr; fill!(sts[r][d].S, 0.0f0); fill!(sts[r][d].ring, 0.0f0); end   # a request starts from zero state
         up!(K.sl, Int64[addr(getfield(sts[r][d], f)) for r in 1:nr for f in (:S, :ring, :kc, :vc, :S2, :ring2)]); up!(K.nem, zeros(Int32, NR))
@@ -1658,7 +1659,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing, stops = (-1,
     res = NTuple{3,Float64}[]; tpre = 0.0; tdec = 0.0
     for d in 1:ND
         AMDGPU.device!(dies[d].dev); AMDGPU.synchronize()
-        hz = PE.hz; ah = Array(accts[d]); wall = (ah[2] - ah[1]) / hz; iv = Tuple{Float64,Float64}[]
+        hz = PE.hz; ah = copy(accts[d]); wall = (ah[2] - ah[1]) / hz; iv = Tuple{Float64,Float64}[]
         ah[3] == 0 && (ah[3] = ah[2])                     # (cancelled during the prefill)
         d == 1 && (tpre = (ah[3] - ah[1]) / hz; tdec = (ah[2] - ah[3]) / hz; LASTACCT[] = ah); ACCTS[][d] = ah
         for s in 0:nphase-1
@@ -1667,7 +1668,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing, stops = (-1,
         end
         ins = union_len(iv)                                # the phases overlap (an exchange writes while it reads)
         push!(res, (ins, wall - ins, wall))
-        AMDGPU.unsafe_free!(accts[d]); AMDGPU.unsafe_free!(ibs[d])
+        AMDGPU.HIP.hipFree(pointer(accts[d])); AMDGPU.unsafe_free!(ibs[d])
     end
     DPMLOCK[] && dpm!(dies, "auto")                       # and back down while the model waits
     ab = [(AMDGPU.device!(D.dev); Array(K.bar)[3]) for (D, K) in zip(dies, PE.K)]
@@ -1688,24 +1689,22 @@ end
 if !isdefined(Main, :LIVE)
     const LIVE = Ref{Any}(nothing)                         # the running request's phase-time arrays (request!)
     const LIVELK = ReentrantLock()                         # held while liveidle copies them, so they are not freed under it
-    const LIVESTREAMS = Ref{Any}(nothing)                  # a stream a die for those copies (the kernel's own stream is busy)
 end
 # The running request's idle % so far, as request! will count it at the end (the union of the phases is instruction
-# time, the rest idle), from the phase times the kernels have written: each call copies the next window of them on
-# a stream of its own while the kernels run and merges the phases that are complete (a later one has begun). st
-# carries the merge from call to call; NaN until there is something to count.
+# time, the rest idle), from the phase times the kernels have written: they are in fine-grained device memory, which the
+# host reads in place through the BAR (a copy-engine read waits for the kernels to end), so each call takes the next
+# window of them and merges the phases that are complete (a later one has begun). st carries the merge from call to
+# call; NaN until there is something to count.
 function liveidle!(st)
     lock(LIVELK) do
         L = LIVE[]; L === nothing && return NaN
-        LIVESTREAMS[] === nothing && (LIVESTREAMS[] = [(AMDGPU.device!(D.dev); AMDGPU.HIPStream()) for D in L.dies])
         idle = 0.0; wall = 0.0
         for d in 1:ND
-            AMDGPU.device!(L.dies[d].dev)
-            AMDGPU.stream!(LIVESTREAMS[][d]) do
+            begin
                 if st.t0[d] == 0
-                    h = zeros(UInt64, 1); copyto!(h, 1, L.accts[d], 1, 1); h[1] != typemax(UInt64) && (st.t0[d] = h[1])
+                    h1 = L.accts[d][1]; h1 != typemax(UInt64) && (st.t0[d] = h1)
                 end
-                lo = 4 + 2st.k[d]; n = min(length(st.buf), L.n - lo + 1); n < 4 && return
+                lo = 4 + 2st.k[d]; n = min(length(st.buf), L.n - lo + 1); n < 4 && continue
                 copyto!(st.buf, 1, L.accts[d], lo, n)
                 last = -1
                 for j in 0:2:n-2; st.buf[1+j] != typemax(UInt64) && (last = j); end
