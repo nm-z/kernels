@@ -307,31 +307,51 @@ func (b *chatBuilder) addChatMessage(raw json.RawMessage) *apiError {
 // ---- the answer ----------------------------------------------------------------------------------------------
 
 type chatUsageOut struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens     any `json:"prompt_tokens"`
+	CompletionTokens any `json:"completion_tokens"`
+	TotalTokens      any `json:"total_tokens"`
 	Details          struct {
-		ReasoningTokens int `json:"reasoning_tokens"`
+		ReasoningTokens any `json:"reasoning_tokens"`
 	} `json:"completion_tokens_details"`
-}
-
-func newChatUsage(in, out, reasoning int) *chatUsageOut {
-	u := &chatUsageOut{PromptTokens: in, CompletionTokens: out, TotalTokens: in + out}
-	u.Details.ReasoningTokens = reasoning
-	return u
 }
 
 // responsesUsage reads the usage object a Responses-shaped completion carries.
 type responsesUsage struct {
-	InputTokens         int `json:"input_tokens"`
-	OutputTokens        int `json:"output_tokens"`
+	InputTokens         any `json:"input_tokens"`
+	OutputTokens        any `json:"output_tokens"`
+	TotalTokens         any `json:"total_tokens"`
 	OutputTokensDetails struct {
-		ReasoningTokens int `json:"reasoning_tokens"`
+		ReasoningTokens any `json:"reasoning_tokens"`
 	} `json:"output_tokens_details"`
 }
 
 func (u responsesUsage) chat() *chatUsageOut {
-	return newChatUsage(u.InputTokens, u.OutputTokens, u.OutputTokensDetails.ReasoningTokens)
+	return &chatUsageOut{
+		PromptTokens: reportedMetric(u.InputTokens), CompletionTokens: reportedMetric(u.OutputTokens),
+		TotalTokens: reportedMetric(u.TotalTokens),
+		Details: struct {
+			ReasoningTokens any `json:"reasoning_tokens"`
+		}{ReasoningTokens: reportedMetric(u.OutputTokensDetails.ReasoningTokens)},
+	}
+}
+
+func reportedMetric(value any) any {
+	if value == nil {
+		return ""
+	}
+	return value
+}
+
+func responseTokenCount(value any) (int, bool) {
+	switch number := value.(type) {
+	case float64:
+		count := int(number)
+		return count, number >= 0 && float64(count) == number
+	case int:
+		return number, number >= 0
+	default:
+		return 0, false
+	}
 }
 
 type chatChoice struct {
@@ -502,7 +522,11 @@ func (c *chatSink) write(typ string, data []byte) {
 		finish := chatFinish(c.calls > 0, typ == "response.incomplete")
 		var tm *chatTimings
 		if st, u := c.stats, ev.Response.Usage; st != nil {
-			tm = finalTimings(u.InputTokens, u.InputTokens-st.Prefill.Total, u.OutputTokens, st.Prefill.TPS, st.Decode.TPS, st.IdlePct)
+			input, inputOK := responseTokenCount(u.InputTokens)
+			output, outputOK := responseTokenCount(u.OutputTokens)
+			if inputOK && outputOK {
+				tm = finalTimings(input, input-st.Prefill.Total, output, st.Prefill.TPS, st.Decode.TPS, st.IdlePct)
+			}
 		}
 		c.chunk(map[string]any{}, &finish, ev.Response.Usage.chat(), tm)
 		c.end()

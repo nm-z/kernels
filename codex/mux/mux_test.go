@@ -152,10 +152,10 @@ func TestResponsesStreaming(t *testing.T) {
 	comp := res.named("response.completed")[0].obj()["response"].(map[string]any)
 	usage := comp["usage"].(map[string]any)
 	genWant := float64(len(mustEncode(fakeAnswer)))
-	if usage["output_tokens"] != genWant || usage["input_tokens"].(float64) < 20 || usage["total_tokens"] != usage["input_tokens"].(float64)+genWant {
+	if usage["output_tokens"] != genWant || usage["input_tokens"].(float64) < 20 || usage["total_tokens"] != "" {
 		t.Errorf("usage %v (want %v output tokens)", usage, genWant)
 	}
-	if rt := usage["output_tokens_details"].(map[string]any)["reasoning_tokens"].(float64); rt < 50 {
+	if rt := usage["output_tokens_details"].(map[string]any)["reasoning_tokens"]; rt != "" {
 		t.Errorf("reasoning tokens %v", rt)
 	}
 	if comp["status"] != "completed" || len(comp["output"].([]any)) != 4 || !strings.HasPrefix(comp["id"].(string), "resp_") || comp["model"] != "m1" {

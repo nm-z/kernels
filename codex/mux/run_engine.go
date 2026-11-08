@@ -120,9 +120,10 @@ func (s *Server) finishEngine(w http.ResponseWriter, pr *prepared, rb *respBuild
 		cached = prompt - res.live.prefillTot
 	}
 	usage := map[string]any{
-		"input_tokens": prompt, "output_tokens": gen, "total_tokens": prompt + gen,
-		"input_tokens_details":  map[string]any{"cached_tokens": cached},
-		"output_tokens_details": map[string]any{"reasoning_tokens": rb.reasoningTokens},
+		"input_tokens": providerTokenValue(d.Prompt), "output_tokens": providerTokenValue(d.Generated),
+		"total_tokens":          providerTokenValue(d.TotalTokens),
+		"input_tokens_details":  map[string]any{"cached_tokens": ""},
+		"output_tokens_details": map[string]any{"reasoning_tokens": ""},
 	}
 	// the final measured values, before response.completed
 	live := res.live
@@ -340,7 +341,11 @@ func (s *Server) execute(ctx context.Context, svc *Service, conn *svcConn, q *ex
 						}
 						return res
 					}
-					last = &LastRun{PrefillTPS: m.PrefillTPS, DecodeTPS: m.DecodeTPS, IdlePct: m.IdlePct, At: time.Now()}
+					last = &LastRun{
+						PrefillTPS: m.PrefillTPS, DecodeTPS: m.DecodeTPS, IdlePct: m.IdlePct, At: time.Now(),
+						InputTokens: providerTokenValue(m.Prompt), OutputTokens: providerTokenValue(m.Generated),
+						TotalTokens: providerTokenValue(m.TotalTokens),
+					}
 					if cancelSent {
 						res.cancelled = true
 						end("cancelled", "", m)

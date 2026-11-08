@@ -170,7 +170,7 @@ func TestChatCompletionsLikeTheGateway(t *testing.T) {
 	finish, usage := cs.finish()
 	n := float64(len(mustEncode(fakeAnswer)))
 	if finish != "tool_calls" || usage["completion_tokens"] != n || usage["prompt_tokens"].(float64) < 8 ||
-		usage["total_tokens"] != usage["prompt_tokens"].(float64)+n || usage["completion_tokens_details"].(map[string]any)["reasoning_tokens"].(float64) < 50 {
+		usage["total_tokens"] != "" || usage["completion_tokens_details"].(map[string]any)["reasoning_tokens"] != "" {
 		t.Errorf("finish %q usage %v", finish, usage)
 	}
 	// only the last chunk has a finish_reason
@@ -801,7 +801,7 @@ func TestChatTimings(t *testing.T) {
 	tm := last["timings"].(map[string]any)
 	if tm["prompt_n"] != np || tm["predicted_n"] != ng || tm["cache_n"] != float64(0) || tm["prompt_per_second"] != 1234.5 || tm["predicted_per_second"] != 67.8 || tm["idle_pct"] != 4.2 ||
 		math.Abs(tm["prompt_ms"].(float64)-np/1234.5*1000) > 1e-6 || math.Abs(tm["predicted_ms"].(float64)-ng/67.8*1000) > 1e-6 ||
-		usage["total_tokens"] != np+ng {
+		usage["total_tokens"] != "" {
 		t.Errorf("final timings %v, usage %v", tm, usage)
 	}
 	// the text itself is in chunks of its own

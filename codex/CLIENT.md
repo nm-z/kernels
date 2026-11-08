@@ -44,6 +44,7 @@ on each route change (auto shims) and at the first token. `: keepalive` comments
     POST /v1/embeddings              OpenAI embeddings on an embed service (string or strings; float or base64)
     GET  /v1/models                  {"data":[{"id","kind","ctx","efforts","vision","state"}]}   (embed: "dims")
     GET  /v1/services                {"data":[{name,kind,state,device,pid,ctx,slots,since,last,progress,log,reason}]}
+    GET  /v1/capacity                {"sources":[{source,kind,state,remaining,reset_time,tokens_served_today}]}
     POST /v1/services/NAME/up|down   change the desired state (rewrites the host file)
     GET  /v1/events[?since=TS]       SSE for any number of observers: the recorded events since TS, then live (ids
                                      resume with Last-Event-ID): service.state, run.*, job.progress/finished; never token text

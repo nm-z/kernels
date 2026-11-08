@@ -100,13 +100,19 @@ Refused: unknown service, wrong peer, `positions < ctx`.
 
 | shim → mux | fields | when |
 |---|---|---|
-| `register` | `slots`, `vision`, `auto` (true for a route that picks among providers) | first |
+| `register` | `slots`, `vision`, `auto` (true for a route that picks among providers), optional provider `remaining`, `reset_time`, `tokens_served_today` | first |
 | `route` | `id`, `trying` (the route(s) being attempted now, e.g. `["vertex/gemini-3-pro"]`), `failed` (ones given up on) | an auto shim: every time its choice changes |
 | `ttft` | `id`, `ms` | when the first token of output arrives |
 | `delta` | `id`, `channel` (`reasoning` or `content`), `text` | as it streams |
 | `tool_call` | `id`, `call_id`, `name`, `arguments` (JSON text) | each call |
-| `done` | `id`, `input_tokens`, `output_tokens` (the provider's, when it reports them) | last |
+| `capacity` | `remaining`, `reset_time`, `tokens_served_today` (provider-reported; each unavailable value is an empty string) | after registration and whenever provider facts change |
+| `done` | `id`, `input_tokens`, `output_tokens`, `total_tokens` (each provider-reported when present; absent values are empty strings in client usage) | last |
 | `error` | `id`, `message` | |
+
+Each `capacity` message replaces the shim's complete snapshot; include all three fields and use an
+empty string when a provider does not expose one. Mux preserves these values without estimating or
+aggregating them. It clears a shim's cached capacity when that shim disconnects or stops. A shim
+sends no periodic keep-alive for capacity.
 
 mux → shim: `run` with `id`, `messages` (chat form, system first), `tools`, `effort`, `images`.
 
@@ -137,6 +143,7 @@ mux → embed: `run` with `id`, `texts`.
 | `POST /v1/embeddings` | the OpenAI embeddings API; embed services |
 | `GET /v1/models` | `{"data":[{"id","kind","ctx","efforts","vision","state"}]}` |
 | `GET /v1/services` | every service: `name, kind, state, device, pid, ctx, slots, since, last, progress, log, reason` |
+| `GET /v1/capacity` | each shim's `source, state, remaining, reset_time, tokens_served_today`; absent provider facts are empty strings |
 | `POST /v1/services/NAME/up`, `.../down` | change the desired state (rewrites mux.yaml) |
 | `GET /v1/events?since=TS` | SSE: the recorded events since `TS`, then live ones (state changes, runs, stats, routes, job progress) |
 

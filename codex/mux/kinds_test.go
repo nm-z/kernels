@@ -74,7 +74,7 @@ func TestShimStreaming(t *testing.T) {
 		}
 	}
 	comp := res.named("response.completed")[0].obj()["response"].(map[string]any)
-	if u := comp["usage"].(map[string]any); u["input_tokens"] != float64(11) || u["output_tokens"] != float64(22) || u["total_tokens"] != float64(33) {
+	if u := comp["usage"].(map[string]any); u["input_tokens"] != float64(11) || u["output_tokens"] != float64(22) || u["total_tokens"] != "" {
 		t.Errorf("usage %v", u)
 	}
 	if comp["status"] != "completed" || comp["model"] != "s" {
