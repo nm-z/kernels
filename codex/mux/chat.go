@@ -307,51 +307,41 @@ func (b *chatBuilder) addChatMessage(raw json.RawMessage) *apiError {
 // ---- the answer ----------------------------------------------------------------------------------------------
 
 type chatUsageOut struct {
-	PromptTokens     any `json:"prompt_tokens"`
-	CompletionTokens any `json:"completion_tokens"`
-	TotalTokens      any `json:"total_tokens"`
-	Details          struct {
-		ReasoningTokens any `json:"reasoning_tokens"`
-	} `json:"completion_tokens_details"`
+	PromptTokens            *int                 `json:"prompt_tokens,omitempty"`
+	CompletionTokens        *int                 `json:"completion_tokens,omitempty"`
+	TotalTokens             *int                 `json:"total_tokens,omitempty"`
+	PromptTokensDetails     *inputTokensDetails  `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *outputTokensDetails `json:"completion_tokens_details,omitempty"`
+}
+
+type inputTokensDetails struct {
+	CachedTokens *int `json:"cached_tokens,omitempty"`
+}
+
+type outputTokensDetails struct {
+	ReasoningTokens *int `json:"reasoning_tokens,omitempty"`
 }
 
 // responsesUsage reads the usage object a Responses-shaped completion carries.
 type responsesUsage struct {
-	InputTokens         any `json:"input_tokens"`
-	OutputTokens        any `json:"output_tokens"`
-	TotalTokens         any `json:"total_tokens"`
-	OutputTokensDetails struct {
-		ReasoningTokens any `json:"reasoning_tokens"`
-	} `json:"output_tokens_details"`
+	InputTokens         *int                 `json:"input_tokens"`
+	OutputTokens        *int                 `json:"output_tokens"`
+	TotalTokens         *int                 `json:"total_tokens"`
+	InputTokensDetails  *inputTokensDetails  `json:"input_tokens_details"`
+	OutputTokensDetails *outputTokensDetails `json:"output_tokens_details"`
 }
 
 func (u responsesUsage) chat() *chatUsageOut {
-	return &chatUsageOut{
-		PromptTokens: reportedMetric(u.InputTokens), CompletionTokens: reportedMetric(u.OutputTokens),
-		TotalTokens: reportedMetric(u.TotalTokens),
-		Details: struct {
-			ReasoningTokens any `json:"reasoning_tokens"`
-		}{ReasoningTokens: reportedMetric(u.OutputTokensDetails.ReasoningTokens)},
+	out := &chatUsageOut{
+		PromptTokens: u.InputTokens, CompletionTokens: u.OutputTokens, TotalTokens: u.TotalTokens,
 	}
-}
-
-func reportedMetric(value any) any {
-	if value == nil {
-		return ""
+	if u.InputTokensDetails != nil && u.InputTokensDetails.CachedTokens != nil {
+		out.PromptTokensDetails = &inputTokensDetails{CachedTokens: u.InputTokensDetails.CachedTokens}
 	}
-	return value
-}
-
-func responseTokenCount(value any) (int, bool) {
-	switch number := value.(type) {
-	case float64:
-		count := int(number)
-		return count, number >= 0 && float64(count) == number
-	case int:
-		return number, number >= 0
-	default:
-		return 0, false
+	if u.OutputTokensDetails != nil && u.OutputTokensDetails.ReasoningTokens != nil {
+		out.CompletionTokensDetails = &outputTokensDetails{ReasoningTokens: u.OutputTokensDetails.ReasoningTokens}
 	}
+	return out
 }
 
 type chatChoice struct {
@@ -522,10 +512,12 @@ func (c *chatSink) write(typ string, data []byte) {
 		finish := chatFinish(c.calls > 0, typ == "response.incomplete")
 		var tm *chatTimings
 		if st, u := c.stats, ev.Response.Usage; st != nil {
-			input, inputOK := responseTokenCount(u.InputTokens)
-			output, outputOK := responseTokenCount(u.OutputTokens)
-			if inputOK && outputOK {
-				tm = finalTimings(input, input-st.Prefill.Total, output, st.Prefill.TPS, st.Decode.TPS, st.IdlePct)
+			if u.InputTokens != nil && u.OutputTokens != nil {
+				cached := 0
+				if u.InputTokensDetails != nil && u.InputTokensDetails.CachedTokens != nil {
+					cached = *u.InputTokensDetails.CachedTokens
+				}
+				tm = finalTimings(*u.InputTokens, cached, *u.OutputTokens, st.Prefill.TPS, st.Decode.TPS, st.IdlePct)
 			}
 		}
 		c.chunk(map[string]any{}, &finish, ev.Response.Usage.chat(), tm)

@@ -152,11 +152,20 @@ func TestResponsesStreaming(t *testing.T) {
 	comp := res.named("response.completed")[0].obj()["response"].(map[string]any)
 	usage := comp["usage"].(map[string]any)
 	genWant := float64(len(mustEncode(fakeAnswer)))
-	if usage["output_tokens"] != genWant || usage["input_tokens"].(float64) < 20 || usage["total_tokens"] != "" {
+	input, inputOK := usage["input_tokens"].(float64)
+	output, outputOK := usage["output_tokens"].(float64)
+	total, totalOK := usage["total_tokens"].(float64)
+	if !inputOK || input < 20 || !outputOK || output != genWant || !totalOK || total != input+output {
 		t.Errorf("usage %v (want %v output tokens)", usage, genWant)
 	}
-	if rt := usage["output_tokens_details"].(map[string]any)["reasoning_tokens"]; rt != "" {
-		t.Errorf("reasoning tokens %v", rt)
+	inputDetails, inputDetailsOK := usage["input_tokens_details"].(map[string]any)
+	if !inputDetailsOK || inputDetails["cached_tokens"] != float64(0) {
+		t.Errorf("cached tokens %v", usage["input_tokens_details"])
+	}
+	outputDetails, outputDetailsOK := usage["output_tokens_details"].(map[string]any)
+	reasoningCount, reasoningOK := outputDetails["reasoning_tokens"].(float64)
+	if !outputDetailsOK || !reasoningOK || reasoningCount <= 0 {
+		t.Errorf("reasoning tokens %v", usage["output_tokens_details"])
 	}
 	if comp["status"] != "completed" || len(comp["output"].([]any)) != 4 || !strings.HasPrefix(comp["id"].(string), "resp_") || comp["model"] != "m1" {
 		t.Errorf("response %v", comp)

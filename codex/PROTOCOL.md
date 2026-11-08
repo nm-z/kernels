@@ -106,7 +106,7 @@ Refused: unknown service, wrong peer, `positions < ctx`.
 | `delta` | `id`, `channel` (`reasoning` or `content`), `text` | as it streams |
 | `tool_call` | `id`, `call_id`, `name`, `arguments` (JSON text) | each call |
 | `capacity` | `remaining`, `reset_time`, `tokens_served_today` (provider-reported; each unavailable value is an empty string) | after registration and whenever provider facts change |
-| `done` | `id`, `input_tokens`, `output_tokens`, `total_tokens` (each provider-reported when present; absent values are empty strings in client usage) | last |
+| `done` | `id`, `input_tokens`, `output_tokens`, `total_tokens` (integer counts when reported by the provider) | last |
 | `error` | `id`, `message` | |
 
 Each `capacity` message replaces the shim's complete snapshot; include all three fields and use an
@@ -224,3 +224,7 @@ are 0; during generation `prompt_n` is the prompt, `prompt_per_second` the prefi
 tokens, `cache_n` those the engine already had, `predicted_n` the tokens made, both speeds, `idle_pct`) with `prompt_ms` and `predicted_ms`
 derived from them, next to `usage`; a `stream:false` answer has the same `timings` next to `usage`. A shim has no such numbers, so its
 stream has no `timings`; after 10 s without a chunk it gets an empty-delta chunk instead of an SSE comment.
+
+Engine Responses usage reports the mux-measured input and generated counts, their sum as `total_tokens`, prefix reuse as
+`input_tokens_details.cached_tokens` (`prompt_tokens - prefill.total`), and the mux-measured reasoning count. Shim usage includes only
+the integer counts its `done` message reports; absent counts and token-detail objects are omitted rather than sent as empty strings.

@@ -101,14 +101,17 @@ func (s *Server) finishShim(w http.ResponseWriter, pr *prepared, rb *respBuilder
 			return
 		}
 	}
-	var input, output, total any = "", "", ""
+	usage := map[string]any{}
 	if d := res.done; d != nil {
-		input, output, total = providerTokenValue(d.InputTokens), providerTokenValue(d.OutputTokens), providerTokenValue(d.TotalTokens)
-	}
-	usage := map[string]any{
-		"input_tokens": input, "output_tokens": output, "total_tokens": total,
-		"input_tokens_details":  map[string]any{"cached_tokens": ""},
-		"output_tokens_details": map[string]any{"reasoning_tokens": ""},
+		if d.InputTokens != nil {
+			usage["input_tokens"] = *d.InputTokens
+		}
+		if d.OutputTokens != nil {
+			usage["output_tokens"] = *d.OutputTokens
+		}
+		if d.TotalTokens != nil {
+			usage["total_tokens"] = *d.TotalTokens
+		}
 	}
 	am := map[string]any{}
 	if res.ttftMS != nil {
@@ -171,8 +174,7 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 	tick := time.NewTicker(statsEvery)
 	defer tick.Stop()
 	end := func(status, reason string, d *msg) {
-		f := map[string]any{"service": svc.name, "run": string(id), "response": rb.id, "status": status,
-			"input_tokens": "", "output_tokens": "", "total_tokens": ""}
+		f := map[string]any{"service": svc.name, "run": string(id), "response": rb.id, "status": status}
 		if reason != "" {
 			f["reason"] = reason
 		}
@@ -183,9 +185,15 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 			f["route"] = trying
 		}
 		if d != nil {
-			f["input_tokens"] = providerTokenValue(d.InputTokens)
-			f["output_tokens"] = providerTokenValue(d.OutputTokens)
-			f["total_tokens"] = providerTokenValue(d.TotalTokens)
+			if d.InputTokens != nil {
+				f["input_tokens"] = *d.InputTokens
+			}
+			if d.OutputTokens != nil {
+				f["output_tokens"] = *d.OutputTokens
+			}
+			if d.TotalTokens != nil {
+				f["total_tokens"] = *d.TotalTokens
+			}
 		}
 		s.hub.Publish("run.end", f)
 	}

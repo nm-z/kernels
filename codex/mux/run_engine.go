@@ -107,23 +107,16 @@ func (s *Server) finishEngine(w http.ResponseWriter, pr *prepared, rb *respBuild
 		}
 	}
 	d := res.done
-	gen := 0
-	if d.Generated != nil {
-		gen = *d.Generated
-	}
 	prompt := res.promptTokens
-	if d.Prompt != nil && *d.Prompt > 0 {
-		prompt = *d.Prompt
-	}
-	cached := 0
-	if res.live.prefillTot > 0 && prompt > res.live.prefillTot {
-		cached = prompt - res.live.prefillTot
+	gen := res.live.tokens
+	cached := prompt - res.live.prefillTot
+	if cached < 0 {
+		cached = 0
 	}
 	usage := map[string]any{
-		"input_tokens": providerTokenValue(d.Prompt), "output_tokens": providerTokenValue(d.Generated),
-		"total_tokens":          providerTokenValue(d.TotalTokens),
-		"input_tokens_details":  map[string]any{"cached_tokens": ""},
-		"output_tokens_details": map[string]any{"reasoning_tokens": ""},
+		"input_tokens": prompt, "output_tokens": gen, "total_tokens": prompt + gen,
+		"input_tokens_details":  map[string]any{"cached_tokens": cached},
+		"output_tokens_details": map[string]any{"reasoning_tokens": rb.reasoningTokens},
 	}
 	// the final measured values, before response.completed
 	live := res.live
