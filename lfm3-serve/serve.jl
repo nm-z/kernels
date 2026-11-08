@@ -4,15 +4,36 @@
 @isdefined(load) || include(joinpath(@__DIR__, "..", "lfm3.jl"))
 include(joinpath(@__DIR__, "..", "codex", "julia", "Mux.jl")); using .Mux
 const TEMP, TOPK, TOPP = 0.7, 20, 0.95
-function slotrun(S::Sys, toks, p0)                           # rows p0.. of the slot's chat; the last row's logits
-    n = length(toks); rows = Int32[r == 1 ? 0 : r == 2 ? p0 + i - 1 : r == 3 ? toks[i] : -1 for r in 1:4, i in 1:n]
-    request!(S, rows, reshape(Int32[0, p0 + n], 2, 1), Int32[n - 1], ones(Float32, 1), 1); fetch(S, S.G.names[:lg], 1)[:, 1]
+struct Job; slot::Int; toks::Vector{Int}; p0::Int; out::Channel{Vector{Float32}}; end
+const JOBS = Channel{Job}(Inf); const ACTIVE = Threads.Atomic{Int}(0)   # the jobs waiting; the chats running
+function batcher(S::Sys, maxrows)                            # the one task that owns the card: the jobs waiting run as the segments of one request (the weights are read once for all of them)
+    while true
+        jobs = [take!(JOBS)]; nrow = length(jobs[1].toks); t0 = time()
+        while nrow < maxrows && (isready(JOBS) || (length(jobs) < ACTIVE[] && time() - t0 < 0.03))   # (every running chat has a job in flight but for the few ms its host samples)
+            isready(JOBS) ? (j = take!(JOBS); push!(jobs, j); nrow += length(j.toks)) : sleep(0.0005)
+        end
+        sort!(jobs; by = j -> j.slot); NS = length(jobs); rows = Matrix{Int32}(undef, 4, nrow); segs = Matrix{Int32}(undef, 2, NS); lr = Int32[]; c = 0
+        for (s, j) in enumerate(jobs)
+            n = length(j.toks); segs[:, s] = Int32[j.slot, j.p0 + n]
+            for i in 1:n; c += 1; rows[:, c] = Int32[s - 1, j.p0 + i - 1, j.toks[i], -1]; end
+            push!(lr, c - 1)
+        end
+        try
+            request!(S, rows, segs, lr, ones(Float32, NS), 1); L = fetch(S, S.G.names[:lg], NS)
+            for (s, j) in enumerate(jobs); Base.put!(j.out, L[:, s]); end   # (lfm3.jl's own put! and fetch shadow Base's)
+        catch e
+            for j in jobs; close(j.out, e); end
+        end
+    end
+end
+function slotrun(slot, toks, p0)                             # rows p0.. of a slot's chat; the last row's logits
+    j = Job(slot, toks, p0, Channel{Vector{Float32}}(1)); Base.put!(JOBS, j); take!(j.out)
 end
 function pick(l, rng)
     ix = partialsortperm(l, 1:TOPK; rev = true); p = exp.((l[ix] .- l[ix[1]]) ./ TEMP); c = cumsum(p); k = something(findfirst(>=(TOPP * c[end]), c), TOPK)
     ix[findfirst(>=(rand(rng) * c[k]), c[1:k])] - 1
 end
-function run!(S::Sys, r::Mux.Run, held::Vector{Int}, cap::Int)
+function run!(slot::Int, r::Mux.Run, held::Vector{Int}, cap::Int)
     ids = r.ids; P = length(ids); (0 < P < cap) || return Mux.fail!(r, "$P positions: the engine holds $cap")
     t0 = time(); busy = 0.0; fin = Threads.Atomic{Bool}(false)
     beat = Threads.@spawn while !fin[]; Mux.stats!(r); sleep(0.25); end   # (stats at least every 500 ms, a prefill request is longer)
@@ -21,25 +42,31 @@ function run!(S::Sys, r::Mux.Run, held::Vector{Int}, cap::Int)
     length(held) - p0 > 100 && (p0 = 0); resize!(held, p0); l = Float32[]
     for a in p0+1:64:P                                       # (64 rows a request: the rings)
         Mux.cancelled(r) && break
-        b = min(P, a + 63); tb = time(); l = slotrun(S, ids[a:b], a - 1); busy += time() - tb; append!(held, ids[a:b]); Mux.prefill!(r, b); idle()
+        b = min(P, a + 63); tb = time(); l = slotrun(slot, ids[a:b], a - 1); busy += time() - tb; append!(held, ids[a:b]); Mux.prefill!(r, b); idle()
     end
     tp = time(); gen = 0; stopped = false; t1 = tp; rng = Random.Xoshiro(hash(r.id))
     while !isempty(l) && gen < r.max_new && !Mux.cancelled(r)
         t = pick(l, rng); gen += 1; gen == 1 && (t1 = time()); Mux.tokens!(r, [t])
         t in r.stop && (stopped = true; break); gen >= r.max_new && break
-        tb = time(); l = slotrun(S, [t], P + gen - 1); busy += time() - tb; push!(held, t); idle()
+        tb = time(); l = slotrun(slot, [t], P + gen - 1); busy += time() - tb; push!(held, t); idle()
     end
     t2 = time(); fin[] = true; wait(beat)
     pt = (P - p0) / max(min(t1, t2) - t0, 1e-9); dt = gen > 1 ? (gen - 1) / max(t2 - t1, 1e-9) : 0.0
     Mux.done!(r; prefill_tps = pt, decode_tps = dt, idle_pct = 100 * max(0.0, 1 - busy / max(t2 - t0, 1e-9)), stopped)
     @printf("run %s: %d prompt (%d cached), %d out, prefill %.2f tok/s, decode %.2f tok/s%s\n", r.id, P, p0, gen, pt, dt, Mux.cancelled(r) ? " (cancelled)" : ""); flush(stdout)
 end
-function main(dir; cap = 4096)
-    S = load(dir; nslot = 1, cap); held = Int[]; lk = ReentrantLock()
-    println("registering with mux: ", cap, " positions"); flush(stdout)
-    Mux.serve(positions = cap, max_new = 2048, slots = 1) do r; lock(lk) do; run!(S, r, held, cap); end; end
+function main(dir; cap = 4096, nslot = 4)
+    S = load(dir; nslot, cap); helds = [Int[] for _ in 1:nslot]; free = Set(0:nslot-1); lk = ReentrantLock()
+    Threads.@spawn batcher(S, 128)
+    println("registering with mux: ", nslot, " slots of ", cap, " positions"); flush(stdout)
+    Mux.serve(positions = cap, max_new = 2048, slots = nslot) do r
+        pre(s) = (h = helds[s+1]; n = 0; while n < min(length(h), length(r.ids) - 1) && h[n+1] == r.ids[n+1]; n += 1; end; n)
+        slot = lock(lk) do; s = argmax(pre, sort!(collect(free))); delete!(free, s); s; end   # (the free slot whose cache shares the longest prefix with the prompt)
+        Threads.atomic_add!(ACTIVE, 1)
+        try; run!(slot, r, helds[slot+1], cap); finally; Threads.atomic_add!(ACTIVE, -1); lock(lk) do; push!(free, slot); end; end
+    end
 end
 if abspath(PROGRAM_FILE) == @__FILE__
     a = ARGS; arg(k, d) = (i = findfirst(==(k), a); i === nothing ? d : a[i+1])
-    main(arg("--model", ""); cap = parse(Int, arg("--cap", "4096")))
+    main(arg("--model", ""); cap = parse(Int, arg("--cap", "4096")), nslot = parse(Int, arg("--slots", "4")))
 end
