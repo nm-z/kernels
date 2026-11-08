@@ -535,6 +535,33 @@ func TestEngineUsageIncludesMuxMeasuredPrefixReuse(t *testing.T) {
 	if !ok || !reasoningOK || reasoning <= 0 {
 		t.Errorf("missing mux-measured reasoning count: %v", usage)
 	}
+
+	e.waitState("cache", StateUp, 10*time.Second)
+	servicesResp := e.at(e.base, http.MethodGet, "/v1/services", "")
+	servicesBody := readBody(t, servicesResp)
+	if servicesResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /v1/services: status %d: %s", servicesResp.StatusCode, servicesBody)
+	}
+	t.Logf("request: GET %s/v1/services", e.base)
+	t.Logf("response: HTTP %d %s", servicesResp.StatusCode, servicesBody)
+	var services struct {
+		Data []struct {
+			Name string `json:"name"`
+			Last *struct {
+				TotalTokens any `json:"total_tokens"`
+			} `json:"last"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(servicesBody), &services); err != nil {
+		t.Fatal(err)
+	}
+	if len(services.Data) != 1 || services.Data[0].Name != "cache" || services.Data[0].Last == nil {
+		t.Fatalf("/v1/services did not expose the completed engine run: %s", servicesBody)
+	}
+	lastTotal, totalOK := services.Data[0].Last.TotalTokens.(float64)
+	if !totalOK || lastTotal != prompt+completion {
+		t.Errorf("/v1/services last.total_tokens = %v, want %v: %s", services.Data[0].Last.TotalTokens, prompt+completion, servicesBody)
+	}
 }
 
 func TestChatOnAShim(t *testing.T) {

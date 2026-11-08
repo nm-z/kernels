@@ -337,7 +337,7 @@ func (s *Server) execute(ctx context.Context, svc *Service, conn *svcConn, q *ex
 					last = &LastRun{
 						PrefillTPS: m.PrefillTPS, DecodeTPS: m.DecodeTPS, IdlePct: m.IdlePct, At: time.Now(),
 						InputTokens: providerTokenValue(m.Prompt), OutputTokens: providerTokenValue(m.Generated),
-						TotalTokens: providerTokenValue(m.TotalTokens),
+						TotalTokens: np + live.tokens,
 					}
 					if cancelSent {
 						res.cancelled = true
