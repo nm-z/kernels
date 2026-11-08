@@ -1,5 +1,6 @@
 # lfm3-dev.jl: what the tests read off a loaded lfm3.jl system: a host progress watch (LFM3_WATCH=s), the per-node-kind profile (DBG 64),
 # Include after lfm3.jl.
+@isdefined(Data) || include(joinpath(@__DIR__, "..", "lfm3-train.jl"))
 const WATCH = Ref(parse(Float64, get(ENV, "LFM3_WATCH", "0")))
 function await!(S::Sys)                                   # (LFM3_WATCH=s: progress)
     (WATCH[] > 0 && CUDAON) || return; p = Ptr{UInt32}(S.cntH); last = -1; t = time()
