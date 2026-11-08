@@ -256,7 +256,7 @@ struct RQ
 end
 # the plan: a header; per edge; per node; per segment; the holes
 const PHN, PL_LOC, PL_OFF, PL_MOD, PL_LAST, PL_CA, PL_CB, PL_SZ = 16, 0, 1, 2, 3, 4, 5, 6
-const SMW = 9472   # a block's shared memory, in words
+const SMW = 11520   # a block's shared memory, in words
 const TILEA = 256 * 32   # a tile's accumulators (smem: a 132 stride a slice row; line tables from 8448)
 const NP_F0, NP_NT, NP_NC, NP_RT, NP_CT, NP_T0, NP_ON, NP_FL, NP_WAR = 0, 1, 2, 3, 4, 5, 6, 7, 8   # (WAR: the last reader of reused memory)
 const PH_NT, PH_NFLAG, PH_STAT, PH_ORDER, PH_S0, PH_S1, PH_SECT, PH_T0S, PH_T1S, PH_VUSE, PH_HUSE, PH_SLOT = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
@@ -333,8 +333,8 @@ end
         k = nd(R, n, N_KIND); rk = nd(R, n, N_ROWS); on = lvlmask(nd(R, n, N_LVL)) & w != 0 && nd(R, n, N_CARD) == R.card
         nr = Int64(nrows(R, n)); att = k == ATTN || k == ATTBKV || k == ATTBQ; ct = 64; no = Int64(nd(R, n, N_NO)); nb = Int64(R.nblk)
         rows2 = max(Int64(8), pow2ge(cld(nr, 2 * nb)))     # two tasks a block
-        aq = Int64(16); ac = k == ATTN ? 162 : k == ATTBKV ? 256 : 290; ab = k == ATTBKV ? 4640 : 4096   # the tile's rows: smem bytes = ac a row + ab (Q, K, V, scores per method), while the heads' tiles still fill the blocks
-        while att && 2aq <= (k == ATTN ? 32 : 16) && 2aq * ac + ab <= SMW && cld(nr, 2aq) * (k == ATTBKV ? NKV : NH) >= 2nb; aq *= 2; end   # (2 rows a thread is written for the forward only)
+        aq = Int64(16); ac = k == ATTN ? 162 : k == ATTBKV ? 160 : 226; ab = k == ATTBKV ? 4128 : 4096   # the tile's rows: smem bytes = ac a row + ab (Q, K, V, scores per method), while the heads' tiles still fill the blocks
+        while att && R.dbg & 512 == 0 && 2aq <= 32 && 2aq * ac + ab <= SMW && cld(nr, 2aq) * (k == ATTBKV ? NKV : NH) >= 2nb; aq *= 2; end   # (rows a thread: 1 or 2)
         rt = att ? Int(aq) : k in (NRM, STAGE, STEP, MOMU) ? Int(rows2) : rk == WT ? 64 : Int(min(rows2, Int64(64)))
         nc = att && k != ATTBKV ? Int64(NH) : k == ATTBKV ? Int64(NKV) : k == DLOG ? Int64(cld(NV, 4096)) : Int64(1)
         if k == GEMM                                       # the tile with the least time
@@ -781,63 +781,93 @@ end
         end
     end
 end
-@inline function attb!(R::RQ, sm, n, tile, col, tid, kvpass::Bool)
+@inline pk2(a::Float32, b::Float32) = reinterpret(Float32, (reinterpret(UInt32, a) >> 16) | (reinterpret(UInt32, b) & 0xffff0000))   # two BF16 values in a word
+@inline up2(w::Float32) = (reinterpret(Float32, reinterpret(UInt32, w) << 16), reinterpret(Float32, reinterpret(UInt32, w) & 0xffff0000))
+@inline function attb!(R::RQ, sm, n, tile, col, tid, kvpass::Bool)   # the tile (key tile in the kv pass, query tile in the q pass): qt rows, qt / 16 rows a thread; the kept tile's BF16 rows are packed two a word
     qr = nd(R, n, N_I1); kr = nd(R, n, N_I2); v = nd(R, n, N_I3); qkv = nd(R, n, N_I4); ao = nd(R, n, N_M); gao = nd(R, n, N_NM); lse = nd(R, n, N_D); out = nd(R, n, N_O1); win = nd(R, n, N_WIN)
-    qt = Int64(pln(R, n, NP_RT)); t0 = Int64(tile) * qt; nt = cld(Int64(R.P), qt); tr = tid ÷ 16; tc = tid % 16
-    Base.Cartesian.@nexprs 8 d -> (k_d = 0.0f0); Base.Cartesian.@nexprs 8 d -> (v_d = 0.0f0)
+    qt = Int64(pln(R, n, NP_RT)); rp = qt ÷ 16; t0 = Int64(tile) * qt; nt = cld(Int64(R.P), 16); tr = tid ÷ 16; tc = tid % 16
+    Base.Cartesian.@nexprs 16 d -> (k_d = 0.0f0); Base.Cartesian.@nexprs 16 d -> (v_d = 0.0f0)   # (the tile's sub-block b: 8 (b - 1) + d)
     jlo = kvpass ? col * 4 : col; jhi = kvpass ? col * 4 + 3 : col
+    if kvpass; ko = Int64(0); vo = qt * 64; qo = 2 * qt * 64; do_ = qo + 2048; po = do_ + 2048; so = po + 16 * qt; dd = so + 16 * qt; ls = dd + 16     # smem: packed K, V; Q, dO of a query block; p, ds [query][key]; D, lse
+    else; qo = Int64(0); do_ = qt * 64; ko = do_ + qt * 128; vo = ko + 2048; po = vo + 2048; so = po + 16 * qt; dd = so + 16 * qt; ls = dd + qt; end   # smem: packed Q; dO; K, V of a key block; p, ds [query][key]; D, lse
     for j in jlo:jhi
         g = j ÷ 4
-        if kvpass                                          # the key tile fixed: K, V in smem
-            for i in tid:256:16*HD-1; c = i ÷ HD; r = t0 + c; r < R.P && (sm[i + 1] = ev(R, kr, r, g * HD + i % HD); sm[2048 + i + 1] = ev(R, v, r, g * HD + i % HD)); end
-        else                                               # Q, dO in smem
-            for i in tid:256:16*HD-1; c = i ÷ HD; r = t0 + c; r < R.P && (sm[4096 + i + 1] = ev(R, qr, r, j * HD + i % HD); sm[6144 + i + 1] = ev(R, gao, r, j * HD + i % HD) * sigm(ev(R, qkv, r, NE + 2NKV * HD + j))); end
+        if kvpass
+            for w in tid:256:qt*64-1; c = w ÷ 64; d2 = w % 64; r = t0 + c; ok = r < R.P
+                sm[ko + w + 1] = ok ? pk2(ev(R, kr, r, g * HD + 2d2), ev(R, kr, r, g * HD + 2d2 + 1)) : 0.0f0; sm[vo + w + 1] = ok ? pk2(ev(R, v, r, g * HD + 2d2), ev(R, v, r, g * HD + 2d2 + 1)) : 0.0f0; end
+        else
+            for w in tid:256:qt*64-1; c = w ÷ 64; d2 = w % 64; r = t0 + c; sm[qo + w + 1] = r < R.P ? pk2(ev(R, qr, r, j * HD + 2d2), ev(R, qr, r, j * HD + 2d2 + 1)) : 0.0f0; end
+            for i in tid:256:qt*HD-1; c = i ÷ HD; r = t0 + c; sm[do_ + i + 1] = r < R.P ? ev(R, gao, r, j * HD + i % HD) * sigm(ev(R, qkv, r, NE + 2NKV * HD + j)) : 0.0f0; end
         end
         bar()
-        if !kvpass && tr < 16 && t0 + tr < R.P          # D_r = Σ dO ao / sigmoid: 16 threads a row
-            r = t0 + tr; s = 0.0f0; for d in 0:7; s = fma(ev(R, gao, r, j * HD + tc * 8 + d), ev(R, ao, r, j * HD + tc * 8 + d), s); end
-            sm[8448 + tid + 1] = s
-        end
-        bar()
-        if !kvpass && tid < 16 && t0 + tid < R.P
-            s = 0.0f0; for c in 0:15; s += sm[8448 + tid * 16 + c + 1]; end
-            sm[8704 + tid + 1] = s; sm[8720 + tid + 1] = rsv(R, lse, t0 + tid, j)
-            gt = sigm(ev(R, qkv, t0 + tid, NE + 2NKV * HD + j)); wrv!(eaddr(R, out, t0 + tid), F32, s * (1.0f0 - gt), Int64(NE) + j)   # the gate's gradient (ao is gated)
-        end
-        bar()
-        t2 = kvpass ? Int64(tile) : Int64(0); t2end = kvpass ? nt - 1 : Int64(tile)
-        while t2 <= t2end                                  # the other tile: queries or keys
-            u0 = t2 * qt; bar()
-            if kvpass
-                for i in tid:256:16*HD-1; c = i ÷ HD; r = u0 + c; r < R.P && (sm[4096 + i + 1] = ev(R, qr, r, j * HD + i % HD); sm[6144 + i + 1] = ev(R, gao, r, j * HD + i % HD) * sigm(ev(R, qkv, r, NE + 2NKV * HD + j))); end
-                if tid < 16 && u0 + tid < R.P
-                    r = u0 + tid; s = 0.0f0; for d in 0:HD-1; s = fma(ev(R, gao, r, j * HD + d), ev(R, ao, r, j * HD + d), s); end
-                    sm[8704 + tid + 1] = s; sm[8720 + tid + 1] = rsv(R, lse, r, j)
-                end
-            else
-                for i in tid:256:16*HD-1; c = i ÷ HD; r = u0 + c; r < R.P && (sm[i + 1] = ev(R, kr, r, g * HD + i % HD); sm[2048 + i + 1] = ev(R, v, r, g * HD + i % HD)); end
+        if !kvpass                                         # D_r = Σ dO ao / sigmoid: 16 threads a row
+            Base.Cartesian.@nexprs 2 b -> begin
+                rb = tr + 16 * (b - 1); r = t0 + rb
+                if b <= rp && r < R.P; s = 0.0f0; for d in 0:7; s = fma(ev(R, gao, r, j * HD + tc * 8 + d), ev(R, ao, r, j * HD + tc * 8 + d), s); end; sm[po + 256 * (b - 1) + tid + 1] = s; end
             end
             bar()
-            qrow = kvpass ? u0 + tr : t0 + tr; krow = kvpass ? t0 + tc : u0 + tc; p = 0.0f0; ds = 0.0f0
-            if qrow < R.P && krow < R.P && rw(R, qrow, 0) == rw(R, krow, 0) && rw(R, krow, 1) <= rw(R, qrow, 1) && (win == 0 || rw(R, krow, 1) > rw(R, qrow, 1) - win)
-                s = 0.0f0; dp = 0.0f0
-                for d in 0:HD-1; s = fma(sm[4096 + tr * HD + d + 1], sm[tc * HD + d + 1], s); dp = fma(sm[6144 + tr * HD + d + 1], sm[2048 + tc * HD + d + 1], dp); end
-                p = exp(s * SCALE - sm[8720 + tr + 1]); ds = p * (dp - sm[8704 + tr + 1]) * SCALE
+            if tid < qt && t0 + tid < R.P
+                s = 0.0f0; for c in 0:15; s += sm[po + tid * 16 + c + 1]; end
+                sm[dd + tid + 1] = s; sm[ls + tid + 1] = rsv(R, lse, t0 + tid, j)
+                gt = sigm(ev(R, qkv, t0 + tid, NE + 2NKV * HD + j)); wrv!(eaddr(R, out, t0 + tid), F32, s * (1.0f0 - gt), Int64(NE) + j)   # the gate's gradient (ao is gated)
             end
-            sm[8192 + tr * 16 + tc + 1] = p; sm[8448 + tr * 16 + tc + 1] = ds; bar()
-            if kvpass                                      # thread (key tr, dims tc 8..): dV, dK
-                for q in 0:15; pq = sm[8192 + q * 16 + tr + 1]; dq = sm[8448 + q * 16 + tr + 1]
-                    Base.Cartesian.@nexprs 8 d -> (v_d = fma(pq, sm[6144 + q * HD + tc * 8 + d], v_d)); Base.Cartesian.@nexprs 8 d -> (k_d = fma(dq, sm[4096 + q * HD + tc * 8 + d], k_d)); end
+            bar()
+        end
+        t2 = kvpass ? Int64(tile) * rp : Int64(0); t2end = kvpass ? nt - 1 : (Int64(tile) + 1) * rp - 1
+        while t2 <= t2end                                  # the other tile, 16 rows at a time: queries (kv pass) or keys (q pass)
+            u0 = t2 * 16; bar()
+            if kvpass
+                for i in tid:256:16*HD-1; c = i ÷ HD; r = u0 + c; ok = r < R.P; sm[qo + i + 1] = ok ? ev(R, qr, r, j * HD + i % HD) : 0.0f0; sm[do_ + i + 1] = ok ? ev(R, gao, r, j * HD + i % HD) * sigm(ev(R, qkv, r, NE + 2NKV * HD + j)) : 0.0f0; end
+                if tid < 16 && u0 + tid < R.P
+                    r = u0 + tid; s = 0.0f0; for d in 0:HD-1; s = fma(ev(R, gao, r, j * HD + d), ev(R, ao, r, j * HD + d), s); end
+                    sm[dd + tid + 1] = s; sm[ls + tid + 1] = rsv(R, lse, r, j)
+                end
             else
-                for c in 0:15; dq = sm[8448 + tr * 16 + c + 1]; Base.Cartesian.@nexprs 8 d -> (k_d = fma(dq, sm[c * HD + tc * 8 + d], k_d)); end
+                for i in tid:256:16*HD-1; c = i ÷ HD; r = u0 + c; ok = r < R.P; sm[ko + i + 1] = ok ? ev(R, kr, r, g * HD + i % HD) : 0.0f0; sm[vo + i + 1] = ok ? ev(R, v, r, g * HD + i % HD) : 0.0f0; end
+            end
+            bar()
+            Base.Cartesian.@nexprs 2 b -> begin
+                if b <= rp
+                    ql = kvpass ? tr : tr + 16 * (b - 1); kl = kvpass ? tc + 16 * (b - 1) : tc           # the pair's rows within their tiles
+                    qrow = kvpass ? u0 + tr : t0 + ql; krow = kvpass ? t0 + kl : u0 + tc; p = 0.0f0; ds = 0.0f0
+                    if qrow < R.P && krow < R.P && rw(R, qrow, 0) == rw(R, krow, 0) && rw(R, krow, 1) <= rw(R, qrow, 1) && (win == 0 || rw(R, krow, 1) > rw(R, qrow, 1) - win)
+                        s = 0.0f0; dp = 0.0f0
+                        for d2 in 0:63
+                            if kvpass; kk = up2(sm[ko + kl * 64 + d2 + 1]); vv = up2(sm[vo + kl * 64 + d2 + 1]); s = fma(sm[qo + ql * HD + 2d2 + 1], kk[1], s); s = fma(sm[qo + ql * HD + 2d2 + 2], kk[2], s)
+                                dp = fma(sm[do_ + ql * HD + 2d2 + 1], vv[1], dp); dp = fma(sm[do_ + ql * HD + 2d2 + 2], vv[2], dp)
+                            else; qq = up2(sm[qo + ql * 64 + d2 + 1]); s = fma(qq[1], sm[ko + kl * HD + 2d2 + 1], s); s = fma(qq[2], sm[ko + kl * HD + 2d2 + 2], s)
+                                dp = fma(sm[do_ + ql * HD + 2d2 + 1], sm[vo + kl * HD + 2d2 + 1], dp); dp = fma(sm[do_ + ql * HD + 2d2 + 2], sm[vo + kl * HD + 2d2 + 2], dp); end
+                        end
+                        p = exp(s * SCALE - sm[ls + ql + 1]); ds = p * (dp - sm[dd + ql + 1]) * SCALE
+                    end
+                    sm[po + (kvpass ? ql * qt + kl : ql * 16 + kl) + 1] = p; sm[so + (kvpass ? ql * qt + kl : ql * 16 + kl) + 1] = ds
+                end
+            end
+            bar()
+            Base.Cartesian.@nexprs 2 b -> begin
+                if b <= rp
+                    if kvpass                              # thread (key tr + 16 (b - 1), dims tc 8..): dV, dK
+                        kb = tr + 16 * (b - 1)
+                        for q in 0:15; pq = sm[po + q * qt + kb + 1]; dq = sm[so + q * qt + kb + 1]
+                            Base.Cartesian.@nexprs 8 d -> (v_{(b - 1) * 8 + d} = fma(pq, sm[do_ + q * HD + tc * 8 + d], v_{(b - 1) * 8 + d})); Base.Cartesian.@nexprs 8 d -> (k_{(b - 1) * 8 + d} = fma(dq, sm[qo + q * HD + tc * 8 + d], k_{(b - 1) * 8 + d})); end
+                    else                                   # thread (query tr + 16 (b - 1), dims): dQ += ds K
+                        qb = tr + 16 * (b - 1)
+                        for c in 0:15; dq = sm[so + qb * 16 + c + 1]; Base.Cartesian.@nexprs 8 d -> (k_{(b - 1) * 8 + d} = fma(dq, sm[ko + c * HD + tc * 8 + d], k_{(b - 1) * 8 + d})); end
+                    end
+                end
             end
             t2 += 1
         end
         bar()
-        if t0 + tr < R.P && (!kvpass || j == jhi)         # (the kv pass sums the group's four heads first)
-            a = eaddr(R, out, t0 + tr)
-            if kvpass; Base.Cartesian.@nexprs 8 d -> (wrv!(a, F32, k_d, Int64(g) * HD + tc * 8 + d - 1); wrv!(a, F32, v_d, Int64(NKV * HD) + g * HD + tc * 8 + d - 1))
-            else; Base.Cartesian.@nexprs 8 d -> wrv!(a, F32, k_d, Int64(j) * HD + tc * 8 + d - 1); end
+        if !kvpass || j == jhi
+            Base.Cartesian.@nexprs 2 b -> begin
+                row = t0 + tr + 16 * (b - 1)
+                if b <= rp && row < R.P
+                    a = eaddr(R, out, row)
+                    if kvpass; Base.Cartesian.@nexprs 8 d -> (wrv!(a, F32, k_{(b - 1) * 8 + d}, Int64(g) * HD + tc * 8 + d - 1); wrv!(a, F32, v_{(b - 1) * 8 + d}, Int64(NKV * HD) + g * HD + tc * 8 + d - 1))
+                    else; Base.Cartesian.@nexprs 8 d -> wrv!(a, F32, k_{(b - 1) * 8 + d}, Int64(j) * HD + tc * 8 + d - 1); end
+                end
+            end
         end
     end
 end
