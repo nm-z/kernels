@@ -196,7 +196,17 @@ parts, images as `image_url` `data:` URLs) and tools go in the OpenAI chat shape
 `/v1/responses` input; an assistant message's `reasoning_content` is kept. A prompt that does not fit is a 400
 `context_length_exceeded`.
 
-The stream is plain chat completions, `data: {…}` lines and `data: [DONE]`, with no event names and no ai-mux events: a first chunk with
+The stream is plain chat completions, `data: {…}` lines and `data: [DONE]`, with no event names: a first chunk with
 the role, `delta.reasoning_content`, `delta.content` and `delta.tool_calls` (each call whole, with its `index`) as they are made, then one
-chunk with an empty delta, `finish_reason` (`stop`, `tool_calls`, `length`) and `usage`. During a long silence an empty-delta chunk
-goes out every 10 s instead of an SSE comment. A run that fails after the stream began ends with `data: {"error":{…}}` and `[DONE]`.
+chunk with an empty delta, `finish_reason` (`stop`, `tool_calls`, `length`), `usage` and the final `timings`. A run that fails after the
+stream began ends with `data: {"error":{…}}` and `[DONE]`.
+
+`timings` is llama.cpp's object, which web chat reads for its speeds. For an engine, every `response.ai_mux.stats` update (so at most every
+250 ms and at least every 500 ms) is also a chunk with an empty delta, `finish_reason: null` and
+`"timings":{"prompt_n","prompt_per_second","predicted_n","predicted_per_second","cache_n":0}` (plus `idle_pct` when the engine has one), from the
+same numbers: while the prompt runs `prompt_n` is the positions done so far, `prompt_per_second` the live prefill tok/s and the `predicted_*`
+are 0; during generation `prompt_n` is the prompt, `prompt_per_second` the prefill tok/s, `predicted_n` the tokens made so far and
+`predicted_per_second` the live decode tok/s. The last chunk carries the engine's final measured values in `timings` (`prompt_n` the prompt
+tokens, `cache_n` those the engine already had, `predicted_n` the tokens made, both speeds, `idle_pct`) with `prompt_ms` and `predicted_ms`
+derived from them, next to `usage`; a `stream:false` answer has the same `timings` next to `usage`. A shim has no such numbers, so its
+stream has no `timings`; after 10 s without a chunk it gets an empty-delta chunk instead of an SSE comment.

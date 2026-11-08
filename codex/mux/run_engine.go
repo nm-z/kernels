@@ -137,6 +137,9 @@ func (s *Server) finishEngine(w http.ResponseWriter, pr *prepared, rb *respBuild
 	live.tokens = gen
 	live.idle = d.IdlePct
 	rb.stats(&live)
+	if pr.chat {
+		rb.chatTimings = finalTimings(prompt, cached, gen, live.prefillTPS, live.decodeTPS, d.IdlePct)
+	}
 
 	incomplete := !pr.compact && res.maxNew > 0 && gen >= res.maxNew && !d.Stopped // a summary that ran to the limit is still the summary
 	am := map[string]any{}

@@ -6,7 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"regexp"
 	"strings"
@@ -41,8 +43,9 @@ func (e *tenv) getAt(base, path string) (int, string) {
 // chatStream is a chat completion stream read to its end.
 type chatStream struct {
 	chunks []map[string]any
-	done   bool     // data: [DONE]
-	other  []string // lines that are not `data: …`: event names, comments
+	at     []time.Time // when each chunk arrived
+	done   bool        // data: [DONE]
+	other  []string    // lines that are not `data: …`: event names, comments
 }
 
 func readChatStream(t *testing.T, body io.Reader) chatStream {
@@ -62,6 +65,7 @@ func readChatStream(t *testing.T, body io.Reader) chatStream {
 				t.Fatalf("bad chunk %q: %v", line, err)
 			}
 			cs.chunks = append(cs.chunks, m)
+			cs.at = append(cs.at, time.Now())
 		default:
 			cs.other = append(cs.other, line)
 		}
@@ -176,6 +180,14 @@ func TestChatCompletionsLikeTheGateway(t *testing.T) {
 		}
 	}
 
+	// every empty-delta chunk is a timings chunk: the engine's stats are the keepalive
+	for i, c := range cs.chunks[1 : len(cs.chunks)-1] {
+		d := cs.delta(i + 1)
+		if len(d) == 0 && c["timings"] == nil {
+			t.Errorf("an empty chunk without timings: %v", c)
+		}
+	}
+
 	// the engine got the template the default effort asks for, and the server's output budget, not max_tokens
 	prompt := e.readOut("prompt")
 	if !strings.Contains(prompt, "[effort:medium]") || !strings.Contains(prompt, "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n") {
@@ -217,7 +229,8 @@ func TestChatCompletionsNonStreaming(t *testing.T) {
 				} `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
-		Usage map[string]any `json:"usage"`
+		Usage   map[string]any `json:"usage"`
+		Timings map[string]any `json:"timings"`
 	}
 	json.NewDecoder(resp.Body).Decode(&r)
 	resp.Body.Close()
@@ -242,6 +255,14 @@ func TestChatCompletionsNonStreaming(t *testing.T) {
 	}
 	if !strings.Contains(e.readOut("prompt"), "[effort:xhigh]") {
 		t.Error("effort high should render as xhigh")
+	}
+	// the final timings are next to usage: the engine's measured speeds, with the times they imply
+	tm := r.Timings
+	n := r.Usage["completion_tokens"].(float64)
+	p := r.Usage["prompt_tokens"].(float64)
+	if tm["prompt_n"] != p || tm["predicted_n"] != n || tm["cache_n"] != float64(0) || tm["prompt_per_second"] != 1234.5 || tm["predicted_per_second"] != 67.8 ||
+		tm["idle_pct"] != 4.2 || math.Abs(tm["prompt_ms"].(float64)-p/1234.5*1000) > 1e-6 || math.Abs(tm["predicted_ms"].(float64)-n/67.8*1000) > 1e-6 {
+		t.Errorf("timings %v (usage %v)", tm, r.Usage)
 	}
 }
 
@@ -486,6 +507,11 @@ func TestChatOnAShim(t *testing.T) {
 	if len(cs.other) != 0 || !cs.done || cs.text("reasoning_content") != "Let me think. caf\u00e9" || cs.text("content") != "Hello world." {
 		t.Fatalf("stream: other %q done %v reasoning %q content %q", cs.other, cs.done, cs.text("reasoning_content"), cs.text("content"))
 	}
+	for _, c := range cs.chunks {
+		if c["timings"] != nil { // a shim has no prefill or decode speeds
+			t.Errorf("timings on a shim stream: %v", c)
+		}
+	}
 	tcs := cs.toolCalls()
 	if len(tcs) != 2 || tcs[0]["id"] != "call_shim1" || tcs[1]["function"].(map[string]any)["arguments"] != `{"input":"*** Begin Patch\n*** End Patch"}` {
 		t.Errorf("tool calls %v", tcs)
@@ -665,5 +691,152 @@ func TestCompatConfig(t *testing.T) {
 		if _, err := loadConfig([]byte(host(extra)), ""); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// TestChatTimings: a slow prefill and a slow decode, and the stream says how both are going as they go.
+func TestChatTimings(t *testing.T) {
+	e := startMux(t, epSpec{name: "q", scenario: "timings", display: "Qwen3.8-27B", compat: true})
+	e.waitState("q", StateUp, 10*time.Second)
+	resp := e.at(e.compat, "POST", "/v1/chat/completions", gatewayBody)
+	cs := readChatStream(t, resp.Body)
+	resp.Body.Close()
+	if len(cs.other) != 0 || !cs.done {
+		t.Fatalf("other lines %q, [DONE] %v", cs.other, cs.done)
+	}
+	finish, usage := cs.finish()
+	np, ng := usage["prompt_tokens"].(float64), usage["completion_tokens"].(float64)
+	if finish != "stop" || np < 8 || ng != 17 {
+		t.Fatalf("finish %q usage %v", finish, usage)
+	}
+
+	first := -1 // the first chunk with text in it
+	var live []int
+	for i, c := range cs.chunks {
+		if c["choices"].([]any)[0].(map[string]any)["finish_reason"] != nil {
+			continue
+		}
+		d := cs.delta(i)
+		if d["role"] != nil {
+			continue // the first chunk
+		}
+		if d["reasoning_content"] != nil || d["content"] != nil {
+			if first < 0 {
+				first = i
+			}
+			continue
+		}
+		if tm, ok := c["timings"].(map[string]any); ok {
+			live = append(live, i)
+			if len(d) != 0 || c["object"] != "chat.completion.chunk" || c["model"] != "q" || c["id"] != cs.chunks[0]["id"] || c["created"] == nil {
+				t.Errorf("timings chunk %v", c)
+			}
+			for _, k := range []string{"prompt_n", "prompt_per_second", "predicted_n", "predicted_per_second", "cache_n"} {
+				if _, ok := tm[k].(float64); !ok {
+					t.Errorf("timings lack %s: %v", k, tm)
+				}
+			}
+			if tm["prompt_ms"] != nil || tm["predicted_ms"] != nil {
+				t.Errorf("live timings have the final times: %v", tm)
+			}
+		} else {
+			t.Errorf("chunk %d: neither text nor timings: %v", i, c)
+		}
+	}
+	if first < 0 {
+		t.Fatal("no text")
+	}
+	num := func(i int, k string) float64 { return cs.chunks[i]["timings"].(map[string]any)[k].(float64) }
+
+	// before the first text, the prefill: positions done so far grow, the speed is the live prefill speed, nothing generated yet
+	var pre, dec []int
+	for _, i := range live {
+		if i < first {
+			pre = append(pre, i)
+		} else {
+			dec = append(dec, i)
+		}
+	}
+	if len(pre) < 3 {
+		t.Fatalf("%d timings chunks before the first text (%d in all)", len(pre), len(live))
+	}
+	best, speed := 0.0, false
+	for _, i := range pre {
+		if num(i, "predicted_n") != 0 || num(i, "predicted_per_second") != 0 || num(i, "prompt_n") > np || num(i, "prompt_n") < best {
+			t.Errorf("prefill timings %v (prompt %v)", cs.chunks[i]["timings"], np)
+		}
+		best = num(i, "prompt_n")
+		speed = speed || num(i, "prompt_per_second") == 111.5
+	}
+	if best <= 0 || !speed {
+		t.Errorf("prefill never showed progress or its speed: best prompt_n %v, speed seen %v", best, speed)
+	}
+
+	// during generation: the prompt and its speed, the tokens made so far and the live decode speed
+	if len(dec) < 2 {
+		t.Fatalf("%d timings chunks during generation", len(dec))
+	}
+	made := 0.0
+	for _, i := range dec {
+		if num(i, "predicted_n") < made || num(i, "predicted_n") > ng || num(i, "predicted_per_second") <= 0 || num(i, "prompt_n") != np || num(i, "prompt_per_second") != 1234.5 {
+			t.Errorf("decode timings %v", cs.chunks[i]["timings"])
+		}
+		made = num(i, "predicted_n")
+	}
+	if made <= 0 {
+		t.Error("generation never showed tokens made")
+	}
+
+	// at least every 500 ms (the test allows 750 for a loaded machine), from the first chunk to the last
+	prev := cs.at[0]
+	for _, i := range append(live, len(cs.chunks)-1) {
+		if gap := cs.at[i].Sub(prev); gap > 750*time.Millisecond {
+			t.Errorf("%s between timings chunks", gap)
+		}
+		prev = cs.at[i]
+	}
+
+	// the last chunk: finish_reason, usage and the engine's final numbers
+	last := cs.chunks[len(cs.chunks)-1]
+	tm := last["timings"].(map[string]any)
+	if tm["prompt_n"] != np || tm["predicted_n"] != ng || tm["cache_n"] != float64(0) || tm["prompt_per_second"] != 1234.5 || tm["predicted_per_second"] != 67.8 || tm["idle_pct"] != 4.2 ||
+		math.Abs(tm["prompt_ms"].(float64)-np/1234.5*1000) > 1e-6 || math.Abs(tm["predicted_ms"].(float64)-ng/67.8*1000) > 1e-6 ||
+		usage["total_tokens"] != np+ng {
+		t.Errorf("final timings %v, usage %v", tm, usage)
+	}
+	// the text itself is in chunks of its own
+	if cs.text("reasoning_content") != "Hmm." || cs.text("content") != "It is 42." {
+		t.Errorf("reasoning %q content %q", cs.text("reasoning_content"), cs.text("content"))
+	}
+
+	// the same on the main address
+	resp = e.post("/v1/chat/completions", `{"model":"q","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	cs2 := readChatStream(t, resp.Body)
+	resp.Body.Close()
+	n := 0
+	for _, c := range cs2.chunks {
+		if c["timings"] != nil {
+			n++
+		}
+	}
+	if n < 6 {
+		t.Errorf("%d timings chunks on the main address", n)
+	}
+}
+
+// A stream with nothing to say for 10 s (a shim's) gets an empty delta, once; an engine's timings keep it alive.
+func TestChatKeepaliveIsAnEmptyDelta(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sk := newChatSink(rec, "m")
+	sk.comment("keepalive")
+	got := rec.Body.String()
+	if !strings.HasPrefix(got, "data: {") || !strings.HasSuffix(got, "\n\n") || !strings.Contains(got, `"choices":[{"index":0,"delta":{},"finish_reason":null}]`) || strings.Contains(got, "timings") {
+		t.Errorf("keepalive %q", got)
+	}
+	sk.write("response.completed", []byte(`{"response":{"usage":{"input_tokens":1,"output_tokens":2}}}`))
+	n := rec.Body.Len()
+	sk.comment("keepalive")
+	if rec.Body.Len() != n || !strings.HasSuffix(rec.Body.String(), "data: [DONE]\n\n") {
+		t.Errorf("after the end: %q", rec.Body.String())
 	}
 }

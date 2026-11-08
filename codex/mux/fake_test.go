@@ -348,7 +348,16 @@ func fakeRunOne(scenario string, model Model, r *fakeRun, send func(map[string]a
 		send(map[string]any{"op": "done", "id": r.id, "prompt": np, "generated": 10, "prefill_tps": 10.0, "decode_tps": 5.0, "idle_pct": 90.0, "stopped": true})
 		return
 	}
-	if scenario != "noprefill" {
+	if scenario == "timings" {
+		// a slow prefill that says how it is going: four steps, a stats line with each
+		for k := 0; k < 4; k++ {
+			send(map[string]any{"op": "prefill", "id": r.id, "done": k * np / 4, "total": np})
+			send(map[string]any{"op": "stats", "id": r.id, "prefill_tps": 111.5, "decode_tps": 0.0, "idle_pct": nil})
+			time.Sleep(200 * time.Millisecond)
+		}
+		send(map[string]any{"op": "prefill", "id": r.id, "done": np, "total": np})
+	}
+	if scenario != "noprefill" && scenario != "timings" {
 		send(map[string]any{"op": "prefill", "id": r.id, "done": 0, "total": np})
 		time.Sleep(30 * time.Millisecond)
 		send(map[string]any{"op": "prefill", "id": r.id, "done": np, "total": np})
@@ -372,6 +381,8 @@ func fakeRunOne(scenario string, model Model, r *fakeRun, send func(map[string]a
 		}
 	case "summary":
 		ids, _ = model.Encode("Summary: weather in Paris, 3 days.<|im_end|>")
+	case "timings":
+		ids, _ = model.Encode("Hmm.</think>\n\nIt is 42.<|im_end|>")
 	case "maxnew":
 		for i := 0; i < r.maxNew; i++ {
 			ids = append(ids, 'a')
@@ -385,7 +396,7 @@ func fakeRunOne(scenario string, model Model, r *fakeRun, send func(map[string]a
 	// stream in chunks of 3 tokens, 15 ms apart: a stats line every 50 ms
 	chunk := 3
 	delay := 15 * time.Millisecond
-	if scenario == "slow" {
+	if scenario == "slow" || scenario == "timings" {
 		delay = 150 * time.Millisecond
 	}
 	if scenario == "maxnew" || scenario == "nostats" || scenario == "noprefill" || scenario == "noidle" {
@@ -404,12 +415,12 @@ func fakeRunOne(scenario string, model Model, r *fakeRun, send func(map[string]a
 			j = len(ids)
 		}
 		send(map[string]any{"op": "tokens", "id": r.id, "ids": ids[i:j]})
-		if scenario != "nostats" && (i/chunk)%3 == 0 {
+		if scenario != "nostats" && ((i/chunk)%3 == 0 || scenario == "timings") {
 			var idle any // null at first: the engine has no idle % yet
 			if i > 0 {
 				idle = 3.5
 			}
-			send(map[string]any{"op": "stats", "id": r.id, "prefill_tps": 1234.5, "decode_tps": float64(i+1) / time.Since(start).Seconds(), "idle_pct": idle})
+			send(map[string]any{"op": "stats", "id": r.id, "prefill_tps": 1234.5, "decode_tps": float64(i+1)/time.Since(start).Seconds() + 1, "idle_pct": idle})
 		}
 		time.Sleep(delay)
 	}

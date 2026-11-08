@@ -347,16 +347,80 @@ type chatChunk struct {
 	Model   string        `json:"model"`
 	Choices []chatChoice  `json:"choices"`
 	Usage   *chatUsageOut `json:"usage,omitempty"`
+	Timings *chatTimings  `json:"timings,omitempty"`
+}
+
+// chatTimings is llama.cpp's timings object, which web chat reads for its speeds. Live (a chunk on every
+// engine stats tick) it has the counts and speeds so far; at the end the engine's measured values, with
+// prompt_ms and predicted_ms derived from them. idle_pct is ai-mux's own addition.
+type chatTimings struct {
+	PromptN            int      `json:"prompt_n"`
+	PromptMS           *float64 `json:"prompt_ms,omitempty"`
+	PromptPerSecond    float64  `json:"prompt_per_second"`
+	PredictedN         int      `json:"predicted_n"`
+	PredictedMS        *float64 `json:"predicted_ms,omitempty"`
+	PredictedPerSecond float64  `json:"predicted_per_second"`
+	CacheN             int      `json:"cache_n"`
+	IdlePct            *float64 `json:"idle_pct,omitempty"`
+}
+
+// finalTimings are the timings of a finished run: prompt tokens of which cached were already in the
+// engine, generated tokens, and the engine's measured speeds.
+func finalTimings(prompt, cached, gen int, prefillTPS, decodeTPS float64, idle *float64) *chatTimings {
+	ms := func(n int, tps float64) *float64 {
+		v := 0.0
+		if tps > 0 {
+			v = float64(n) / tps * 1000
+		}
+		return &v
+	}
+	if cached < 0 {
+		cached = 0
+	}
+	return &chatTimings{
+		PromptN: prompt, PromptMS: ms(prompt-cached, prefillTPS), PromptPerSecond: prefillTPS,
+		PredictedN: gen, PredictedMS: ms(gen, decodeTPS), PredictedPerSecond: decodeTPS,
+		CacheN: cached, IdlePct: idle,
+	}
+}
+
+// engineStatsEv is the engine form of a response.ai_mux.stats event (a shim's has no prefill or decode).
+type engineStatsEv struct {
+	Phase   string `json:"phase"`
+	Prefill struct {
+		Done  int     `json:"done"`
+		Total int     `json:"total"`
+		TPS   float64 `json:"tps"`
+	} `json:"prefill"`
+	Decode struct {
+		Tokens int     `json:"tokens"`
+		TPS    float64 `json:"tps"`
+	} `json:"decode"`
+	IdlePct *float64 `json:"idle_pct"`
+}
+
+// live is the timings so far: while the prompt runs, the positions done and the prefill speed; during
+// generation, the prompt and its speed, and the tokens made and the decode speed.
+func (e *engineStatsEv) live() *chatTimings {
+	t := &chatTimings{PromptPerSecond: e.Prefill.TPS, IdlePct: e.IdlePct}
+	if e.Phase == "prefill" {
+		t.PromptN = e.Prefill.Done
+		return t
+	}
+	t.PromptN, t.PredictedN, t.PredictedPerSecond = e.Prefill.Total, e.Decode.Tokens, e.Decode.TPS
+	return t
 }
 
 // chatSink writes the events of a response being built as chat completion chunks (plain
-// `data: {…}` lines and `data: [DONE]`): reasoning_content, content and tool_calls deltas, then a chunk
-// with finish_reason and usage. It ignores the events chat completions has no place for, ai_mux.stats among them.
+// `data: {…}` lines and `data: [DONE]`): reasoning_content, content and tool_calls deltas, a timings chunk for
+// each engine stats event, then a chunk with finish_reason, usage and the final timings. It ignores the
+// events chat completions has no place for.
 type chatSink struct {
 	*sseSink
 	id, model string
 	created   int64
-	calls     int // tool calls sent so far
+	calls     int            // tool calls sent so far
+	stats     *engineStatsEv // the latest engine stats event: the last one before the end has the final numbers
 	ended     bool
 }
 
@@ -364,19 +428,20 @@ func newChatSink(w http.ResponseWriter, model string) *chatSink {
 	return &chatSink{sseSink: newSSESink(w), id: newID("chatcmpl-"), model: model, created: time.Now().Unix()}
 }
 
-func (c *chatSink) chunk(delta map[string]any, finish *string, usage *chatUsageOut) {
+func (c *chatSink) chunk(delta map[string]any, finish *string, usage *chatUsageOut, timings *chatTimings) {
 	b, err := json.Marshal(chatChunk{ID: c.id, Object: "chat.completion.chunk", Created: c.created, Model: c.model,
-		Choices: []chatChoice{{Index: 0, Delta: delta, FinishReason: finish}}, Usage: usage})
+		Choices: []chatChoice{{Index: 0, Delta: delta, FinishReason: finish}}, Usage: usage, Timings: timings})
 	if err == nil {
 		c.put("data: %s\n\n", b)
 	}
 }
 
-// comment is a keepalive. SSE comments are valid but a hand-written reader may not skip them, so a chat
-// stream keeps its connection alive with an empty delta, which every reader of this format handles.
+// comment is the keepalive for a stream that has been silent for 10 s. An engine's timings chunks (at
+// least every 500 ms) keep it alive, so this is for a shim. SSE comments are valid but a hand-written reader
+// may not skip them, so it is an empty delta, which every reader of this format handles.
 func (c *chatSink) comment(string) {
 	if !c.ended {
-		c.chunk(map[string]any{}, nil, nil)
+		c.chunk(map[string]any{}, nil, nil, nil)
 	}
 }
 
@@ -410,26 +475,36 @@ func (c *chatSink) write(typ string, data []byte) {
 	}
 	switch typ {
 	case "response.created":
-		c.chunk(map[string]any{"role": "assistant", "content": ""}, nil, nil)
+		c.chunk(map[string]any{"role": "assistant", "content": ""}, nil, nil, nil)
 	case "response.reasoning_text.delta":
 		json.Unmarshal(data, &ev)
-		c.chunk(map[string]any{"reasoning_content": ev.Delta}, nil, nil)
+		c.chunk(map[string]any{"reasoning_content": ev.Delta}, nil, nil, nil)
 	case "response.output_text.delta":
 		json.Unmarshal(data, &ev)
-		c.chunk(map[string]any{"content": ev.Delta}, nil, nil)
+		c.chunk(map[string]any{"content": ev.Delta}, nil, nil, nil)
 	case "response.output_item.done":
 		json.Unmarshal(data, &ev)
 		if ev.Item.Type == "function_call" {
 			c.chunk(map[string]any{"tool_calls": []any{map[string]any{
 				"index": c.calls, "id": ev.Item.CallID, "type": "function",
 				"function": map[string]any{"name": ev.Item.Name, "arguments": ev.Item.Arguments},
-			}}}, nil, nil)
+			}}}, nil, nil, nil)
 			c.calls++
+		}
+	case "response.ai_mux.stats":
+		var st engineStatsEv
+		if json.Unmarshal(data, &st) == nil && (st.Phase == "prefill" || st.Phase == "decode") {
+			c.stats = &st
+			c.chunk(map[string]any{}, nil, nil, st.live())
 		}
 	case "response.completed", "response.incomplete":
 		json.Unmarshal(data, &ev)
 		finish := chatFinish(c.calls > 0, typ == "response.incomplete")
-		c.chunk(map[string]any{}, &finish, ev.Response.Usage.chat())
+		var tm *chatTimings
+		if st, u := c.stats, ev.Response.Usage; st != nil {
+			tm = finalTimings(u.InputTokens, u.InputTokens-st.Prefill.Total, u.OutputTokens, st.Prefill.TPS, st.Decode.TPS, st.IdlePct)
+		}
+		c.chunk(map[string]any{}, &finish, ev.Response.Usage.chat(), tm)
 		c.end()
 	case "response.failed":
 		json.Unmarshal(data, &ev)
@@ -485,9 +560,13 @@ func chatCompletionObj(rb *respBuilder, usage map[string]any, incomplete bool) m
 	var u responsesUsage
 	b, _ := json.Marshal(usage)
 	json.Unmarshal(b, &u)
-	return map[string]any{
+	obj := map[string]any{
 		"id": newID("chatcmpl-"), "object": "chat.completion", "created": rb.created, "model": rb.model,
 		"choices": []any{map[string]any{"index": 0, "message": msg, "finish_reason": chatFinish(len(calls) > 0, incomplete)}},
 		"usage":   u.chat(),
 	}
+	if rb.chatTimings != nil {
+		obj["timings"] = rb.chatTimings
+	}
+	return obj
 }

@@ -83,6 +83,8 @@ type respBuilder struct {
 
 	reasoningTokens int
 
+	chatTimings *chatTimings // the engine's final numbers, for a stream:false chat completion
+
 	rTrim, aTrim trimmer
 	rOpen        *openItem // the reasoning item being streamed
 	aOpen        *openItem // the message item being streamed
