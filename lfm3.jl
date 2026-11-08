@@ -346,7 +346,7 @@ end
             nc = cld(no, Int64(ct))
         end
         nt = max(Int64(1), (nr + rt - 1) ÷ rt)
-        fl = 1                                             # read on another card: the cells in host memory
+        fl = 1
         for f in (N_O1, N_O2, N_O3); e = nd(R, n, f); e > 0 && ed(R, e, E_CROSS) != 0 && (fl = 2); end
         pl!(R, PN(R, n, NP_F0), f0); pl!(R, PN(R, n, NP_NT), nt); pl!(R, PN(R, n, NP_NC), nc); pl!(R, PN(R, n, NP_RT), rt); pl!(R, PN(R, n, NP_CT), ct)
         pl!(R, PN(R, n, NP_ON), on ? 1 : 0); pl!(R, PN(R, n, NP_FL), fl); pl!(R, PN(R, n, NP_T0), t0); pl!(R, PN(R, n, NP_WAR), 0)
@@ -395,7 +395,7 @@ end
 # task index -> (node, tile, column): the nodes in order, their tiles in order
 @inline function decode(R::RQ, idx::Int64)
     lo = 1; hi = Int(R.nn)
-    while lo < hi                                          # the last node whose first task <= idx
+    while lo < hi
         mid = (lo + hi + 1) >> 1
         pln(R, mid, NP_T0) <= idx ? (lo = mid) : (hi = mid - 1)
     end
@@ -514,7 +514,7 @@ end
         end
         k0 += 32
     end
-    if ntk > 1                                             # the k slices of a thread group added
+    if ntk > 1
         bar(); act && (Base.Cartesian.@nexprs 16 i -> (sm[(tk * ntm * ntn + rem) * 16 + i] = c_i)); bar()
         if act && tk == 0
             for t2 in 1:ntk-1; Base.Cartesian.@nexprs 16 i -> (c_i += sm[(t2 * ntm * ntn + rem) * 16 + i]); end
@@ -577,7 +577,7 @@ end
             end
         end
     end
-    if epi == EP_LSE                                       # a row's max and sum over this column tile
+    if epi == EP_LSE
         bar()
         if tid < rt && m0 + tid < nr
             mx = -Inf32; for j in 0:ct-1; n0 + j < no && (mx = max(mx, sm[tid * (ct + 1) + j + 1])); end
@@ -813,7 +813,7 @@ end
             if kvpass                                      # thread (key tr, dims tc 8..): dV, dK
                 for q in 0:15; pq = sm[8192 + q * 16 + tr + 1]; dq = sm[8448 + q * 16 + tr + 1]
                     Base.Cartesian.@nexprs 8 d -> (v_d = fma(pq, sm[6144 + q * HD + tc * 8 + d], v_d)); Base.Cartesian.@nexprs 8 d -> (k_d = fma(dq, sm[4096 + q * HD + tc * 8 + d], k_d)); end
-            else                                           # thread (query r = tr, dims): dQ += ds K
+            else
                 for c in 0:15; dq = sm[8448 + tr * 16 + c + 1]; Base.Cartesian.@nexprs 8 d -> (k_d = fma(dq, sm[c * HD + tc * 8 + d], k_d)); end
             end
             t2 += 1
@@ -832,7 +832,7 @@ end
     foreach_el(R, n, tile, NH + NKV, tid) do r, hh             # a thread a (row, head)
         pos = rw(R, r, 1); isq = hh < NH; j = isq ? hh : hh - NH; w = isq ? wq : wk; rs = rsv(R, isq ? rsq : rsk, r, j); off = isq ? j * HD : NE + j * HD
         src = isq ? gqg : gkv; soff = isq ? j * HD : j * HD; s = 0.0f0
-        for q in 0:HD-1                                    # gy = rope'(g): the partner's angle is the same
+        for q in 0:HD-1
             a = ev(R, src, r, soff + q); qp = q < 64 ? q + 64 : q - 64; b = ev(R, src, r, soff + qp); an = rope(R, tbl, pos, q)
             gy = q < 64 ? a * cos(an) + b * sin(an) : a * cos(an) - b * sin(an)
             ev!(R, gqn, r, gy, off + q); s = fma(gy * ld(w, q), ev(R, qkv, r, off + q), s)
@@ -964,7 +964,7 @@ end
             tid == 0 && waitin!(R, n, tile); bar(); fence(); t1 = tick(); tid == 0 && atomst!(bs + 4, UInt32(2))
             exec!(R, sm, n, tile, col, tid)
             fence(); bar()
-            if tid == 0                                    # (debug 64: cycles waited and run per node)
+            if tid == 0
                 if R.dbg & 64 != 0; st = R.cnt + 4 * (R.nflag - 4 * (Int64(R.nn) + 1) + 4 * Int64(n)); atomadd!(st, UInt32((t1 - t0) >> 8)); atomadd!(st + 4, UInt32((tick() - t1) >> 8)); atomadd!(st + 8, UInt32(1)); end
                 atomst!(cellp(R, n, tile, col), R.gen); atomadd!(cellp(R, n, pln(R, n, NP_NT), 0), UInt32(1))
             end
@@ -993,10 +993,18 @@ function hin(G::Graph, n, i)
 end
 card_of(G::Graph, n, ncard) = (l = G.node[NF*(n-1)+N_L+1]; k = G.node[NF*(n-1)+N_KIND+1]; k == EMB ? 0 : l >= NL ? ncard - 1 : min(Int(l) ÷ cld(NL, ncard), ncard - 1))
 matcard(G::Graph, name, ncard) = occursin("embed", name) ? ncard - 1 : min(parse(Int, match(r"layers\.(\d+)\.", name)[1]) ÷ cld(NL, ncard), ncard - 1)
+function holdpos(G::Graph)
+    held = Set{Int}()
+    for n in 1:G.nn, f in 0:7
+        G.node[NF*(n-1)+N_LVL+1] == GRAD || continue; e = hin(G, n, f)
+        (e > 0 && G.edge[EF*(e-1)+E_ROWS+1] == ALL && G.edge[EF*(e-1)+E_CACHE+1] == 0) && push!(held, Int(e))
+    end
+    sum(Int(G.edge[EF*(e-1)+E_W+1]) * (G.edge[EF*(e-1)+E_DT+1] == BF ? 2 : 4) for e in held)
+end
 function load(dir; train = false, ncard = ndev(), hostgb = 6.0, reserve = 3.5e9, nslot = 4, cap = 65536, lr = 0.002, lrv = 0.0002, lre = 0.002)
-    t0 = time(); g = sft(joinpath(dir, "model.safetensors")); G = recipe(; lr, lrv, lre); nn = G.nn; ne = G.ne
+    t0 = time(); g = sft(joinpath(dir, "model.safetensors")); G = recipe(; lr, lrv, lre); nn = G.nn; ne = G.ne; hold = holdpos(G)
     for n in 1:nn; G.node[NF*(n-1)+N_CARD+1] = card_of(G, n, ncard); end
-    for m in 1:G.nmat                                      # the update nodes go where their matrix is
+    for m in 1:G.nmat
         c = matcard(G, G.matname[m], ncard)
         for n in 1:nn; G.node[NF*(n-1)+N_M+1] == m && G.node[NF*(n-1)+N_LVL+1] == WEIGHTS && (G.node[NF*(n-1)+N_CARD+1] = c); end
     end
@@ -1035,7 +1043,7 @@ function load(dir; train = false, ncard = ndev(), hostgb = 6.0, reserve = 3.5e9,
         if train   # masters and momenta: VRAM, else host
             for which in (5, 4), (m, nm) in enumerate(G.matname)
                 matcard(G, nm, ncard) == c || continue; R, K = matdims(nm); nb = 4R * K
-                if vfree() - nb > reserve && nm != "model.embed_tokens.weight"
+                if vfree() - nb > hold * NPMAX[] + (1 << 30) && nm != "model.embed_tokens.weight"   # (VRAM goes to the window's intermediates first)
                     b = dalloc(nb); push!(bufs, b); mat[MF*(m-1)+which] = addr(b); S.vram[(m, which)] = b
                     which == 4 ? up!(b, 0, Float32[bf32(u) for u in tensor(g, nm)]) : fill!(b, 0)
                 else
@@ -1046,7 +1054,7 @@ function load(dir; train = false, ncard = ndev(), hostgb = 6.0, reserve = 3.5e9,
             end
         end
         if c == ncard - 1 && nslot > 0; sl = dalloc(nslot * slotsz); push!(bufs, sl); S.slots = addr(sl); end   
-        nV = vfree() - max(round(Int, reserve ÷ 2), 1 << 30); aV = dalloc(nV); push!(bufs, aV)   
+        nV = vfree() - max(round(Int, reserve ÷ 2), 1 << 30); aV = dalloc(nV); push!(bufs, aV); NPMAX[] = clamp(nV ÷ hold ÷ 32 * 32, 128, 1568)   
         rope = dalloc(4 * 128); up!(rope, 0, rftab())
         node = dalloc(4 * length(G.node)); up!(node, 0, G.node); edge = dalloc(4 * length(G.edge)); up!(edge, 0, G.edge)
         nodef = dalloc(4 * length(G.nodef)); up!(nodef, 0, G.nodef); push!(bufs, nodef)
@@ -1189,7 +1197,7 @@ function main(args)
     end
 end
 # ---- training: what lfm3-data wrote ----
-const NPMAX = 1568
+const NPMAX = Ref(1568)   # positions a window: what the pool holds (load sets it)
 struct Data; tok::Vector{Int32}; tr::Vector{NTuple{5,UInt32}}; ex::Vector{NTuple{4,UInt32}}; end
 function Data(dir)
     tok = reinterpret(Int32, read(joinpath(dir, "tokens.bin"))) |> collect
@@ -1201,7 +1209,7 @@ function windows(D::Data, held::Bool)
     W = Tuple{Int,Int,Int,Vector{Int},Vector{Int}}[]; i = 1; ne = length(D.ex)
     while i <= ne
         t, w0, _, _ = D.ex[i]; last = i
-        while last + 1 <= ne && D.ex[last+1][1] == t && D.ex[last+1][4] <= w0 + NPMAX; last += 1; end
+        while last + 1 <= ne && D.ex[last+1][1] == t && D.ex[last+1][4] <= w0 + NPMAX[]; last += 1; end
         if (D.tr[t+1][5] != 0) == held
             N = Int(D.ex[last][4] - w0); pos = Int[]; tgt = Int[]; f = tfirst(D, Int(t))
             for j in i:last
