@@ -20,7 +20,9 @@ function windows(D::Data, held::Bool)
                 _, _, rs, re = D.ex[j]
                 for p in Int(rs)-1:Int(re)-2; push!(pos, p - Int(w0)); push!(tgt, D.tok[f+p+2]); end
             end
-            push!(W, (Int(t), f + Int(w0), N, pos, tgt))
+            sh = max(0, N - NPMAX[])                          # a window holds what the pool holds: a longer one starts later (its loss rows before that go)
+            if sh > 0; k = pos .>= sh; pos = pos[k] .- sh; tgt = tgt[k]; N -= sh; end
+            isempty(pos) || push!(W, (Int(t), f + Int(w0) + sh, N, pos, tgt))
         end
         i = last + 1
     end
@@ -108,13 +110,31 @@ function ckpt_read(S::Sys, path)
 end
 step0!(S::Sys) = (for n in 1:S.G.nn; S.G.node[NF*(n-1)+N_KIND+1] == STEP && (S.G.nodef[4(n-1)+1] = 0); end; step!(S))   # W from the masters: a step of 0
 # the gradient check: one window (momenta with f2 = 0, acc = 1)
+# a window's length: what the pool holds, and what a window runs in `seconds` by the time measured here (a gradient pass over two short windows, a fixed cost and a cost a position)
+function calibrate!(S::Sys, D::Data, seconds)
+    cap = NPMAX[]; ns = Int[]; ts = Float64[]
+    for n in (64, 192)
+        NPMAX[] = n; w = windows(D, false)[1]; dt = 0.0
+        for _ in 1:2; t0 = time(); window!(S, D, w; f2 = 1.0, iacc = 0.0); dt = time() - t0; end   # (the second run: warm; iacc 0 leaves the momentum as it was)
+        push!(ns, w[3]); push!(ts, dt)
+    end
+    b = (ts[2] - ts[1]) / (ns[2] - ns[1]); a = ts[1] - b * ns[1]
+    n = clamp(floor(Int, (0.9 * seconds - a) / b), 64, cap)
+    for _ in 1:3                                           # the window of that length, timed: longer ones cost more a position (attention), so shrink to the budget
+        NPMAX[] = n; w = windows(D, false)[1]; dt = 0.0
+        for _ in 1:2; t0 = time(); window!(S, D, w; f2 = 1.0, iacc = 0.0); dt = time() - t0; end
+        dt <= 0.95 * seconds || n <= 64 || (n = max(64, floor(Int, n * 0.9 * seconds / dt))); dt <= 0.95 * seconds && break
+    end
+    NPMAX[] = n
+    @printf("%.2f s + %.1f ms a position: windows of at most %d positions (the pool holds %d)\n", a, 1e3 * b, NPMAX[], cap); NPMAX[]
+end
 function train(args)
     arg(k, d) = (i = findfirst(==(k), args); i === nothing ? d : args[i+1])
     dir = arg("--model", ""); data = arg("--train", ""); out = arg("--out", ""); epochs = parse(Int, arg("--epochs", "2"))
     lr = parse(Float64, arg("--lr", "0.002")); lrv = parse(Float64, arg("--lrv", "0.0002")); lre = parse(Float64, arg("--lre", "0.002")); beta = parse(Float64, arg("--beta", "0.95"))
     acc = parse(Int, arg("--acc", "8")); nwin = parse(Int, arg("--windows", "0")); seed = parse(Int, arg("--seed", "1")); reserve = parse(Float64, arg("--reserve", "3.5e9"))
     out == "" || mkpath(out); (dir == "" || data == "") && error("usage: lfm3.jl --train DATADIR --model DIR --out OUTDIR [--epochs E --lr L --lrv L --lre L --beta B --acc A --windows W --check PREFIX N --resume]")
-    S = load(dir; train = true, nslot = 0, lr, lrv, lre, reserve); D = Data(data)
+    S = load(dir; train = true, nslot = 0, lr, lrv, lre, reserve); D = Data(data); calibrate!(S, D, parse(Float64, arg("--seconds", "10")))
     Wt = windows(D, false); Wh = windows(D, true)
     nwin > 0 && (Wt = Wt[1:min(nwin, end)]; Wh = Wh[1:min(cld(nwin, 3), end)])
     @printf("%d training windows, %d held out; %d windows a step\n", length(Wt), length(Wh), acc); flush(stdout)

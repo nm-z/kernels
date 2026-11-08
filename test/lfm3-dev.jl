@@ -27,6 +27,6 @@ function gradcheck(S::Sys, D::Data, prefix, N)
     write(prefix * ".ids", Int32[D.tok[f0+p+1] for p in 0:N-1]); write(prefix * ".pos", Int32.(pos))
     t0 = time(); loss = window!(S, D, (t, f0, N, pos, tgt); f2 = 0.0, iacc = 1.0)
     @printf("check: N %d, %d loss positions, loss %.5f (%.1f s)\n", N, length(pos), loss, time() - t0); write(prefix * ".loss", Float32(loss))
-    byname = trained(S); for nm in CHECKN; write(prefix * "." * nm * ".f32", byname[nm*".momentum"]); end
+    byname = trained(S; only = Set(nm * ".momentum" for nm in CHECKN)); for nm in CHECKN; write(prefix * "." * nm * ".f32", byname[nm*".momentum"]); end
     println("wrote $prefix.*.f32"); flush(stdout)
 end

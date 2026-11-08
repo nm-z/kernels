@@ -256,6 +256,7 @@ struct RQ
 end
 # the plan: a header; per edge; per node; per segment; the holes
 const PHN, PL_LOC, PL_OFF, PL_MOD, PL_LAST, PL_CA, PL_CB, PL_SZ = 16, 0, 1, 2, 3, 4, 5, 6
+const SMW = 9472   # a block's shared memory, in words
 const TILEA = 256 * 32   # a tile's accumulators (smem: a 132 stride a slice row; line tables from 8448)
 const NP_F0, NP_NT, NP_NC, NP_RT, NP_CT, NP_T0, NP_ON, NP_FL, NP_WAR = 0, 1, 2, 3, 4, 5, 6, 7, 8   # (WAR: the last reader of reused memory)
 const PH_NT, PH_NFLAG, PH_STAT, PH_ORDER, PH_S0, PH_S1, PH_SECT, PH_T0S, PH_T1S, PH_VUSE, PH_HUSE, PH_SLOT = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
@@ -332,7 +333,8 @@ end
         k = nd(R, n, N_KIND); rk = nd(R, n, N_ROWS); on = lvlmask(nd(R, n, N_LVL)) & w != 0 && nd(R, n, N_CARD) == R.card
         nr = Int64(nrows(R, n)); att = k == ATTN || k == ATTBKV || k == ATTBQ; ct = 64; no = Int64(nd(R, n, N_NO)); nb = Int64(R.nblk)
         rows2 = max(Int64(8), pow2ge(cld(nr, 2 * nb)))     # two tasks a block
-        rt = att ? 16 : k in (NRM, STAGE, STEP, MOMU) ? Int(rows2) : rk == WT ? 64 : Int(min(rows2, Int64(64)))
+        aq = Int64(16); while k == ATTN && 2aq <= (SMW - 4096) ÷ 162 && cld(nr, 2aq) * NH >= 2nb; aq *= 2; end   # the query tile: what smem holds, while the heads' tiles still fill the blocks
+        rt = att ? Int(k == ATTN ? aq : 16) : k in (NRM, STAGE, STEP, MOMU) ? Int(rows2) : rk == WT ? 64 : Int(min(rows2, Int64(64)))
         nc = att && k != ATTBKV ? Int64(NH) : k == ATTBKV ? Int64(NKV) : k == DLOG ? Int64(cld(NV, 4096)) : Int64(1)
         if k == GEMM                                       # the tile with the least time
             best = typemax(Int64); nrp = max(Int64(8), pow2ge(nr)); nop = max(Int64(16), pow2ge(no))
@@ -721,49 +723,63 @@ end
     end
 end
 # the attention of a 16-row tile for head j
-@inline function attn!(R::RQ, sm, n, tile, j, tid)
+@inline function attn!(R::RQ, sm, n, tile, j, tid)         # the query tile: qt rows, 16 a pass of the thread layout (tr, tc), so qt / 16 rows a thread
     qr = nd(R, n, N_I1); kr = nd(R, n, N_I2); v = nd(R, n, N_I3); qkv = nd(R, n, N_I4); ao = nd(R, n, N_O1); lse = nd(R, n, N_O2); win = nd(R, n, N_WIN)
-    r0 = Int64(tile) * 16; nr = min(Int64(16), Int64(R.P) - r0); tr = tid ÷ 16; tc = tid % 16; g = j ÷ 4
-    for i in tid:256:16*HD-1; (r = i ÷ HD; r < nr) && (sm[i + 1] = ev(R, qr, r0 + r, j * HD + i % HD)); end
-    Base.Cartesian.@nexprs 8 d -> (o_d = 0.0f0)
-    if tid < 16; sm[8192 + tid + 1] = -Inf32; sm[8208 + tid + 1] = 0.0f0; end
+    qt = Int64(pln(R, n, NP_RT)); r0 = Int64(tile) * qt; nr = min(qt, Int64(R.P) - r0); tr = tid ÷ 16; tc = tid % 16; g = j ÷ 4
+    ko = qt * HD; vo = ko + 2048; so = vo + 2048; po = so + qt * 16; mo_ = po + qt * 16; lo = mo_ + qt   # smem: Q, K, V, scores, p, running max, running sum
+    for i in tid:256:qt*HD-1; (r = i ÷ HD; r < nr) && (sm[i + 1] = ev(R, qr, r0 + r, j * HD + i % HD)); end
+    Base.Cartesian.@nexprs 16 d -> (o_d = 0.0f0)
+    if tid < qt; sm[mo_ + tid + 1] = -Inf32; sm[lo + tid + 1] = 0.0f0; end
     bar()
-    seg = rw(R, r0, 0); pos = tr < nr ? rw(R, r0 + tr, 1) : Int32(-1); segr = tr < nr ? rw(R, r0 + tr, 0) : Int32(-1)
-    s0 = seg; while true                                   # the segments in the tile, one at a time
-        lo = Int32(0); hi = Int32(-1); first = typemax(Int32)
+    Base.Cartesian.@nexprs 2 b -> begin
+        rb_b = tr + 16 * (b - 1); ac_b = rb_b < qt; pos_b = rb_b < nr ? rw(R, r0 + rb_b, 1) : Int32(-1); sg_b = rb_b < nr ? rw(R, r0 + rb_b, 0) : Int32(-1)
+    end
+    s0 = rw(R, r0, 0); while true                          # the segments in the tile, one at a time
+        lo_k = Int32(0); hi = Int32(-1); first = typemax(Int32)
         for r in 0:nr-1; rw(R, r0 + r, 0) == s0 && (hi = max(hi, rw(R, r0 + r, 1)); first = min(first, rw(R, r0 + r, 1))); end
-        win > 0 && (lo = max(Int32(0), first - win + 1))   # (the tile's earliest row's window start)
-        kt = Int64(lo) & ~Int64(15)
+        win > 0 && (lo_k = max(Int32(0), first - win + 1))   # (the tile's earliest row's window start)
+        kt = Int64(lo_k) & ~Int64(15)
         while kt <= hi
             bar()
-            kb = caddr(R, kr, s0, kt); vb = caddr(R, v, s0, kt); ebk = ebytes(R, kr); ebv = ebytes(R, v)   
-            for i in tid:256:16*HD-1; c = i ÷ HD; ok = kt + c <= hi; sm[2048 + i + 1] = ok ? rdv(kb + c * ebk, BF, g * HD + i % HD) : 0.0f0; sm[4096 + i + 1] = ok ? rdv(vb + c * ebv, BF, g * HD + i % HD) : 0.0f0; end
+            kb = caddr(R, kr, s0, kt); vb = caddr(R, v, s0, kt); ebk = ebytes(R, kr); ebv = ebytes(R, v)
+            for i in tid:256:16*HD-1; c = i ÷ HD; ok = kt + c <= hi; sm[ko + i + 1] = ok ? rdv(kb + c * ebk, BF, g * HD + i % HD) : 0.0f0; sm[vo + i + 1] = ok ? rdv(vb + c * ebv, BF, g * HD + i % HD) : 0.0f0; end
             bar()
-            kp = kt + tc; s = -Inf32
-            if segr == s0 && kp <= pos && kp >= pos - (win > 0 ? win - 1 : pos) && kp <= hi
-                s = 0.0f0; for d in 0:HD-1; s = fma(sm[tr * HD + d + 1], sm[2048 + tc * HD + d + 1], s); end; s *= SCALE
+            kp = kt + tc
+            Base.Cartesian.@nexprs 2 b -> begin
+                s_b = -Inf32
+                if rb_b < nr && sg_b == s0 && kp <= pos_b && kp >= pos_b - (win > 0 ? win - 1 : pos_b) && kp <= hi
+                    s_b = 0.0f0; for d in 0:HD-1; s_b = fma(sm[rb_b * HD + d + 1], sm[ko + tc * HD + d + 1], s_b); end; s_b *= SCALE
+                end
+                ac_b && (sm[so + rb_b * 16 + tc + 1] = s_b)
             end
-            sm[6144 + tr * 16 + tc + 1] = s; bar()
-            mo = sm[8192 + tr + 1]; mx = mo; for c in 0:15; mx = max(mx, sm[6144 + tr * 16 + c + 1]); end
-            sc = mx == -Inf32 ? 1.0f0 : exp(mo - mx); p = s == -Inf32 ? 0.0f0 : exp(s - mx)
-            sm[6400 + tr * 16 + tc + 1] = p; bar()
-            if tc == 0; sm[8192 + tr + 1] = mx; l = sm[8208 + tr + 1] * sc; for c in 0:15; l += sm[6400 + tr * 16 + c + 1]; end; sm[8208 + tr + 1] = l; end
-            Base.Cartesian.@nexprs 8 d -> (o_d *= sc)
-            for c in 0:15; pc = sm[6400 + tr * 16 + c + 1]; Base.Cartesian.@nexprs 8 d -> (o_d = fma(pc, sm[4096 + c * HD + tc * 8 + d], o_d)); end
+            bar()
+            Base.Cartesian.@nexprs 2 b -> begin
+                m0_b = ac_b ? sm[mo_ + rb_b + 1] : -Inf32; mx_b = m0_b
+                ac_b && (for c in 0:15; mx_b = max(mx_b, sm[so + rb_b * 16 + c + 1]); end)
+                sc_b = mx_b == -Inf32 ? 1.0f0 : exp(m0_b - mx_b); ac_b && (sm[po + rb_b * 16 + tc + 1] = s_b == -Inf32 ? 0.0f0 : exp(s_b - mx_b))
+            end
+            bar()
+            Base.Cartesian.@nexprs 2 b -> begin
+                if ac_b
+                    tc == 0 && (sm[mo_ + rb_b + 1] = mx_b; l = sm[lo + rb_b + 1] * sc_b; for c in 0:15; l += sm[po + rb_b * 16 + c + 1]; end; sm[lo + rb_b + 1] = l)
+                    Base.Cartesian.@nexprs 8 d -> (o_{(b - 1) * 8 + d} *= sc_b)
+                    for c in 0:15; pc = sm[po + rb_b * 16 + c + 1]; Base.Cartesian.@nexprs 8 d -> (o_{(b - 1) * 8 + d} = fma(pc, sm[vo + c * HD + tc * 8 + d], o_{(b - 1) * 8 + d})); end
+                end
+            end
             kt += 16
         end
         nxt = s0; for r in 0:nr-1; rw(R, r0 + r, 0) > s0 && (nxt == s0 || rw(R, r0 + r, 0) < nxt) && (nxt = rw(R, r0 + r, 0)); end
         nxt == s0 && break; s0 = nxt
     end
     bar()
-    if tr < nr
-        l = sm[8208 + tr + 1]; gt = sigm(ev(R, qkv, r0 + tr, NE + 2NKV * HD + j)); a = eaddr(R, ao, r0 + tr)
-        Base.Cartesian.@nexprs 8 d -> wrv!(a, BF, R.dbg & 16 != 0 ? Float32(tc * 8 + d) : R.dbg & 32 != 0 ? sm[4096 + tc * 8 + d] : o_d / l * gt, Int64(j) * HD + tc * 8 + d - 1)
-        tc == 0 && wrv!(eaddr(R, lse, r0 + tr), F32, sm[8192 + tr + 1] + log(l), Int64(j))
+    Base.Cartesian.@nexprs 2 b -> begin
+        if rb_b < nr
+            l = sm[lo + rb_b + 1]; gt = sigm(ev(R, qkv, r0 + rb_b, NE + 2NKV * HD + j)); a = eaddr(R, ao, r0 + rb_b)
+            Base.Cartesian.@nexprs 8 d -> wrv!(a, BF, o_{(b - 1) * 8 + d} / l * gt, Int64(j) * HD + tc * 8 + d - 1)
+            tc == 0 && wrv!(eaddr(R, lse, r0 + rb_b), F32, sm[mo_ + rb_b + 1] + log(l), Int64(j))
+        end
     end
 end
-# its adjoint, two passes: dK, dV; then dQ
-# a query tile's dQ and the gate's gradient over the key tiles before it
 @inline function attb!(R::RQ, sm, n, tile, col, tid, kvpass::Bool)
     qr = nd(R, n, N_I1); kr = nd(R, n, N_I2); v = nd(R, n, N_I3); qkv = nd(R, n, N_I4); ao = nd(R, n, N_M); gao = nd(R, n, N_NM); lse = nd(R, n, N_D); out = nd(R, n, N_O1); win = nd(R, n, N_WIN)
     t0 = Int64(tile) * 16; nt = (Int64(R.P) + 15) ÷ 16; tr = tid ÷ 16; tc = tid % 16
@@ -943,7 +959,7 @@ end
 end
 # ---- the kernel: block 0 derives the plan; every block claims tasks in order ----
 @kernel unsafe_indices = true function krun!(R::RQ)
-    sm = @localmem Float32 (8960,); si = @localmem Int32 (4,)
+    sm = @localmem Float32 (SMW,); si = @localmem Int32 (4,)
     tid = Int32(KI.get_local_id(Int32).x - 1); gid = Int32(KI.get_group_id(Int32).x - 1)
     if gid == 0 && tid == 0
         t0 = tick(); derive!(R); fence(); R.dbg & 64 != 0 && atomst!(R.cnt + 4 * (R.nflag - 4 * (Int64(R.nn) + 1)), UInt32((tick() - t0) >> 8))
@@ -1052,7 +1068,7 @@ function load(dir; train = false, ncard = ndev(), hostgb = 6.0, reserve = 3.5e9,
             end
         end
         if c == ncard - 1 && nslot > 0; sl = dalloc(nslot * slotsz); push!(bufs, sl); S.slots = addr(sl); end   
-        nV = vfree() - max(round(Int, reserve ÷ 2), 1 << 30); aV = dalloc(nV); push!(bufs, aV); NPMAX[] = clamp(nV ÷ hold ÷ 32 * 32, 128, 1568)   
+        nV = vfree() - max(round(Int, reserve ÷ 8), 1 << 28); aV = dalloc(nV); push!(bufs, aV); NPMAX[] = clamp(nV ÷ hold ÷ 32 * 32, 128, 1568)   
         rope = dalloc(4 * 128); up!(rope, 0, rftab())
         node = dalloc(4 * length(G.node)); up!(node, 0, G.node); edge = dalloc(4 * length(G.edge)); up!(edge, 0, G.edge)
         nodef = dalloc(4 * length(G.nodef)); up!(nodef, 0, G.nodef); push!(bufs, nodef)
