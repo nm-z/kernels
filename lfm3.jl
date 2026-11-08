@@ -623,6 +623,12 @@ end
         f(rowof(R, rk, Int64(tile) * rt + i ÷ w), i % w); i += 256
     end
 end
+@inline function foreach_row(f, R::RQ, n, tile, w, tid)    # f(r) once a row, resolving its edges; its result g(k) over k < w
+    rt = pln(R, n, NP_RT); rk = nd(R, n, N_ROWS); tot = min(rt, nrows(R, n) - Int64(tile) * rt)
+    for j in 0:tot-1; g = f(rowof(R, rk, Int64(tile) * rt + j)); k = Int64(tid); while k < w; g(k); k += 256; end; end
+end
+struct ER; p::LP{UInt8}; d::Int32; end                       # a row of an edge, resolved once
+@inline er(R::RQ, e, r) = ER(eaddr(R, e, r), ed(R, e, E_DT)); @inline (x::ER)(k) = rdv(x.p, x.d, Int64(k)); @inline wr!(x::ER, v, k) = wrv!(x.p, x.d, v, Int64(k))
 @inline rsv(R::RQ, e, r, b) = ld(lp(Float32, eaddr(R, e, r)), Int64(b))
 @inline ev(R::RQ, e, r, k) = rdv(eaddr(R, e, r), ed(R, e, E_DT), Int64(k))
 @inline ev!(R::RQ, e, r, v, k) = wrv!(eaddr(R, e, r), ed(R, e, E_DT), v, Int64(k))
@@ -636,8 +642,8 @@ end
     while i - g < tot
         s = 0.0f0; r = Int32(0); b = Int64(0)
         if i < tot
-            r = rowof(R, rk, Int64(tile) * rt + i ÷ nb); b = i % nb
-            for q in lane:16:D-1; v = ev(R, e, r, off + b * D + q); s = fma(v, v, s); end
+            r = rowof(R, rk, Int64(tile) * rt + i ÷ nb); b = i % nb; xr = er(R, e, r); c0 = off + b * D
+            for q in lane:64:D-1; v1 = xr(c0 + q); v2 = xr(c0 + q + 16); v3 = xr(c0 + q + 32); v4 = xr(c0 + q + 48); s = fma(v4, v4, fma(v3, v3, fma(v2, v2, fma(v1, v1, s)))); end   # (D a multiple of 64: four loads in flight)
         end
         sm[tid + 1] = s; bar()
         if lane == 0 && i < tot
@@ -646,15 +652,17 @@ end
         end
         bar()
         if o2 > 0 && i < tot                                 # the normalized row x rs w
-            for q in lane:16:D-1; c = off + b * D + q; ev!(R, o2, r, ev(R, e, r, c) * sm[300 + g] * ld(wv, c), c); end
+            xr = er(R, e, r); yr = er(R, o2, r); c0 = off + b * D; rg = sm[300 + g]
+            for q in lane:32:D-1; c = c0 + q; v1 = xr(c); v2 = xr(c + 16); w1 = ld(wv, c); w2 = ld(wv, c + 16); wr!(yr, v1 * rg * w1, c); wr!(yr, v2 * rg * w2, c + 16); end
         end
         bar(); i += 16
     end
 end
 @inline function resid!(R::RQ, n, tile, tid)                # x1 = x + w rs o
     x = nd(R, n, N_I1); o = nd(R, n, N_I2); rs = nd(R, n, N_I3); w = vp(R, nd(R, n, N_WV)); out = nd(R, n, N_O1)
-    foreach_el(R, n, tile, NE, tid) do r, k
-        ev!(R, out, r, ev(R, x, r, k) + ld(w, k) * rsv(R, rs, r, 0) * ev(R, o, r, k), k)
+    foreach_row(R, n, tile, NE, tid) do r
+        xr = er(R, x, r); orr = er(R, o, r); yr = er(R, out, r); sc = rsv(R, rs, r, 0)
+        k -> wr!(yr, xr(k) + ld(w, k) * sc * orr(k), k)
     end
 end
 @inline function silub!(R::RQ, n, tile, tid)                # gu1 = gs u3 silu'(u1), gu3 = gs silu(u1)
@@ -667,13 +675,17 @@ end
 @inline function conv!(R::RQ, n, tile, tid)                 # win 0: h = B x; win 1: cv = taps * h, y = C cv
     bcx = nd(R, n, N_I1); h = nd(R, n, N_WIN) == 0 ? nd(R, n, N_O1) : nd(R, n, N_I2)
     if nd(R, n, N_WIN) == 0
-        foreach_el(R, n, tile, NE, tid) do r, k; ev!(R, h, r, ev(R, bcx, r, k) * ev(R, bcx, r, 2NE + k), k); end
+        foreach_row(R, n, tile, NE, tid) do r; bx = er(R, bcx, r); hr = er(R, h, r); k -> wr!(hr, bx(k) * bx(2NE + k), k); end
     else
         y = nd(R, n, N_O1); cv = nd(R, n, N_O2); taps = vp(R, nd(R, n, N_WV))
-        foreach_el(R, n, tile, NE, tid) do r, k
-            s = rw(R, r, 0); pos = rw(R, r, 1); acc = 0.0f0
-            for t in 0:6; p = pos - 6 + t; p >= 0 && (acc = fma(ld(taps, Int64(k) * 7 + t), rdv(caddr(R, h, s, p), BF, Int64(k)), acc)); end
-            ev!(R, cv, r, acc, k); ev!(R, y, r, ev(R, bcx, r, NE + k) * acc, k)
+        foreach_row(R, n, tile, NE, tid) do r
+            s = rw(R, r, 0); pos = rw(R, r, 1); bx = er(R, bcx, r); cr = er(R, cv, r); yr = er(R, y, r)
+            Base.Cartesian.@nexprs 7 t -> (p_t = pos - 7 + t; a_t = caddr(R, h, s, p_t))   # (the taps' rows, once a row)
+            k -> begin
+                acc = 0.0f0
+                Base.Cartesian.@nexprs 7 t -> (p_t >= 0 && (acc = fma(ld(taps, Int64(k) * 7 + (t - 1)), rdv(a_t, BF, Int64(k)), acc)))
+                wr!(cr, acc, k); wr!(yr, bx(NE + k) * acc, k)
+            end
         end
     end
 end
@@ -740,15 +752,15 @@ end
 @inline function rope!(R::RQ, n, tile, tid)                 # qr, kr rotated; v to its cache
     qkv = nd(R, n, N_I1); rsq = nd(R, n, N_I2); rsk = nd(R, n, N_I3); qr = nd(R, n, N_O1); kr = nd(R, n, N_O2); v = nd(R, n, N_O3)
     wq = vp(R, nd(R, n, N_WV)); wk = vp(R, nd(R, n, N_D)); tbl = nd(R, n, N_TBL)
-    foreach_el(R, n, tile, NE + 2NKV * HD, tid) do r, k
-        pos = rw(R, r, 1)
-        if k < NE
-            j = k ÷ HD; q = k % HD; a = ev(R, qkv, r, k) * ld(wq, q) * rsv(R, rsq, r, j); qp = q < 64 ? q + 64 : q - 64
-            b = ev(R, qkv, r, j * HD + qp) * ld(wq, qp) * rsv(R, rsq, r, j); ev!(R, qr, r, rotv(R, tbl, pos, q, a, b), k)
+    foreach_row(R, n, tile, NE + 2NKV * HD, tid) do r
+        pos = rw(R, r, 1); qk = er(R, qkv, r); qo = er(R, qr, r); ko = er(R, kr, r); vo = er(R, v, r); sq = lp(Float32, eaddr(R, rsq, r)); sk = lp(Float32, eaddr(R, rsk, r))
+        k -> if k < NE
+            j = k ÷ HD; q = k % HD; a = qk(k) * ld(wq, q) * ld(sq, j); qp = q < 64 ? q + 64 : q - 64
+            b = qk(j * HD + qp) * ld(wq, qp) * ld(sq, j); wr!(qo, rotv(R, tbl, pos, q, a, b), k)
         elseif k < NE + NKV * HD
-            kk = k - NE; j = kk ÷ HD; q = kk % HD; a = ev(R, qkv, r, k) * ld(wk, q) * rsv(R, rsk, r, j); qp = q < 64 ? q + 64 : q - 64
-            b = ev(R, qkv, r, NE + j * HD + qp) * ld(wk, qp) * rsv(R, rsk, r, j); ev!(R, kr, r, rotv(R, tbl, pos, q, a, b), kk)
-        else; ev!(R, v, r, ev(R, qkv, r, k), k - NE - NKV * HD)
+            kk = k - NE; j = kk ÷ HD; q = kk % HD; a = qk(k) * ld(wk, q) * ld(sk, j); qp = q < 64 ? q + 64 : q - 64
+            b = qk(NE + j * HD + qp) * ld(wk, qp) * ld(sk, j); wr!(ko, rotv(R, tbl, pos, q, a, b), kk)
+        else; wr!(vo, qk(k), k - NE - NKV * HD)
         end
     end
 end
