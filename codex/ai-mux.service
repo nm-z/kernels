@@ -1,0 +1,12 @@
+[Unit]
+Description=ai-mux: serves AI on this host and supervises every model endpoint
+
+[Service]
+ExecStart=%h/.local/bin/ai-mux serve -f %h/.config/ai-mux/ai-mux.yaml
+Restart=always
+RestartSec=2
+KillMode=control-group
+TimeoutStopSec=90
+
+[Install]
+WantedBy=default.target
