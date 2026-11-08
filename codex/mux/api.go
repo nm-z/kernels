@@ -17,6 +17,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/embeddings", s.handleEmbeddings)
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/services", s.handleServices)
+	mux.HandleFunc("/v1/capacity", s.handleCapacity)
 	mux.HandleFunc("/v1/services/", s.handleServiceAction)
 	mux.HandleFunc("/v1/events", s.handleEvents)
 	return mux
@@ -65,6 +66,35 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": s.serviceInfos()})
+}
+
+// handleCapacity joins the latest shim facts with mux-owned service state and limits.
+func (s *Server) handleCapacity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, "GET")
+		return
+	}
+	services := s.serviceInfos()
+	sources := make([]map[string]any, 0)
+	for _, service := range services {
+		if service.Kind != KindShim {
+			continue
+		}
+		for _, fact := range service.Capacity {
+			sources = append(sources, map[string]any{
+				"source": fact.Source,
+				"service": service.Name,
+				"state": service.State,
+				"ctx": service.Ctx,
+				"slots": service.Slots,
+				"remaining": fact.Remaining,
+				"reset_time": fact.ResetTime,
+				"tokens_served_today": fact.TokensServedToday,
+				"capacity_at": service.CapacityAt,
+			})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sources": sources, "services": services})
 }
 
 // POST /v1/services/NAME/up and /down
@@ -209,3 +239,4 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+

@@ -106,7 +106,14 @@ Refused: unknown service, wrong peer, `positions < ctx`.
 | `delta` | `id`, `channel` (`reasoning` or `content`), `text` | as it streams |
 | `tool_call` | `id`, `call_id`, `name`, `arguments` (JSON text) | each call |
 | `done` | `id`, `input_tokens`, `output_tokens` (the provider's, when it reports them) | last |
+| `capacity` | `rows` (`[{source, remaining, reset_time, tokens_served_today}]`) | whenever a fact changes and at least every 30 s |
 | `error` | `id`, `message` | |
+
+Capacity rows contain only facts reported by the provider. Values keep their provider units and types;
+an unreported `remaining`, `reset_time`, or `tokens_served_today` is `""`. A shim sends a complete
+snapshot, including an empty `rows` array when it has no sources. mux caches the latest snapshot per
+shim and joins it with the service's state, context window, and slots; mux does not derive those facts.
+The cache is cleared when the shim disconnects.
 
 mux → shim: `run` with `id`, `messages` (chat form, system first), `tools`, `effort`, `images`.
 
@@ -136,7 +143,8 @@ mux → embed: `run` with `id`, `texts`.
 | `POST /v1/chat/completions`, `GET /props` | the llama.cpp-compatible face for web chat, below |
 | `POST /v1/embeddings` | the OpenAI embeddings API; embed services |
 | `GET /v1/models` | `{"data":[{"id","kind","ctx","efforts","vision","state"}]}` |
-| `GET /v1/services` | every service: `name, kind, state, device, pid, ctx, slots, since, last, progress, log, reason` |
+| `GET /v1/services` | every service: `name, kind, state, device, pid, ctx, slots, since, last, progress, log, reason`; shims also have `capacity` and `capacity_at` |
+| `GET /v1/capacity` | `{"sources":[...] ,"services":[...]}`; each source row joins the shim's provider facts with mux's `service, state, ctx, slots` |
 | `POST /v1/services/NAME/up`, `.../down` | change the desired state (rewrites mux.yaml) |
 | `GET /v1/events?since=TS` | SSE: the recorded events since `TS`, then live ones (state changes, runs, stats, routes, job progress) |
 
@@ -217,3 +225,4 @@ are 0; during generation `prompt_n` is the prompt, `prompt_per_second` the prefi
 tokens, `cache_n` those the engine already had, `predicted_n` the tokens made, both speeds, `idle_pct`) with `prompt_ms` and `predicted_ms`
 derived from them, next to `usage`; a `stream:false` answer has the same `timings` next to `usage`. A shim has no such numbers, so its
 stream has no `timings`; after 10 s without a chunk it gets an empty-delta chunk instead of an SSE comment.
+

@@ -36,8 +36,18 @@ register. A dev run outside systemd uses process groups (`MUX_SUPERVISOR=systemd
     mux up NAME | down NAME     desired state; rewrites `up:` (`up` re-runs a done job)
     mux events [-since TS]      recorded events since TS (RFC 3339 or Unix seconds), then live
 
+## Provider capacity
+
+Shims send a `capacity` socket message when their provider facts change and at least every 30 seconds.
+`GET /v1/services` includes the latest `capacity` rows and `capacity_at` on connected shims. `GET
+/v1/capacity` returns those rows under `sources`, joined with mux-owned service state, context window,
+and slots; it also returns all services so a disconnected shim remains visible as down with no rows.
+Allowance, reset, and token values are copied from the shim. An unavailable value is `""`; mux does
+not calculate or estimate it. Capacity rows clear when a shim disconnects.
+
 ## Logs and events
 
 `~/.local/state/mux/<name>.log`: the service's stdout and stderr plus mux lines for each start, stop and
 exit code (`log` in `GET /v1/services`). `~/.local/state/mux/events.db`: SQLite `events(ts, service, run,
 type, json)`, every event. mux's own log: `journalctl --user -u mux`.
+

@@ -29,6 +29,15 @@ func (r *runID) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// CapacityFact is one provider's directly reported capacity snapshot. RawMessage keeps
+// provider values and units intact; an unreported field is represented as an empty string.
+type CapacityFact struct {
+	Source            string          `json:"source"`
+	Remaining         json.RawMessage `json:"remaining"`
+	ResetTime         json.RawMessage `json:"reset_time"`
+	TokensServedToday json.RawMessage `json:"tokens_served_today"`
+}
+
 // msg is any line a service sends, of any kind. Fields whose absence is a protocol violation are pointers.
 type msg struct {
 	Op string `json:"op"`
@@ -72,6 +81,7 @@ type msg struct {
 	Arguments    json.RawMessage `json:"arguments"`
 	InputTokens  *int            `json:"input_tokens"`
 	OutputTokens *int            `json:"output_tokens"`
+	Rows         []CapacityFact  `json:"rows"` // shim capacity snapshot
 
 	// embed
 	Vectors [][]float32 `json:"vectors"`
@@ -238,6 +248,22 @@ func (c *svcConn) readLoop(br *bufio.Reader) error {
 
 func (c *svcConn) dispatch(m *msg) {
 	switch m.Op {
+	case "capacity":
+		if c.kind != KindShim {
+			c.svc.fail("capacity is only valid for shim services")
+			return
+		}
+		if m.Rows == nil {
+			c.svc.fail("capacity omitted its rows array")
+			return
+		}
+		for _, row := range m.Rows {
+			if row.Source == "" {
+				c.svc.fail("capacity row omitted its source")
+				return
+			}
+		}
+		c.svc.setCapacity(c, m.Rows)
 	case "prefill", "tokens", "stats", "done", "error", "route", "ttft", "delta", "tool_call", "vectors":
 		c.mu.Lock()
 		r := c.runs[m.ID]
@@ -411,3 +437,4 @@ func (e *Service) isCurrentProc(p *proc) bool {
 	defer e.mu.Unlock()
 	return e.p == p
 }
+

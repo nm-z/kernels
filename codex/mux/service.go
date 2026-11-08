@@ -1,6 +1,7 @@
 package mux
 
 import (
+	"encoding/json"
 	"fmt"
 	"runtime"
 	"sync"
@@ -68,6 +69,8 @@ type Service struct {
 	conn         *svcConn
 	model        Model // an engine's tokenizer and chat template
 	last         *LastRun
+	capacity     []CapacityFact
+	capacityAt   time.Time
 	progress     *Progress
 	lastProgress time.Time // a job's last progress (or its registration)
 	jobRes       *jobResult
@@ -116,6 +119,8 @@ type ServiceInfo struct {
 	Auto      bool      `json:"auto,omitempty"`
 	Vision    bool      `json:"vision"`
 	Efforts   []string  `json:"efforts,omitempty"`
+	Capacity  []CapacityFact `json:"capacity"`
+	CapacityAt string        `json:"capacity_at,omitempty"`
 }
 
 func (e *Service) Info() ServiceInfo {
@@ -129,6 +134,13 @@ func (e *Service) infoLocked() ServiceInfo {
 		Name: e.name, Kind: e.kind, State: e.state, Reason: e.reason, Device: e.cfg.Device, Ctx: e.cfg.Ctx,
 		Since: e.since.Format(time.RFC3339), Last: e.last, Progress: e.progress, Log: e.logPath, Up: e.desired,
 		Active: e.active, Queued: e.queued, Vision: e.cfg.Vision, Efforts: e.cfg.Efforts,
+		Capacity: []CapacityFact{},
+	}
+	if e.conn != nil && e.kind == KindShim {
+		in.Capacity = append(in.Capacity, e.capacity...)
+		if !e.capacityAt.IsZero() {
+			in.CapacityAt = e.capacityAt.UTC().Format(time.RFC3339)
+		}
 	}
 	if e.device != "" && in.Device == "" {
 		in.Device = e.device
@@ -207,6 +219,8 @@ func (e *Service) attach(c *svcConn) error {
 		return fmt.Errorf("service %s is already registered", e.name)
 	}
 	e.conn = c
+	e.capacity = nil
+	e.capacityAt = time.Time{}
 	e.reason = ""
 	if c.device != "" {
 		e.device = c.device
@@ -235,9 +249,36 @@ func (e *Service) detach(c *svcConn) {
 		return
 	}
 	e.conn = nil
+	e.capacity = nil
+	e.capacityAt = time.Time{}
 	if e.p != nil && (e.state == StateUp || e.state == StateBusy) && e.jobRes == nil {
 		e.setStateLocked(StateStarting, "")
 	}
+}
+
+func (e *Service) setCapacity(c *svcConn, rows []CapacityFact) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.conn != c || e.kind != KindShim {
+		return
+	}
+	copyRows := make([]CapacityFact, len(rows))
+	copy(copyRows, rows)
+	for i := range copyRows {
+		copyRows[i].Remaining = capacityValue(copyRows[i].Remaining)
+		copyRows[i].ResetTime = capacityValue(copyRows[i].ResetTime)
+		copyRows[i].TokensServedToday = capacityValue(copyRows[i].TokensServedToday)
+	}
+	e.capacity = copyRows
+	e.capacityAt = time.Now().UTC()
+}
+
+func capacityValue(raw json.RawMessage) json.RawMessage {
+	var value any
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil || value == nil {
+		return json.RawMessage(`""`)
+	}
+	return raw
 }
 
 // currentConn is the registered connection, or nil with the state to report.
@@ -551,3 +592,4 @@ func describeExit(err error) string {
 	}
 	return err.Error()
 }
+
