@@ -19,6 +19,7 @@ for f in sort(filter(f -> endswith(f, ".f32"), readdir(dirname(prefix))))
     name = f[length(basename(prefix))+2:end-4]
     a = collect(reinterpret(Float32, read(joinpath(dirname(prefix), f))))
     b = Vector{Float32}(PyArray(params[name].grad.detach().numpy().ravel()))
+    length(a) > length(b) && (a = a[1:length(b)])   # (a head norm's vector is held padded to NE)
     length(a) == length(b) || (println("$name: $(length(a)) vs $(length(b))"); continue)
     println(rpad(name, 48), " rel ", round(norm(a - b) / norm(b); digits = 4), "  cos ", round(dot(a, b) / (norm(a) * norm(b)); digits = 5), "  |torch| ", round(norm(b); sigdigits = 3))
 end
