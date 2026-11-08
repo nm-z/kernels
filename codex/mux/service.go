@@ -24,6 +24,38 @@ const (
 	healthyUptime = 60 * time.Second // a service that stayed up this long starts its backoff over
 )
 
+// CapacityFacts are facts a provider shim reported. Missing provider values stay empty.
+type CapacityFacts struct {
+	Remaining         any `json:"remaining"`
+	ResetTime         any `json:"reset_time"`
+	TokensServedToday any `json:"tokens_served_today"`
+}
+
+func emptyCapacityFacts() CapacityFacts {
+	return CapacityFacts{Remaining: "", ResetTime: "", TokensServedToday: ""}
+}
+
+func capacityValue(value any) any {
+	if value == nil {
+		return ""
+	}
+	return value
+}
+
+func capacityFactsFromMessage(m *msg) CapacityFacts {
+	return CapacityFacts{
+		Remaining: capacityValue(m.Remaining), ResetTime: capacityValue(m.ResetTime),
+		TokensServedToday: capacityValue(m.TokensServedToday),
+	}
+}
+
+func providerTokenValue(value *int) any {
+	if value == nil || *value < 0 {
+		return ""
+	}
+	return *value
+}
+
 // LastRun is what the last finished run measured, as far as its kind reports it.
 type LastRun struct {
 	PrefillTPS   *float64  `json:"prefill_tps,omitempty"` // engine
@@ -31,8 +63,9 @@ type LastRun struct {
 	IdlePct      *float64  `json:"idle_pct,omitempty"`
 	TTFTMS       *float64  `json:"ttft_ms,omitempty"` // shim
 	Route        []string  `json:"route,omitempty"`
-	InputTokens  int       `json:"input_tokens,omitempty"`
-	OutputTokens int       `json:"output_tokens,omitempty"`
+	InputTokens  any       `json:"input_tokens"`
+	OutputTokens any       `json:"output_tokens"`
+	TotalTokens  any       `json:"total_tokens"`
 	Texts        int       `json:"texts,omitempty"` // embed
 	At           time.Time `json:"at"`
 }
@@ -69,6 +102,7 @@ type Service struct {
 	model        Model // an engine's tokenizer and chat template
 	last         *LastRun
 	progress     *Progress
+	capacity     CapacityFacts
 	lastProgress time.Time // a job's last progress (or its registration)
 	jobRes       *jobResult
 	device       string // an embed service reports its own
@@ -85,7 +119,7 @@ func newService(s *Server, cfg *ServiceConfig) *Service {
 	return &Service{
 		s: s, cfg: cfg, name: cfg.Name, kind: cfg.Kind,
 		logPath: s.logPath(cfg.Name),
-		state:   StateDown, since: time.Now(), desired: cfg.Up,
+		state:   StateDown, since: time.Now(), desired: cfg.Up, capacity: emptyCapacityFacts(),
 		wake:       make(chan struct{}, 1),
 		failReq:    make(chan string, 1),
 		finishedCh: make(chan struct{}, 1),
@@ -149,6 +183,9 @@ func (e *Service) setStateLocked(st, reason string) {
 	if e.state != st {
 		e.since = time.Now()
 	}
+	if st != StateUp && st != StateBusy {
+		e.capacity = emptyCapacityFacts()
+	}
 	e.state, e.reason = st, reason
 	f := map[string]any{"service": e.name, "kind": e.kind, "state": st, "pid": 0, "since": e.since.Format(time.RFC3339)}
 	if e.p != nil {
@@ -211,6 +248,9 @@ func (e *Service) attach(c *svcConn) error {
 	if c.device != "" {
 		e.device = c.device
 	}
+	if e.kind == KindShim {
+		e.capacity = c.capacity
+	}
 	if e.kind == KindJob {
 		e.jobRes = nil
 		e.lastProgress = time.Now()
@@ -225,6 +265,27 @@ func (e *Service) upStateLocked() string {
 		return StateBusy
 	}
 	return StateUp
+}
+
+func (e *Service) CapacitySnapshot() (string, CapacityFacts, time.Time, int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	slots := 0
+	if e.conn != nil {
+		slots = e.conn.slots
+	}
+	return e.state, e.capacity, e.since, slots
+}
+
+func (e *Service) reportCapacity(c *svcConn, m *msg) {
+	facts := capacityFactsFromMessage(m)
+	e.mu.Lock()
+	if e.conn != c {
+		e.mu.Unlock()
+		return
+	}
+	e.capacity = facts
+	e.mu.Unlock()
 }
 
 // detach drops the registration of c (its socket closed or it broke a rule).

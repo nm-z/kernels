@@ -334,6 +334,10 @@ func fakeEngine(scenario string) {
 
 func fakeRunOne(scenario string, model Model, r *fakeRun, send func(map[string]any), note func(string, string)) {
 	np := len(r.ids)
+	prefillTotal := np
+	if scenario == "cached" && np > 3 {
+		prefillTotal -= 3
+	}
 	if scenario == "error" {
 		send(map[string]any{"op": "error", "id": r.id, "message": "kernel crashed"})
 		return
@@ -358,9 +362,9 @@ func fakeRunOne(scenario string, model Model, r *fakeRun, send func(map[string]a
 		send(map[string]any{"op": "prefill", "id": r.id, "done": np, "total": np})
 	}
 	if scenario != "noprefill" && scenario != "timings" {
-		send(map[string]any{"op": "prefill", "id": r.id, "done": 0, "total": np})
+		send(map[string]any{"op": "prefill", "id": r.id, "done": 0, "total": prefillTotal})
 		time.Sleep(30 * time.Millisecond)
-		send(map[string]any{"op": "prefill", "id": r.id, "done": np, "total": np})
+		send(map[string]any{"op": "prefill", "id": r.id, "done": prefillTotal, "total": prefillTotal})
 	}
 	var ids []uint32
 	switch scenario {

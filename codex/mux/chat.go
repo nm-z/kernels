@@ -307,31 +307,41 @@ func (b *chatBuilder) addChatMessage(raw json.RawMessage) *apiError {
 // ---- the answer ----------------------------------------------------------------------------------------------
 
 type chatUsageOut struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-	Details          struct {
-		ReasoningTokens int `json:"reasoning_tokens"`
-	} `json:"completion_tokens_details"`
+	PromptTokens            *int                 `json:"prompt_tokens,omitempty"`
+	CompletionTokens        *int                 `json:"completion_tokens,omitempty"`
+	TotalTokens             *int                 `json:"total_tokens,omitempty"`
+	PromptTokensDetails     *inputTokensDetails  `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *outputTokensDetails `json:"completion_tokens_details,omitempty"`
 }
 
-func newChatUsage(in, out, reasoning int) *chatUsageOut {
-	u := &chatUsageOut{PromptTokens: in, CompletionTokens: out, TotalTokens: in + out}
-	u.Details.ReasoningTokens = reasoning
-	return u
+type inputTokensDetails struct {
+	CachedTokens *int `json:"cached_tokens,omitempty"`
+}
+
+type outputTokensDetails struct {
+	ReasoningTokens *int `json:"reasoning_tokens,omitempty"`
 }
 
 // responsesUsage reads the usage object a Responses-shaped completion carries.
 type responsesUsage struct {
-	InputTokens         int `json:"input_tokens"`
-	OutputTokens        int `json:"output_tokens"`
-	OutputTokensDetails struct {
-		ReasoningTokens int `json:"reasoning_tokens"`
-	} `json:"output_tokens_details"`
+	InputTokens         *int                 `json:"input_tokens"`
+	OutputTokens        *int                 `json:"output_tokens"`
+	TotalTokens         *int                 `json:"total_tokens"`
+	InputTokensDetails  *inputTokensDetails  `json:"input_tokens_details"`
+	OutputTokensDetails *outputTokensDetails `json:"output_tokens_details"`
 }
 
 func (u responsesUsage) chat() *chatUsageOut {
-	return newChatUsage(u.InputTokens, u.OutputTokens, u.OutputTokensDetails.ReasoningTokens)
+	out := &chatUsageOut{
+		PromptTokens: u.InputTokens, CompletionTokens: u.OutputTokens, TotalTokens: u.TotalTokens,
+	}
+	if u.InputTokensDetails != nil && u.InputTokensDetails.CachedTokens != nil {
+		out.PromptTokensDetails = &inputTokensDetails{CachedTokens: u.InputTokensDetails.CachedTokens}
+	}
+	if u.OutputTokensDetails != nil && u.OutputTokensDetails.ReasoningTokens != nil {
+		out.CompletionTokensDetails = &outputTokensDetails{ReasoningTokens: u.OutputTokensDetails.ReasoningTokens}
+	}
+	return out
 }
 
 type chatChoice struct {
@@ -502,7 +512,13 @@ func (c *chatSink) write(typ string, data []byte) {
 		finish := chatFinish(c.calls > 0, typ == "response.incomplete")
 		var tm *chatTimings
 		if st, u := c.stats, ev.Response.Usage; st != nil {
-			tm = finalTimings(u.InputTokens, u.InputTokens-st.Prefill.Total, u.OutputTokens, st.Prefill.TPS, st.Decode.TPS, st.IdlePct)
+			if u.InputTokens != nil && u.OutputTokens != nil {
+				cached := 0
+				if u.InputTokensDetails != nil && u.InputTokensDetails.CachedTokens != nil {
+					cached = *u.InputTokensDetails.CachedTokens
+				}
+				tm = finalTimings(*u.InputTokens, cached, *u.OutputTokens, st.Prefill.TPS, st.Decode.TPS, st.IdlePct)
+			}
 		}
 		c.chunk(map[string]any{}, &finish, ev.Response.Usage.chat(), tm)
 		c.end()

@@ -62,16 +62,20 @@ type msg struct {
 	Tokens     int      `json:"tokens"` // engine image reply
 
 	// shim
-	Trying       []string        `json:"trying"`
-	Failed       []string        `json:"failed"`
-	MS           *float64        `json:"ms"`
-	Channel      string          `json:"channel"`
-	Text         string          `json:"text"`
-	CallID       string          `json:"call_id"`
-	Name         string          `json:"name"`
-	Arguments    json.RawMessage `json:"arguments"`
-	InputTokens  *int            `json:"input_tokens"`
-	OutputTokens *int            `json:"output_tokens"`
+	Trying            []string        `json:"trying"`
+	Failed            []string        `json:"failed"`
+	MS                *float64        `json:"ms"`
+	Channel           string          `json:"channel"`
+	Text              string          `json:"text"`
+	CallID            string          `json:"call_id"`
+	Name              string          `json:"name"`
+	Arguments         json.RawMessage `json:"arguments"`
+	InputTokens       *int            `json:"input_tokens"`
+	OutputTokens      *int            `json:"output_tokens"`
+	TotalTokens       *int            `json:"total_tokens"`
+	Remaining         any             `json:"remaining"`
+	ResetTime         any             `json:"reset_time"`
+	TokensServedToday any             `json:"tokens_served_today"`
 
 	// embed
 	Vectors [][]float32 `json:"vectors"`
@@ -127,6 +131,7 @@ type svcConn struct {
 	maxBatch  int    // embed
 	device    string // embed
 	title     string // job
+	capacity  CapacityFacts
 
 	sem      chan struct{} // one token per request running at once
 	dead     chan struct{}
@@ -144,7 +149,8 @@ func newSvcConn(svc *Service, nc net.Conn, reg *msg) *svcConn {
 	c := &svcConn{
 		svc: svc, nc: nc, kind: svc.kind, positions: reg.Positions, maxNew: reg.MaxNew, slots: reg.Slots, vision: reg.Vision,
 		auto: reg.Auto, dims: reg.Dims, maxBatch: reg.MaxBatch, device: reg.Device, title: reg.Title,
-		dead: make(chan struct{}), runs: map[runID]*run{}, imgWait: map[string]chan int{},
+		capacity: capacityFactsFromMessage(reg),
+		dead:     make(chan struct{}), runs: map[runID]*run{}, imgWait: map[string]chan int{},
 	}
 	switch c.kind {
 	case KindEmbed:
@@ -262,6 +268,10 @@ func (c *svcConn) dispatch(m *msg) {
 	case "finished":
 		if c.kind == KindJob {
 			c.svc.jobFinished(c, m)
+		}
+	case "capacity":
+		if c.kind == KindShim {
+			c.svc.reportCapacity(c, m)
 		}
 	}
 	// other ops (a second register, anything newer) are ignored

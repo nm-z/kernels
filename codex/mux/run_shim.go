@@ -84,8 +84,6 @@ type shimResult struct {
 	done      *msg
 	ttftMS    *float64
 	trying    []string
-	outBytes  int
-	inTokens  int // estimated
 }
 
 func (s *Server) finishShim(w http.ResponseWriter, pr *prepared, rb *respBuilder, res *shimResult) {
@@ -103,19 +101,17 @@ func (s *Server) finishShim(w http.ResponseWriter, pr *prepared, rb *respBuilder
 			return
 		}
 	}
-	in, out := res.inTokens, (res.outBytes+3)/4
+	usage := map[string]any{}
 	if d := res.done; d != nil {
 		if d.InputTokens != nil {
-			in = *d.InputTokens
+			usage["input_tokens"] = *d.InputTokens
 		}
 		if d.OutputTokens != nil {
-			out = *d.OutputTokens
+			usage["output_tokens"] = *d.OutputTokens
 		}
-	}
-	usage := map[string]any{
-		"input_tokens": in, "output_tokens": out, "total_tokens": in + out,
-		"input_tokens_details":  map[string]any{"cached_tokens": 0},
-		"output_tokens_details": map[string]any{"reasoning_tokens": 0},
+		if d.TotalTokens != nil {
+			usage["total_tokens"] = *d.TotalTokens
+		}
 	}
 	am := map[string]any{}
 	if res.ttftMS != nil {
@@ -129,7 +125,7 @@ func (s *Server) finishShim(w http.ResponseWriter, pr *prepared, rb *respBuilder
 
 func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q *shimReq) (res *shimResult) {
 	rb := q.rb
-	res = &shimResult{inTokens: estimateTokens(q.msgs)}
+	res = &shimResult{}
 	if !acquireSlot(ctx, svc, conn, rb) {
 		if ctx.Err() != nil {
 			res.cancelled = true
@@ -171,7 +167,6 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 
 	var trying, failed []string
 	sawRoute, sawTTFT := false, false
-	var lastPub time.Time
 	var ttft *float64
 	cancelSent := false
 	var cancelDeadline <-chan time.Time
@@ -195,6 +190,9 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 			}
 			if d.OutputTokens != nil {
 				f["output_tokens"] = *d.OutputTokens
+			}
+			if d.TotalTokens != nil {
+				f["total_tokens"] = *d.TotalTokens
 			}
 		}
 		s.hub.Publish("run.end", f)
@@ -260,18 +258,12 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 						s.logf("service %s: delta on unknown channel %q ignored", svc.name, m.Channel)
 						continue
 					}
-					res.outBytes += len(m.Text)
-					if time.Since(lastPub) >= 100*time.Millisecond { // counts, not text, and not on every delta
-						lastPub = time.Now()
-						s.hub.Publish("run.tokens", map[string]any{"service": svc.name, "run": string(id), "bytes": res.outBytes})
-					}
 				case "tool_call":
 					if why := checkOutput("tool_call"); why != "" {
 						return violation(why)
 					}
 					args := toolArgsText(m.Arguments)
 					rb.shimCall(m.CallID, m.Name, args)
-					res.outBytes += len(args) + len(m.Name)
 				case "error":
 					msgText := m.Message
 					if msgText == "" {
@@ -299,12 +291,11 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 						}
 						return res
 					}
-					last = &LastRun{TTFTMS: ttft, Route: trying, At: time.Now()}
-					if m.InputTokens != nil {
-						last.InputTokens = *m.InputTokens
-					}
-					if m.OutputTokens != nil {
-						last.OutputTokens = *m.OutputTokens
+					last = &LastRun{
+						TTFTMS: ttft, Route: trying, At: time.Now(),
+						InputTokens:  providerTokenValue(m.InputTokens),
+						OutputTokens: providerTokenValue(m.OutputTokens),
+						TotalTokens:  providerTokenValue(m.TotalTokens),
 					}
 					if cancelSent {
 						res.cancelled = true

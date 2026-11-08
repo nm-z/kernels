@@ -107,17 +107,11 @@ func (s *Server) finishEngine(w http.ResponseWriter, pr *prepared, rb *respBuild
 		}
 	}
 	d := res.done
-	gen := 0
-	if d.Generated != nil {
-		gen = *d.Generated
-	}
 	prompt := res.promptTokens
-	if d.Prompt != nil && *d.Prompt > 0 {
-		prompt = *d.Prompt
-	}
-	cached := 0
-	if res.live.prefillTot > 0 && prompt > res.live.prefillTot {
-		cached = prompt - res.live.prefillTot
+	gen := res.live.tokens
+	cached := prompt - res.live.prefillTot
+	if cached < 0 {
+		cached = 0
 	}
 	usage := map[string]any{
 		"input_tokens": prompt, "output_tokens": gen, "total_tokens": prompt + gen,
@@ -340,7 +334,11 @@ func (s *Server) execute(ctx context.Context, svc *Service, conn *svcConn, q *ex
 						}
 						return res
 					}
-					last = &LastRun{PrefillTPS: m.PrefillTPS, DecodeTPS: m.DecodeTPS, IdlePct: m.IdlePct, At: time.Now()}
+					last = &LastRun{
+						PrefillTPS: m.PrefillTPS, DecodeTPS: m.DecodeTPS, IdlePct: m.IdlePct, At: time.Now(),
+						InputTokens: providerTokenValue(m.Prompt), OutputTokens: providerTokenValue(m.Generated),
+						TotalTokens: np + live.tokens,
+					}
 					if cancelSent {
 						res.cancelled = true
 						end("cancelled", "", m)

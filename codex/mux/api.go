@@ -18,6 +18,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/services", s.handleServices)
 	mux.HandleFunc("/v1/services/", s.handleServiceAction)
+	mux.HandleFunc("/v1/capacity", s.handleCapacity)
 	mux.HandleFunc("/v1/events", s.handleEvents)
 	return mux
 }
@@ -65,6 +66,70 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": s.serviceInfos()})
+}
+
+// GET /v1/capacity returns mux state and provider-reported facts for every shim.
+func (s *Server) handleCapacity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, "GET")
+		return
+	}
+	sources := make([]map[string]any, 0, len(s.order))
+	for _, e := range s.order {
+		if e.kind != KindShim {
+			continue
+		}
+		state, facts, since, slots := e.CapacitySnapshot()
+		usage, err := s.hub.capacityUsageToday(e.name, time.Now())
+		if err != nil {
+			s.logf("capacity: read provider usage for %s: %v", e.name, err)
+			usage = capacityUsage{}
+		}
+		tokensToday := facts.TokensServedToday
+		tokenBasis := "unreported"
+		if hasCapacityValue(tokensToday) {
+			tokenBasis = "provider_reported"
+		} else if usage.Replies > 0 && usage.TokenReports == usage.Replies {
+			tokensToday = usage.TotalTokens
+			tokenBasis = "provider_reported"
+		} else if usage.Replies > 0 {
+			tokenBasis = "incomplete"
+		} else {
+			tokenBasis = "no_replies"
+		}
+		var reportedTokens, tokenReports any = "", ""
+		if usage.TokenReports > 0 {
+			reportedTokens, tokenReports = usage.TotalTokens, usage.TokenReports
+		}
+		var parallelLimit any = ""
+		parallelBasis := ""
+		if slots > 0 {
+			parallelLimit, parallelBasis = slots, "mux shim slots"
+		}
+		sources = append(sources, map[string]any{
+			"source": e.name, "kind": e.kind, "adapter": "mux shim",
+			"active_sessions": "", "session_cap": "", "configured_session_cap": "",
+			"session_cap_basis": "", "parallel_generation_limit": parallelLimit,
+			"parallel_generation_basis": parallelBasis, "model_states": "",
+			"state": state, "state_at": since.Unix(), "state_basis": "mux service state",
+			"remaining": facts.Remaining, "reset_time": facts.ResetTime,
+			"characters_sent_today": "", "characters_received_today": "",
+			"tokens_served_today": tokensToday, "tokens_served_basis": tokenBasis,
+			"reported_tokens_today": reportedTokens, "token_reports_today": tokenReports,
+			"replies_today": usage.Replies, "errors_today": usage.Errors, "discovery": "",
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sources": sources})
+}
+
+func hasCapacityValue(value any) bool {
+	if value == nil {
+		return false
+	}
+	if text, ok := value.(string); ok {
+		return text != ""
+	}
+	return true
 }
 
 // POST /v1/services/NAME/up and /down

@@ -312,3 +312,61 @@ func (l *eventLog) query(since string, after, upTo uint64) ([]HubEvent, error) {
 	}
 	return out, rows.Err()
 }
+
+type capacityUsage struct {
+	Replies      uint64
+	Errors       uint64
+	TotalTokens  uint64
+	TokenReports uint64
+}
+
+func (h *Hub) capacityUsageToday(service string, now time.Time) (capacityUsage, error) {
+	h.mu.Lock()
+	log := h.log
+	h.mu.Unlock()
+	if log == nil {
+		return capacityUsage{}, nil
+	}
+	return log.capacityUsageToday(service, now)
+}
+
+func (l *eventLog) capacityUsageToday(service string, now time.Time) (capacityUsage, error) {
+	utc := now.UTC()
+	start := time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+	l.flush()
+	rows, err := l.db.Query(
+		`SELECT json FROM events WHERE service = ? AND type = 'run.end' AND ts >= ? AND ts < ?`,
+		service, start.Format(tsLayout), end.Format(tsLayout),
+	)
+	if err != nil {
+		return capacityUsage{}, err
+	}
+	defer rows.Close()
+	var usage capacityUsage
+	for rows.Next() {
+		var encoded string
+		if err := rows.Scan(&encoded); err != nil {
+			return capacityUsage{}, err
+		}
+		var event struct {
+			Status      string          `json:"status"`
+			TotalTokens json.RawMessage `json:"total_tokens"`
+		}
+		if err := json.Unmarshal([]byte(encoded), &event); err != nil {
+			continue
+		}
+		switch event.Status {
+		case "done":
+			usage.Replies++
+			var tokens uint64
+			if len(event.TotalTokens) > 0 && string(event.TotalTokens) != `""` && string(event.TotalTokens) != "null" && json.Unmarshal(event.TotalTokens, &tokens) == nil {
+				usage.TotalTokens += tokens
+				usage.TokenReports++
+			}
+		case "failed", "violation":
+			usage.Errors++
+		}
+	}
+	return usage, rows.Err()
+}

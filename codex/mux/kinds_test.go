@@ -74,8 +74,14 @@ func TestShimStreaming(t *testing.T) {
 		}
 	}
 	comp := res.named("response.completed")[0].obj()["response"].(map[string]any)
-	if u := comp["usage"].(map[string]any); u["input_tokens"] != float64(11) || u["output_tokens"] != float64(22) || u["total_tokens"] != float64(33) {
+	if u := comp["usage"].(map[string]any); u["input_tokens"] != float64(11) || u["output_tokens"] != float64(22) {
 		t.Errorf("usage %v", u)
+	} else {
+		for _, field := range []string{"total_tokens", "input_tokens_details", "output_tokens_details"} {
+			if _, ok := u[field]; ok {
+				t.Errorf("shim usage should omit unreported %s: %v", field, u)
+			}
+		}
 	}
 	if comp["status"] != "completed" || comp["model"] != "s" {
 		t.Errorf("response %v", comp)

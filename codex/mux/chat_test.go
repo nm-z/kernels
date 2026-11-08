@@ -116,7 +116,7 @@ func (cs chatStream) toolCalls() []map[string]any {
 }
 
 func TestChatCompletionsLikeTheGateway(t *testing.T) {
-	e := startMux(t, epSpec{name: "q", scenario: "normal", display: "Qwen3.8-27B", compat: true})
+	e := startMux(t, epSpec{name: "q", scenario: "cached", display: "Qwen3.8-27B", compat: true})
 	e.waitState("q", StateUp, 10*time.Second)
 
 	resp := e.at(e.compat, "POST", "/v1/chat/completions", gatewayBody)
@@ -169,8 +169,11 @@ func TestChatCompletionsLikeTheGateway(t *testing.T) {
 	}
 	finish, usage := cs.finish()
 	n := float64(len(mustEncode(fakeAnswer)))
-	if finish != "tool_calls" || usage["completion_tokens"] != n || usage["prompt_tokens"].(float64) < 8 ||
-		usage["total_tokens"] != usage["prompt_tokens"].(float64)+n || usage["completion_tokens_details"].(map[string]any)["reasoning_tokens"].(float64) < 50 {
+	promptCount, promptOK := usage["prompt_tokens"].(float64)
+	reasoning, reasoningOK := usage["completion_tokens_details"].(map[string]any)["reasoning_tokens"].(float64)
+	cached, cachedOK := usage["prompt_tokens_details"].(map[string]any)["cached_tokens"].(float64)
+	if finish != "tool_calls" || !promptOK || promptCount < 8 || usage["completion_tokens"] != n ||
+		usage["total_tokens"] != promptCount+n || !cachedOK || cached != 3 || !reasoningOK || reasoning <= 0 {
 		t.Errorf("finish %q usage %v", finish, usage)
 	}
 	// only the last chunk has a finish_reason
@@ -496,6 +499,71 @@ func TestChatLengthAndEngineError(t *testing.T) {
 	}
 }
 
+func TestEngineUsageIncludesMuxMeasuredPrefixReuse(t *testing.T) {
+	e := startMux(t, epSpec{name: "cache", scenario: "cached", compat: true})
+	e.waitState("cache", StateUp, 10*time.Second)
+
+	body := `{"model":"cache","input":"hi","stream":false}`
+	resp := e.post("/v1/responses", body)
+	responseBody := readBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", resp.StatusCode, responseBody)
+	}
+	t.Logf("request: POST /v1/responses %s", body)
+	t.Logf("response: HTTP %d %s", resp.StatusCode, responseBody)
+
+	var response map[string]any
+	if err := json.Unmarshal([]byte(responseBody), &response); err != nil {
+		t.Fatal(err)
+	}
+	usage, ok := response["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing usage: %v", response)
+	}
+	prompt, promptOK := usage["input_tokens"].(float64)
+	completion, completionOK := usage["output_tokens"].(float64)
+	total, totalOK := usage["total_tokens"].(float64)
+	promptDetails, promptDetailsOK := usage["input_tokens_details"].(map[string]any)
+	if !promptOK || !completionOK || !totalOK || !promptDetailsOK || total != prompt+completion || prompt < 3 {
+		t.Fatalf("engine token counts must be integers with a summed total: %v", usage)
+	}
+	if promptDetails["cached_tokens"] != float64(3) {
+		t.Errorf("cached_tokens = %v, want 3: %v", promptDetails["cached_tokens"], usage)
+	}
+	completionDetails, ok := usage["output_tokens_details"].(map[string]any)
+	reasoning, reasoningOK := completionDetails["reasoning_tokens"].(float64)
+	if !ok || !reasoningOK || reasoning <= 0 {
+		t.Errorf("missing mux-measured reasoning count: %v", usage)
+	}
+
+	e.waitState("cache", StateUp, 10*time.Second)
+	servicesResp := e.at(e.base, http.MethodGet, "/v1/services", "")
+	servicesBody := readBody(t, servicesResp)
+	if servicesResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /v1/services: status %d: %s", servicesResp.StatusCode, servicesBody)
+	}
+	t.Logf("request: GET %s/v1/services", e.base)
+	t.Logf("response: HTTP %d %s", servicesResp.StatusCode, servicesBody)
+	var services struct {
+		Data []struct {
+			Name string `json:"name"`
+			Last *struct {
+				TotalTokens any `json:"total_tokens"`
+			} `json:"last"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(servicesBody), &services); err != nil {
+		t.Fatal(err)
+	}
+	if len(services.Data) != 1 || services.Data[0].Name != "cache" || services.Data[0].Last == nil {
+		t.Fatalf("/v1/services did not expose the completed engine run: %s", servicesBody)
+	}
+	lastTotal, totalOK := services.Data[0].Last.TotalTokens.(float64)
+	if !totalOK || lastTotal != prompt+completion {
+		t.Errorf("/v1/services last.total_tokens = %v, want %v: %s", services.Data[0].Last.TotalTokens, prompt+completion, servicesBody)
+	}
+}
+
 func TestChatOnAShim(t *testing.T) {
 	e := startMux(t, epSpec{name: "s", scenario: "shim", kind: KindShim, ctx: 128000})
 	e.waitState("s", StateUp, 10*time.Second)
@@ -518,6 +586,12 @@ func TestChatOnAShim(t *testing.T) {
 	}
 	if finish, usage := cs.finish(); finish != "tool_calls" || usage["prompt_tokens"] != float64(11) || usage["completion_tokens"] != float64(22) {
 		t.Errorf("finish %q usage %v", finish, usage)
+	} else {
+		for _, field := range []string{"total_tokens", "prompt_tokens_details", "completion_tokens_details"} {
+			if _, ok := usage[field]; ok {
+				t.Errorf("shim usage should omit unreported %s: %v", field, usage)
+			}
+		}
 	}
 	var run struct {
 		Messages []map[string]any `json:"messages"`
