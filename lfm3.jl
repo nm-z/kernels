@@ -30,7 +30,7 @@ isattn(l) = l >= 2 && iseven(l); isfull(l) = isattn(l) && (l - 2) % 4 == 0
 const LP{T} = Core.LLVMPtr{T,1}
 lp(::Type{T}, p) where {T} = Core.Intrinsics.bitcast(LP{T}, UInt64(p))
 const LP0 = lp(UInt8, 0)
-const DEVS = Ref(haskey(ENV, "LFM3_DEVS") ? parse.(Int, split(ENV["LFM3_DEVS"], ',')) : Int[])   # the cards to use (1-based), e.g. LFM3_DEVS=3,4
+const DEVS = Ref(haskey(ENV, "LFM3_DEVS") ? parse.(Int, split(ENV["LFM3_DEVS"], ',')) : Int[])   # cards (1-based): LFM3_DEVS=3,4
 ndev() = isempty(DEVS[]) ? (CUDAON ? length(CUDA.devices()) : length(AMDGPU.devices())) : length(DEVS[])
 dev!(i) = (j = isempty(DEVS[]) ? i : DEVS[][i]; CUDAON ? CUDA.device!(j - 1) : AMDGPU.device!(AMDGPU.devices()[j]))
 function vfree()
@@ -73,7 +73,7 @@ const SCOPE = CUDAON ? "syncscope(\"device\") " : "syncscope(\"agent\") "
 const EMB, NORM, GEMM, CONV, ROPE, ATTN, RESID, LSE, DLOG, NORMB, SILUB, ATTBKV, ATTBQ, ROTNB, CONVB1, CONVB2, CONVW, NORMW, EMBB, NRM, STEP, STEPV, NRMS, STAGE, MOMU = Int32.(1:25)
 const NG = 16                                              # the attention gate's rows
 const NQKV = NE + 2NKV * HD + NG                           # q | k | v | gate
-const ALL, LOSS, WT = Int32(1), Int32(2), Int32(3)        # rows: every position, the loss positions, a weight's shape
+const ALL, LOSS, WT = Int32(1), Int32(2), Int32(3)        # rows: all positions, loss positions, a weight's shape
 const SAME, SPREV, UPTO, SNEXT, FROM, DALL = Int32.(0:5)  # which tiles of its inputs a tile reads
 const NF, EF, MF, VF = 26, 8, 8, 4
 const N_KIND, N_L, N_ROWS, N_DEP, N_CARD, N_LVL, N_I1, N_I2, N_I3, N_I4, N_O1, N_O2, N_M, N_NM, N_FL, N_EPI, N_RS, N_WV, N_D, N_K, N_NO, N_WIN, N_TBL, N_WR, N_O3, N_X = Int32.(0:25)
@@ -81,7 +81,7 @@ const E_W, E_DT, E_ROWS, E_R, E_CACHE, E_REACH, E_PROD, E_CROSS = Int32.(0:7)   
 const A_ROW, A_TR, B_MAT, B_TR, B_ROWK = Int32(1), Int32(2), Int32(4), Int32(8), Int32(16)
 const EP_ST, EP_SILU, EP_ADD, EP_MOM, EP_AXPY, EP_LSE = Int32.(0:5)
 const BF, F32 = Int32(1), Int32(2)
-const LOGITS, LOSSW, GRAD, WEIGHTS = Int32.(1:4)          # a node's level; wanted: 1 logits, 2 loss, 4 grad, 8 weights
+const LOGITS, LOSSW, GRAD, WEIGHTS = Int32.(1:4)          # a node's level; wanted: 1 logits 2 loss 4 grad 8 weights
 @inline lvlmask(l) = l == LOGITS ? Int32(7) : l == LOSSW ? Int32(6) : l == GRAD ? Int32(4) : Int32(8)
 mutable struct Graph
     node::Vector{Int32}; nodef::Vector{Float32}; edge::Vector{Int32}; nn::Int; ne::Int
@@ -104,7 +104,7 @@ E(G, l, s) = G.names[Symbol(l, s)]
 # Muon: X = mo / |mo|; 5 x (A = X X' or X' X; B = b A + c A A; X = a X + B X or X B); lr f X; W = bf16(master)
 function muon!(G::Graph, m, R, K, lr, gd)
     X = edge!(G, Symbol(:X, m), K, F32; rows = WT, r = R); q = min(R, K); s = edge!(G, Symbol(:s, m), 1, F32; rows = WT, r = 1)
-    sp = edge!(G, Symbol(:sp, m), 1, F32; rows = WT, r = cld(R, 1024))
+    sp = edge!(G, Symbol(:sp, m), 1, F32; rows = WT, r = cld(R, 8))
     node!(G, NRM, 0, WEIGHTS; rows = WT, dep = DALL, in = (gd, 0, 0, 0), m = m, out = (sp, 0), wr = R, K = K); node!(G, NRMS, 0, WEIGHTS; rows = WT, dep = DALL, in = (sp, 0, 0, 0), m = m, out = (s, 0), wr = 1)
     node!(G, STAGE, 0, WEIGHTS; rows = WT, dep = DALL, in = (s, 0, 0, 0), out = (X, 0), m = m, rs = s, wr = R, K = K)
     a = X                                                  # (every edge written once)
@@ -119,12 +119,12 @@ function muon!(G::Graph, m, R, K, lr, gd)
     end
     node!(G, STEP, 0, WEIGHTS; rows = WT, dep = DALL, in = (a, 0, 0, 0), m = m, rs = s, wr = R, K = K, f = (lr * sqrt(max(1.0, R / K)), 0, 0, 0))
 end
-done!(G::Graph, name) = edge!(G, name, 1, F32; rows = WT, r = 1)   # an edge for a wait alone
+done!(G::Graph, name) = edge!(G, name, 1, F32; rows = WT, r = 1)   
 # the recipe
 function recipe(; lr = 0.002, lrv = 0.0002, lre = 0.002)
     G = Graph(); me = mat!(G, "model.embed_tokens.weight"); onv = vec!(G, "model.embedding_norm.weight"); gdm = Dict{Int,Int}(); gdv = Dict{Int,Int}()
     dmat(m) = (gdm[m] = done!(G, Symbol(:gd, m))); dvec(v) = (gdv[v] = done!(G, Symbol(:gv, v)))
-    function gmat!(l, m, wr, no; kw...)                     # dW = A' B into an edge, then mo = f2 mo + dW / acc
+    function gmat!(l, m, wr, no; kw...)                     # dW = A' B, then mo = f2 mo + dW / acc
         dW = edge!(G, Symbol(:dW, m), no, F32; rows = WT, r = wr); node!(G, GEMM, l, GRAD; rows = WT, dep = DALL, out = (dW, 0), m = m, K = -1, no = no, wr = wr, kw...)
         node!(G, MOMU, l, GRAD; rows = WT, dep = DALL, in = (dW, 0, 0, 0), out = (dmat(m), 0), m = m, wr = wr, K = no)
     end
@@ -229,7 +229,7 @@ function recipe(; lr = 0.002, lrv = 0.0002, lre = 0.002)
         gx = gx0
     end
     node!(G, EMBB, 0, GRAD; rows = WT, dep = DALL, in = (gx, gdm[me], 0, 0), out = (dmat(me), 0), m = me, wr = 0)
-    # the update: Muon for the hidden matrices, momentum for the rest
+    # the update: Muon, momentum for the rest
     for m in 1:G.nmat
         R, K = matdims(G.matname[m])
         m == me ? node!(G, STEP, 0, WEIGHTS; rows = WT, dep = DALL, in = (0, gdm[m], 0, 0), m = m, wr = R, K = K, f = (lre, 0, 0, 0)) : muon!(G, m, R, K, lr, gdm[m])
@@ -258,6 +258,7 @@ struct RQ
 end
 # the plan: a header; per edge; per node; per segment; the holes
 const PHN, PL_LOC, PL_OFF, PL_MOD, PL_LAST, PL_CA, PL_CB, PL_SZ = 16, 0, 1, 2, 3, 4, 5, 6
+const TILEA = 256 * 32   # a tile's accumulators (smem: a 132 stride a slice row; line tables from 8448)
 const NP_F0, NP_NT, NP_NC, NP_RT, NP_CT, NP_T0, NP_ON, NP_FL, NP_WAR = 0, 1, 2, 3, 4, 5, 6, 7, 8   # (WAR: the last reader of reused memory)
 const PH_NT, PH_NFLAG, PH_STAT, PH_ORDER, PH_S0, PH_S1, PH_SECT, PH_T0S, PH_T1S, PH_VUSE, PH_HUSE, PH_SLOT = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
 const NSEG, NHOLE = 64, 512
@@ -331,12 +332,20 @@ end
     f0 = Int64(0); t0 = Int64(0); s0 = 0; s1 = 0
     for n in 1:nn
         k = nd(R, n, N_KIND); rk = nd(R, n, N_ROWS); on = lvlmask(nd(R, n, N_LVL)) & w != 0 && nd(R, n, N_CARD) == R.card
-        nr = nrows(R, n); att = k == ATTN || k == ATTBKV || k == ATTBQ; ct = 64   
-        rt = att ? 16 : k == NRM ? 1024 : rk == WT ? 64 : Int(max(Int64(8), pow2ge(Int64(min(Int(nr), 64)))))
-        nc = k == GEMM ? (Int64(nd(R, n, N_NO)) + ct - 1) ÷ ct : att && k != ATTBKV ? Int64(NH) : k == ATTBKV ? Int64(NKV) : k == DLOG ? Int64(cld(NV, 4096)) : Int64(1)
-        k == GEMM && nr >= 128 && (Int64(nr) ÷ 128) * nc >= 2 * R.nblk && (rt = 128)
-        nt = max(Int64(1), (Int64(nr) + rt - 1) ÷ rt)
-        while k == GEMM && nt * nc < R.nblk && ct > 16; ct >>= 1; nc = (Int64(nd(R, n, N_NO)) + ct - 1) ÷ ct; end
+        nr = Int64(nrows(R, n)); att = k == ATTN || k == ATTBKV || k == ATTBQ; ct = 64; no = Int64(nd(R, n, N_NO)); nb = Int64(R.nblk)
+        rows2 = max(Int64(8), pow2ge(cld(nr, 2 * nb)))     # two tasks a block
+        rt = att ? 16 : k in (NRM, STAGE, STEP, MOMU) ? Int(rows2) : rk == WT ? 64 : Int(min(rows2, Int64(64)))
+        nc = att && k != ATTBKV ? Int64(NH) : k == ATTBKV ? Int64(NKV) : k == DLOG ? Int64(cld(NV, 4096)) : Int64(1)
+        if k == GEMM                                       # the tile with the least time
+            best = typemax(Int64); nrp = max(Int64(8), pow2ge(nr)); nop = max(Int64(16), pow2ge(no))
+            for lr in 3:7, lc in 4:7
+                r_ = 1 << lr; c_ = 1 << lc; (r_ * c_ <= TILEA && r_ <= nrp && c_ <= nop) || continue
+                sc = cld(((nr + r_ - 1) >> lr) * ((no + c_ - 1) >> lc), nb) * (4096 + 2 * r_ * c_)   # waves x a slice's cost
+                (sc < best || (sc == best && r_ > rt)) && (best = sc; rt = r_; ct = c_)
+            end
+            nc = cld(no, Int64(ct))
+        end
+        nt = max(Int64(1), (nr + rt - 1) ÷ rt)
         fl = 1                                             # read on another card: the cells in host memory
         for f in (N_O1, N_O2, N_O3); e = nd(R, n, f); e > 0 && ed(R, e, E_CROSS) != 0 && (fl = 2); end
         pl!(R, PN(R, n, NP_F0), f0); pl!(R, PN(R, n, NP_NT), nt); pl!(R, PN(R, n, NP_NC), nc); pl!(R, PN(R, n, NP_RT), rt); pl!(R, PN(R, n, NP_CT), ct)
@@ -347,7 +356,7 @@ end
     pl!(R, PH_NT, t0); pl!(R, PH_NFLAG, f0); pl!(R, PH_ORDER, 0); pl!(R, PH_S0, s0); pl!(R, PH_S1, s1); pl!(R, PH_STAT, f0 > R.nflag ? 2 : 0)
     f0 > R.nflag && return
 # locations
-    for h in 0:NHOLE-1; pl!(R, PO(R, h, 1), 0); end
+    for h in 0:NHOLE-1; pl!(R, PO(R, h, 1), 0); end; hmax = 0
     for n in 1:nn
         lvlmask(nd(R, n, N_LVL)) & w != 0 || continue
         for f in 0:7                                        # free what nothing after n - 1 reads
@@ -355,7 +364,7 @@ end
             (e > 0 && pl(R, PE(R, e, PL_LAST)) == n - 1 && pl(R, PE(R, e, PL_SZ)) > 0 && ed(R, e, E_CACHE) == 0) || continue
             for h in 0:NHOLE-1
                 pl(R, PO(R, h, 1)) == 0 || continue
-                pl!(R, PO(R, h, 0), pl(R, PE(R, e, PL_OFF))); pl!(R, PO(R, h, 1), pl(R, PE(R, e, PL_SZ))); pl!(R, PO(R, h, 2), pl(R, PE(R, e, PL_LOC))); pl!(R, PO(R, h, 3), pl(R, PE(R, e, PL_LAST))); break
+                pl!(R, PO(R, h, 0), pl(R, PE(R, e, PL_OFF))); pl!(R, PO(R, h, 1), pl(R, PE(R, e, PL_SZ))); pl!(R, PO(R, h, 2), pl(R, PE(R, e, PL_LOC))); pl!(R, PO(R, h, 3), pl(R, PE(R, e, PL_LAST))); hmax = max(hmax, h + 1); break
             end
             pl!(R, PE(R, e, PL_SZ), 0)
         end
@@ -368,7 +377,7 @@ end
             loc = 0; off = Int64(0); best = typemax(Int64); hb = -1
             for want in (1, 2)                              # a VRAM hole, fresh VRAM, a host hole, fresh host
                 (want == 2 || !cross) || continue; best = typemax(Int64)
-                for h in 0:NHOLE-1; sz2 = pl(R, PO(R, h, 1)); (sz2 >= sz && sz2 < best && pl(R, PO(R, h, 2)) == want) && (best = sz2; hb = h); end
+                for h in 0:hmax-1; sz2 = pl(R, PO(R, h, 1)); (sz2 >= sz && sz2 < best && pl(R, PO(R, h, 2)) == want) && (best = sz2; hb = h); end
                 hb < 0 && want == 1 && vtop + sz <= R.nV && (loc = 1; off = vtop; vtop += sz; hb = -2)
                 hb != -1 && break
             end
@@ -425,7 +434,7 @@ struct OPD; p::LP{UInt8}; dt::Int32; mode::Int32; e::Int32; nk::Int32; ms::Int64
 @inline bfp(u::UInt64, i) = reinterpret(Float32, UInt32((u >> (16i)) & 0xffff) << 16)
 @inline f32p(u::UInt64, i) = reinterpret(Float32, UInt32((u >> (32i)) & 0xffffffff))
 @inline ld16(p::LP{UInt8}, i) = unsafe_load(reinterpret(LP{NTuple{2,VecElement{UInt64}}}, p), i + 1, Val(16))   # 16 bytes, the i-th
-@inline function rd8(p::LP{UInt8}, dt::Int32, j::Int64)   # 8 elements from j (multiple of 8): 16-byte loads
+@inline function rd8(p::LP{UInt8}, dt::Int32, j::Int64)   # 8 elements from j: 16-byte loads
     if dt == BF; u = ld16(p, j >> 3); a = u[1].value; b = u[2].value; return (bfp(a, 0), bfp(a, 1), bfp(a, 2), bfp(a, 3), bfp(b, 0), bfp(b, 1), bfp(b, 2), bfp(b, 3)); end
     u = ld16(p, j >> 2); w = ld16(p, (j >> 2) + 1); a = u[1].value; b = u[2].value; c = w[1].value; d = w[2].value
     (f32p(a, 0), f32p(a, 1), f32p(b, 0), f32p(b, 1), f32p(c, 0), f32p(c, 1), f32p(d, 0), f32p(d, 1))
@@ -442,9 +451,9 @@ end
     end
     a
 end
-@inline ltab!(R::RQ, sm, so, o::OPD, base, lmax, nlines, kfast, tid) = (tid < nlines && sp!(sm, (so == 0 ? 6400 : 6912) + 2tid, lin(R, o, base + tid, lmax, kfast)); bar())
-@inline function kdesc(sm, so, o::OPD, nl, tid, st)          # a thread's two groups (8 k of a held line)
-    sp0 = so == 0 ? 6400 : 6912; eb = o.dt == BF ? Int64(2) : Int64(4); g = (Int64(tid) & 3) << 3; l1 = Int64(tid) >> 2
+@inline ltab!(R::RQ, sm, so, o::OPD, base, lmax, nlines, kfast, tid) = (tid < nlines && sp!(sm, (so == 0 ? 8448 : 8704) + 2tid, lin(R, o, base + tid, lmax, kfast)); bar())
+@inline function kdesc(sm, so, o::OPD, nl, tid, st)          # a thread's two groups
+    sp0 = so == 0 ? 8448 : 8704; eb = o.dt == BF ? Int64(2) : Int64(4); g = (Int64(tid) & 3) << 3; l1 = Int64(tid) >> 2
     ok1 = Int64(tid) < (nl << 2); p1 = ok1 ? sp(sm, sp0 + 2l1) : Int64(0); ok2 = Int64(tid) + 256 < (nl << 2); p2 = ok2 ? sp(sm, sp0 + 2l1 + 128) : Int64(0)
     (p1 != 0 ? p1 + g * eb : Int64(0), ok1 ? g * st + ((l1 + g) & (nl - 1)) : Int64(-1), p2 != 0 ? p2 + g * eb : Int64(0), ok2 ? g * st + ((l1 + 64 + g) & (nl - 1)) : Int64(-1))
 end
@@ -460,7 +469,7 @@ end
     end
 end
 @inline function ldtile!(R::RQ, sm, so, o::OPD, nrow, mmax, m0, k0, K, tid, sa)   # a transposed operand's slice: its lines are k's
-    t3 = o.mode == 3; t3 || ltab!(R, sm, so, o, k0, K, 32, false, tid); sp0 = so == 0 ? 6400 : 6912; eb = o.dt == BF ? Int64(2) : Int64(4)
+    t3 = o.mode == 3; t3 || ltab!(R, sm, so, o, k0, K, 32, false, tid); sp0 = so == 0 ? 8448 : 8704; eb = o.dt == BF ? Int64(2) : Int64(4)
     es = t3 ? o.ms : Int64(1); sh = trailing_zeros(Int64(nrow)) - 3; ng = Int64(32) << sh
     Base.Cartesian.@nexprs 2 q -> begin
         i_q = Int64(tid) + 256 * (q - 1); l_q = i_q >> sh; g_q = (i_q & ((Int64(1) << sh) - 1)) << 3; jj_q = m0 + g_q; ok_q = i_q < ng && k0 + l_q < K && jj_q < mmax
@@ -473,33 +482,33 @@ end
     Base.Cartesian.@nexprs 2 q -> (i_q < ng && Base.Cartesian.@nexprs 8 e -> (sm[so + l_q * sa + ((g_q + 8 * (l_q >> 3)) & (nrow - 1)) + e] = v_q[e]))
 end
 @inline function kloop(R::RQ, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk, t8::Bool)
-    act = tid < ntm * ntn * ntk; tk = tid ÷ (ntm * ntn); rem = tid % (ntm * ntn); tm = rem ÷ ntn; tn = rem % ntn; sa = Int64(132); sb = Int64(4224)   # (constant strides)
+    act = tid < ntm * ntn * ntk; tk = tid ÷ (ntm * ntn); rem = tid % (ntm * ntn); tm = rem ÷ ntn; tn = rem % ntn; sa = Int64(132); sb = Int64(4224); sbs = Int64(132)   # (constant strides)
     Base.Cartesian.@nexprs 32 i -> (c_i = 0.0f0)
     k0 = Int64(0); ka = isk(oA); kb = isk(oB)
     g = (Int64(tid) & 3) << 3; ka && ltab!(R, sm, 0, oA, m0, nr, rt, true, tid); kb && ltab!(R, sm, sb, oB, n0, no, ct, true, tid)
-    dA = ka ? kdesc(sm, 0, oA, Int64(rt), tid, sa) : (Int64(0), Int64(-1), Int64(0), Int64(-1)); dB = kb ? kdesc(sm, sb, oB, Int64(ct), tid, Int64(68)) : (Int64(0), Int64(-1), Int64(0), Int64(-1))
+    dA = ka ? kdesc(sm, 0, oA, Int64(rt), tid, sa) : (Int64(0), Int64(-1), Int64(0), Int64(-1)); dB = kb ? kdesc(sm, sb, oB, Int64(ct), tid, sbs) : (Int64(0), Int64(-1), Int64(0), Int64(-1))
     while k0 < K
-        bar(); if ka; kld!(sm, 0, oA.dt, dA, k0, K, g, sa) else ldtile!(R, sm, 0, oA, rt, nr, m0, k0, K, tid, sa) end; if kb; kld!(sm, sb, oB.dt, dB, k0, K, g, Int64(68)) else ldtile!(R, sm, sb, oB, ct, no, n0, k0, K, tid, Int64(68)) end; bar()
+        bar(); if ka; kld!(sm, 0, oA.dt, dA, k0, K, g, sa) else ldtile!(R, sm, 0, oA, rt, nr, m0, k0, K, tid, sa) end; if kb; kld!(sm, sb, oB.dt, dB, k0, K, g, sbs) else ldtile!(R, sm, sb, oB, ct, no, n0, k0, K, tid, sbs) end; bar()
         if act                                              # a k: 8 (or 4) rows, 4 columns
             kend = Int32(32) + Int32(K < 0)                  # (opaque: the loop stays a loop)
             if t8
                 kq = Int32(0)
                 while kq < kend
                     rk = Int64((kq >> 3) << 3); pa = (tm * 8 + rk) & (rt - 1); pb = (tn * 4 + rk) & (ct - 1)
-                    Base.Cartesian.@nexprs 2 k -> (a = ld4(sm, (kq + k - 1) * sa + pa); a2 = ld4(sm, (kq + k - 1) * sa + pa + 4); b = ld4(sm, sb + (kq + k - 1) * 68 + pb); Base.Cartesian.@nexprs 4 i -> Base.Cartesian.@nexprs 4 j -> (c_{(i - 1) * 4 + j} = fma(a[i].value, b[j].value, c_{(i - 1) * 4 + j}); c_{16 + (i - 1) * 4 + j} = fma(a2[i].value, b[j].value, c_{16 + (i - 1) * 4 + j})))
+                    Base.Cartesian.@nexprs 2 k -> (a = ld4(sm, (kq + k - 1) * sa + pa); a2 = ld4(sm, (kq + k - 1) * sa + pa + 4); b = ld4(sm, sb + (kq + k - 1) * sbs + pb); Base.Cartesian.@nexprs 4 i -> Base.Cartesian.@nexprs 4 j -> (c_{(i - 1) * 4 + j} = fma(a[i].value, b[j].value, c_{(i - 1) * 4 + j}); c_{16 + (i - 1) * 4 + j} = fma(a2[i].value, b[j].value, c_{16 + (i - 1) * 4 + j})))
                     kq += Int32(2)
                 end
             elseif ntk == 1
                 kq = Int32(0)
                 while kq < kend
                     rk = Int64((kq >> 3) << 3); pa = (tm * 4 + rk) & (rt - 1); pb = (tn * 4 + rk) & (ct - 1)
-                    Base.Cartesian.@nexprs 2 k -> (a = ld4(sm, (kq + k - 1) * sa + pa); b = ld4(sm, sb + (kq + k - 1) * 68 + pb); Base.Cartesian.@nexprs 4 i -> Base.Cartesian.@nexprs 4 j -> (c_{(i - 1) * 4 + j} = fma(a[i].value, b[j].value, c_{(i - 1) * 4 + j})))
+                    Base.Cartesian.@nexprs 2 k -> (a = ld4(sm, (kq + k - 1) * sa + pa); b = ld4(sm, sb + (kq + k - 1) * sbs + pb); Base.Cartesian.@nexprs 4 i -> Base.Cartesian.@nexprs 4 j -> (c_{(i - 1) * 4 + j} = fma(a[i].value, b[j].value, c_{(i - 1) * 4 + j})))
                     kq += Int32(2)
                 end
             else
                 k = Int32(tk)
                 while k < 32
-                    rk = Int64((k >> 3) << 3); a = ld4(sm, k * sa + ((tm * 4 + rk) & (rt - 1))); b = ld4(sm, sb + k * 68 + ((tn * 4 + rk) & (ct - 1))); Base.Cartesian.@nexprs 4 i -> Base.Cartesian.@nexprs 4 j -> (c_{(i - 1) * 4 + j} = fma(a[i].value, b[j].value, c_{(i - 1) * 4 + j})); k += ntk
+                    rk = Int64((k >> 3) << 3); a = ld4(sm, k * sa + ((tm * 4 + rk) & (rt - 1))); b = ld4(sm, sb + k * sbs + ((tn * 4 + rk) & (ct - 1))); Base.Cartesian.@nexprs 4 i -> Base.Cartesian.@nexprs 4 j -> (c_{(i - 1) * 4 + j} = fma(a[i].value, b[j].value, c_{(i - 1) * 4 + j})); k += ntk
                 end
             end
         end
@@ -513,7 +522,7 @@ end
     end
     Base.Cartesian.@ntuple 32 i -> c_i
 end
-@inline function put!(a::LP{UInt8}, d::Int32, v::NTuple{4,Float32}, i::Int64, nv)   # 4 elements from i: a vector store when whole and aligned
+@inline function put!(a::LP{UInt8}, d::Int32, v::NTuple{4,Float32}, i::Int64, nv)   # 4 elements from i: one vector store if whole
     if nv == 4 && (pint(a) + i * (d == BF ? 2 : 4)) & (d == BF ? 7 : 15) == 0
         if d == BF
             h(x) = UInt64(reinterpret(UInt32, bfr(x)) >> 16); unsafe_store!(reinterpret(LP{UInt64}, a), h(v[1]) | (h(v[2]) << 16) | (h(v[3]) << 32) | (h(v[4]) << 48), (i >> 2) + 1, Val(8))
@@ -540,14 +549,14 @@ end
     else
         W = Int64(ed(R, e2, E_W)); tr = fl & B_TR != 0; oB = OPD(ebase(R, e2), ed(R, e2, E_DT), Int32(3), 0, 0, tr ? 1 : W, tr ? W : 1, 0, 0, 0)
     end
-    t8 = rt == 128; tr = t8 ? 8 : 4; ntn = Int32(ct ÷ 4); ntm = Int32((rt + tr - 1) ÷ tr); ntk = Int32(1); while ntk * 2 * ntm * ntn <= 256; ntk *= Int32(2); end
+    t8 = rt * ct >= TILEA; tr = t8 ? 8 : 4; ntn = Int32(ct ÷ 4); ntm = Int32((rt + tr - 1) ÷ tr); ntk = Int32(1); while ntk * 2 * ntm * ntn <= 256; ntk *= Int32(2); end
     c1 = kloop(R, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk, t8)
     c2 = nB == 2 ? kloop(R, sm, oA, OPD(oB.mode == 3 ? lp(UInt8, mt(R, m + Int32(1), 0)) : oB.p, oB.dt, oB.mode, oB.e, oB.nk, oB.ms, oB.ks, oB.off, m + Int32(1), oB.nm), rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk, t8) : c1
     act = tid < ntm * ntn * ntk; tk = tid ÷ (ntm * ntn); rem = tid % (ntm * ntn); tm = rem ÷ ntn; tn = rem % ntn
     o1 = nd(R, n, N_O1); o2 = nd(R, n, N_O2); e3 = nd(R, n, N_I3); f1 = ndf(R, n, 0); f2 = ndf(R, n, 1)
     epi == EP_LSE && bar()
     d1 = ed(R, o1, E_DT); d2 = epi == EP_SILU ? ed(R, o2, E_DT) : d1; d3 = e3 > 0 ? ed(R, e3, E_DT) : d1
-    mw = epi == EP_AXPY && e3 <= 0; mom = lp(Float32, mw ? mt(R, m, 4) : Int64(0)); msc = mw ? ld(lp(Float32, waddr(R, rs, 0)), 0) : 0.0f0   # (momentum, scaled)
+    mw = epi == EP_AXPY && e3 <= 0; mom = lp(Float32, mw ? mt(R, m, 4) : Int64(0)); msc = mw ? ld(lp(Float32, waddr(R, rs, 0)), 0) : 0.0f0   
     if act && tk == 0                                      # a row's address once, then its 4 columns
         Base.Cartesian.@nexprs 8 i -> begin
             mm = Int64(tm * tr + i - 1); mr = m0 + mm
@@ -561,7 +570,7 @@ end
                         put!(a1, d1, v4, nc0, nv); put!(a1, d1, w4, Int64(NFF) + nc0, nv); put!(a2, d2, Base.Cartesian.@ntuple(4, j -> v4[j] * sigm(v4[j]) * w4[j]), nc0, nv)
                     elseif epi == EP_AXPY                     # f1 acc + f2 other
                         put!(a1, d1, Base.Cartesian.@ntuple(4, j -> (j <= nv ? f1 * v4[j] + f2 * (e3 > 0 ? rdv(a3, d3, nc0 + j - 1) : ld(mom, mr * no + nc0 + j - 1) * msc) : 0.0f0)), nc0, nv)
-                    elseif epi == EP_LSE; put!(a1, F32, v4, nc0, nv); Base.Cartesian.@nexprs 4 j -> (j <= nv && (sm[mm * 65 + Int64(tn) * 4 + j] = v4[j]))
+                    elseif epi == EP_LSE; put!(a1, F32, v4, nc0, nv); Base.Cartesian.@nexprs 4 j -> (j <= nv && (sm[mm * (ct + 1) + Int64(tn) * 4 + j] = v4[j]))
                     else; put!(a1, d1, v4, nc0, nv)
                     end
                 end
@@ -571,14 +580,14 @@ end
     if epi == EP_LSE                                       # a row's max and sum over this column tile
         bar()
         if tid < rt && m0 + tid < nr
-            mx = -Inf32; for j in 0:ct-1; n0 + j < no && (mx = max(mx, sm[tid * 65 + j + 1])); end
-            s = 0.0f0; for j in 0:ct-1; n0 + j < no && (s += exp(sm[tid * 65 + j + 1] - mx)); end
+            mx = -Inf32; for j in 0:ct-1; n0 + j < no && (mx = max(mx, sm[tid * (ct + 1) + j + 1])); end
+            s = 0.0f0; for j in 0:ct-1; n0 + j < no && (s += exp(sm[tid * (ct + 1) + j + 1] - mx)); end
             p = lp(Float32, eaddr(R, o2, rowof(R, rk, m0 + tid))); st!(p, mx, 2 * Int64(col)); st!(p, s, 2 * Int64(col) + 1)
         end
     end
 end
 # ---- the row methods: a thread strides over the elements of a tile's rows ----
-@inline function foreach_el(f, R::RQ, n, tile, w, tid)     # f(r, k) over the tile's rows r (request rows) and k < w
+@inline function foreach_el(f, R::RQ, n, tile, w, tid)     # f(r, k) over the tile's rows r and k < w
     rt = pln(R, n, NP_RT); nr = nrows(R, n); rk = nd(R, n, N_ROWS); i = Int64(tid); tot = min(rt, nr - Int64(tile) * rt) * Int64(w)
     while i < tot
         f(rowof(R, rk, Int64(tile) * rt + i ÷ w), i % w); i += 256
@@ -591,7 +600,7 @@ end
 @inline function rotv(R::RQ, tbl, pos, q, a, b)             # the rotation of (x[q], x[q +- 64])
     an = rope(R, tbl, pos, q); cs = cos(an); sn = sin(an); q < 64 ? a * cs - b * sn : a * cs + b * sn
 end
-@inline function norm!(R::RQ, sm, n, tile, tid)            # rs[r][b] = rsqrt(mean x[r][off + b D + q]^2 + eps)
+@inline function norm!(R::RQ, sm, n, tile, tid)            # rs[r][b] = rsqrt(mean x^2 + eps)
     rt = pln(R, n, NP_RT); nr = nrows(R, n); rk = nd(R, n, N_ROWS); e = nd(R, n, N_I1); o = nd(R, n, N_O1); o2 = nd(R, n, N_O2); D = nd(R, n, N_D); nb = nd(R, n, N_K) ÷ D; off = nd(R, n, N_WIN); wv = nd(R, n, N_WV) > 0 ? vp(R, nd(R, n, N_WV)) : lp(Float32, 0)
     g = tid ÷ 16; lane = tid % 16; tot = min(rt, nr - Int64(tile) * rt) * nb; i = Int64(g)
     while i - g < tot
@@ -606,7 +615,7 @@ end
             sm[300 + g] = 1.0f0 / sqrt(t / Float32(D) + EPS); wrv!(eaddr(R, o, r), F32, sm[300 + g], b)
         end
         bar()
-        if o2 > 0 && i < tot                                 # the normalized row x rs w, for the matrix products
+        if o2 > 0 && i < tot                                 # the normalized row x rs w
             for q in lane:16:D-1; c = off + b * D + q; ev!(R, o2, r, ev(R, e, r, c) * sm[300 + g] * ld(wv, c), c); end
         end
         bar(); i += 16
@@ -662,7 +671,7 @@ end
         st!(mo, R.f2 * ld(mo, k * 7 + t) + R.iacc * acc, k * 7 + t); i += 256
     end
 end
-@inline function normb!(R::RQ, sm, n, tile, tid)            # gx (+)= w gy rs - (rs^3 / D) (Σ gy w x) x; win 1: the loss rows only
+@inline function normb!(R::RQ, sm, n, tile, tid)            # gx (+)= w gy rs - (rs^3 / D) (Σ gy w x) x
     gy = nd(R, n, N_I1); x = nd(R, n, N_I2); rs = nd(R, n, N_I3); add = nd(R, n, N_I4); out = nd(R, n, N_O1); w = vp(R, nd(R, n, N_WV)); D = nd(R, n, N_D); lossy = nd(R, n, N_WIN) == 1
     rt = pln(R, n, NP_RT); nr = nrows(R, n); g = tid ÷ 64; lane = tid % 64; tot = min(rt, nr - Int64(tile) * rt); i = Int64(g)
     while i - g < tot
@@ -683,7 +692,7 @@ end
         bar(); i += 4
     end
 end
-@inline function normw!(R::RQ, sm, n, tile, tid)                # gw[q] = Σ_r Σ_b gy[r][off + b D + q] x[..] rs[r][b]
+@inline function normw!(R::RQ, sm, n, tile, tid)                # gw[q] = Σ_r Σ_b gy x rs
     gy = nd(R, n, N_I1); x = nd(R, n, N_I2); rs = nd(R, n, N_I3); D = nd(R, n, N_D); nb = nd(R, n, N_K) ÷ D; off = nd(R, n, N_TBL); lossy = nd(R, n, N_WIN) == 1
     mo = vmo(R, nd(R, n, N_WV)); q = Int64(tile) * 64 + tid % 64; part = tid ÷ 64; acc = 0.0f0
     if q < D
@@ -698,7 +707,7 @@ end
     sm[tid + 1] = acc; bar()
     if part == 0 && q < D; t = sm[tid + 1] + sm[tid + 65] + sm[tid + 129] + sm[tid + 193]; st!(mo, R.f2 * ld(mo, q) + R.iacc * t, q); end
 end
-@inline function rope!(R::RQ, n, tile, tid)                 # qr, kr: the heads rotated; v copied to its cache
+@inline function rope!(R::RQ, n, tile, tid)                 # qr, kr rotated; v to its cache
     qkv = nd(R, n, N_I1); rsq = nd(R, n, N_I2); rsk = nd(R, n, N_I3); qr = nd(R, n, N_O1); kr = nd(R, n, N_O2); v = nd(R, n, N_O3)
     wq = vp(R, nd(R, n, N_WV)); wk = vp(R, nd(R, n, N_D)); tbl = nd(R, n, N_TBL)
     foreach_el(R, n, tile, NE + 2NKV * HD, tid) do r, k
@@ -729,7 +738,7 @@ end
         kt = Int64(lo) & ~Int64(15)
         while kt <= hi
             bar()
-            kb = caddr(R, kr, s0, kt); vb = caddr(R, v, s0, kt); ebk = ebytes(R, kr); ebv = ebytes(R, v)   # (16 keys from a block's start)
+            kb = caddr(R, kr, s0, kt); vb = caddr(R, v, s0, kt); ebk = ebytes(R, kr); ebv = ebytes(R, v)   
             for i in tid:256:16*HD-1; c = i ÷ HD; ok = kt + c <= hi; sm[2048 + i + 1] = ok ? rdv(kb + c * ebk, BF, g * HD + i % HD) : 0.0f0; sm[4096 + i + 1] = ok ? rdv(vb + c * ebv, BF, g * HD + i % HD) : 0.0f0; end
             bar()
             kp = kt + tc; s = -Inf32
@@ -766,7 +775,7 @@ end
         g = j ÷ 4
         if kvpass                                          # the key tile fixed: K, V in smem
             for i in tid:256:16*HD-1; c = i ÷ HD; r = t0 + c; r < R.P && (sm[i + 1] = ev(R, kr, r, g * HD + i % HD); sm[2048 + i + 1] = ev(R, v, r, g * HD + i % HD)); end
-        else                                               # the query tile fixed: Q, dO in smem
+        else                                               # Q, dO in smem
             for i in tid:256:16*HD-1; c = i ÷ HD; r = t0 + c; r < R.P && (sm[4096 + i + 1] = ev(R, qr, r, j * HD + i % HD); sm[6144 + i + 1] = ev(R, gao, r, j * HD + i % HD) * sigm(ev(R, qkv, r, NE + 2NKV * HD + j))); end
         end
         bar()
@@ -782,7 +791,7 @@ end
         end
         bar()
         t2 = kvpass ? Int64(tile) : Int64(0); t2end = kvpass ? nt - 1 : Int64(tile)
-        while t2 <= t2end                                  # the other tile: queries (kv pass) or keys (q pass)
+        while t2 <= t2end                                  # the other tile: queries or keys
             u0 = t2 * 16; bar()
             if kvpass
                 for i in tid:256:16*HD-1; c = i ÷ HD; r = u0 + c; r < R.P && (sm[4096 + i + 1] = ev(R, qr, r, j * HD + i % HD); sm[6144 + i + 1] = ev(R, gao, r, j * HD + i % HD) * sigm(ev(R, qkv, r, NE + 2NKV * HD + j))); end
@@ -801,7 +810,7 @@ end
                 p = exp(s * SCALE - sm[8720 + tr + 1]); ds = p * (dp - sm[8704 + tr + 1]) * SCALE
             end
             sm[8192 + tr * 16 + tc + 1] = p; sm[8448 + tr * 16 + tc + 1] = ds; bar()
-            if kvpass                                      # thread (key c = tr, dims tc 8..): dV, dK
+            if kvpass                                      # thread (key tr, dims tc 8..): dV, dK
                 for q in 0:15; pq = sm[8192 + q * 16 + tr + 1]; dq = sm[8448 + q * 16 + tr + 1]
                     Base.Cartesian.@nexprs 8 d -> (v_d = fma(pq, sm[6144 + q * HD + tc * 8 + d], v_d)); Base.Cartesian.@nexprs 8 d -> (k_d = fma(dq, sm[4096 + q * HD + tc * 8 + d], k_d)); end
             else                                           # thread (query r = tr, dims): dQ += ds K
@@ -817,7 +826,7 @@ end
         end
     end
 end
-@inline function rotnb!(R::RQ, n, tile, tid)   # the rotations undone, then the head norms' adjoint
+@inline function rotnb!(R::RQ, n, tile, tid)   # the rotations undone, the head norms' adjoint
     gqg = nd(R, n, N_I1); gkv = nd(R, n, N_I2); qkv = nd(R, n, N_I3); rsq = nd(R, n, N_I4); rsk = nd(R, n, N_M); out = nd(R, n, N_O1); gqn = nd(R, n, N_O2)
     wq = vp(R, nd(R, n, N_WV)); wk = vp(R, nd(R, n, N_D)); tbl = nd(R, n, N_TBL)
     foreach_el(R, n, tile, NH + NKV, tid) do r, hh             # a thread a (row, head)
@@ -868,7 +877,7 @@ end
         ev!(R, out, r, tgt >= 0 ? (exp(ev(R, lg, r, k) - l) - (k == tgt ? 1.0f0 : 0.0f0)) * w : 0.0f0, k)
     end
 end
-@inline function nrm!(R::RQ, sm, n, tile, tid)              # 1024 rows' sum of squares; NRMS: 1 / (|mo| + 1e-7)
+@inline function nrm!(R::RQ, sm, n, tile, tid)              # a tile's sum of squares; NRMS: 1 / (|mo| + 1e-7)
     m = nd(R, n, N_M); mo = lp(Float32, mt(R, m, 4)); Rr = mt(R, m, 1); K = mt(R, m, 2); out = nd(R, n, N_O1)
     if nd(R, n, N_KIND) == NRMS
         p = lp(Float32, waddr(R, nd(R, n, N_I1), 0)); nt = pln(R, ed(R, nd(R, n, N_I1), E_PROD), NP_NT); s = 0.0f0
@@ -877,26 +886,26 @@ end
         if tid == 0; t = 0.0f0; for i in 0:255; t += sm[i + 1]; end; wrv!(waddr(R, out, 0), F32, t == 0.0f0 ? 0.0f0 : 1.0f0 / (sqrt(t) + 1.0f-7), 0); end   # (0: no gradient since the last step)
         return
     end
-    i = Int64(tile) * 1024 * K + tid; hi = min(Int64(tile + 1) * 1024, Rr) * K; s = 0.0f0
+    rt = pln(R, n, NP_RT); i = Int64(tile) * rt * K + tid; hi = min(Int64(tile + 1) * rt, Rr) * K; s = 0.0f0
     while i < hi; v = ld(mo, i); s = fma(v, v, s); i += 256; end
     sm[tid + 1] = s; bar()
     if tid == 0; t = 0.0f0; for q in 0:255; t += sm[q + 1]; end; wrv!(waddr(R, out, 0), F32, t, Int64(tile)); end
 end
-@inline function step!(R::RQ, n, tile, tid)                 # master -= f X (X: the momentum if no edge); W = bf16(master)
+@inline function step!(R::RQ, n, tile, tid)                 # master -= f X (X: the momentum if no edge)
     m = nd(R, n, N_M); X = nd(R, n, N_I1); ms = lp(Float32, mt(R, m, 3)); mo = lp(Float32, mt(R, m, 4)); W = lp(UInt8, mt(R, m, 0)); W2 = lp(UInt8, mt(R, m, 5)); K = mt(R, m, 2); Rr = mt(R, m, 1); f = ndf(R, n, 0)
-    i = Int64(tile) * 64 * K + tid; hi = min(Int64(tile + 1) * 64, Rr) * K
+    rt = pln(R, n, NP_RT); i = Int64(tile) * rt * K + tid; hi = min(Int64(tile + 1) * rt, Rr) * K
     while i < hi
         v = ld(ms, i) - f * (X > 0 ? rdv(waddr(R, X, i ÷ K), F32, i % K) : ld(mo, i)); st!(ms, v, i); wrv!(W, BF, v, i); W2 != LP0 && wrv!(W2, BF, v, i); i += 256
     end
 end
 @inline function stage!(R::RQ, n, tile, tid)                # X = s mo
     m = nd(R, n, N_M); X = nd(R, n, N_O1); mo = lp(Float32, mt(R, m, 4)); K = mt(R, m, 2); Rr = mt(R, m, 1); sc = ld(lp(Float32, waddr(R, nd(R, n, N_RS), 0)), 0)
-    i = Int64(tile) * 64 * K + tid; hi = min(Int64(tile + 1) * 64, Rr) * K
+    rt = pln(R, n, NP_RT); i = Int64(tile) * rt * K + tid; hi = min(Int64(tile + 1) * rt, Rr) * K
     while i < hi; wrv!(waddr(R, X, i ÷ K), F32, sc * ld(mo, i), i % K); i += 256; end
 end
 @inline function momu!(R::RQ, n, tile, tid)                 # mo = f2 mo + dW / acc, the rows contiguous
     m = nd(R, n, N_M); dW = nd(R, n, N_I1); mo = lp(Float32, mt(R, m, 4)); K = mt(R, m, 2); Rr = mt(R, m, 1)
-    i = Int64(tile) * 64 * K + tid; hi = min(Int64(tile + 1) * 64, Rr) * K
+    rt = pln(R, n, NP_RT); i = Int64(tile) * rt * K + tid; hi = min(Int64(tile + 1) * rt, Rr) * K
     while i < hi; st!(mo, R.f2 * ld(mo, i) + R.iacc * rdv(waddr(R, dW, i ÷ K), F32, i % K), i); i += 256; end
 end
 @inline function stepv!(R::RQ, n, tid)                      # a vector by its momentum
@@ -936,7 +945,7 @@ end
 end
 # ---- the kernel: block 0 derives the plan; every block claims tasks in order ----
 @kernel unsafe_indices = true function krun!(R::RQ)
-    sm = @localmem Float32 (8768,); si = @localmem Int32 (4,)
+    sm = @localmem Float32 (8960,); si = @localmem Int32 (4,)
     tid = Int32(KI.get_local_id(Int32).x - 1); gid = Int32(KI.get_group_id(Int32).x - 1)
     if gid == 0 && tid == 0
         t0 = tick(); derive!(R); fence(); R.dbg & 64 != 0 && atomst!(R.cnt + 4 * (R.nflag - 4 * (Int64(R.nn) + 1)), UInt32((tick() - t0) >> 8))
@@ -974,7 +983,7 @@ mutable struct Sys
     G::Graph; g::ST; dir::String; cards::Vector{Card}; train::Bool
     aH::Ptr{UInt8}; aHd::UInt64; nH::Int; cntH::Ptr{UInt8}; cntHd::UInt64; host::Vector{Tuple{String,Ptr{UInt8},Int}}   # host-held weights: name, pointer, bytes
     slots::UInt64; slotsz::Int; nslot::Int; cap::Int; gen::UInt32; plan::Vector{Int64}; nflag::Int
-    vram::Dict{Tuple{Int,Int},Any}                         # (matrix, 4 master | 5 momentum) -> its VRAM array
+    vram::Dict{Tuple{Int,Int},Any}                         # (matrix, 4 master | 5 momentum) -> VRAM array
 end
 const NFLAG = 1 << 24
 rftab() = Float32[i < (t == 0 ? 32 : 64) ? 1.0f0 / (Float32(t == 0 ? 1.0e6 : 1.0e4)^(Float32(2i) / Float32(HD))) : 0.0f0 for t in 0:1 for i in 0:63]
@@ -991,7 +1000,7 @@ function load(dir; train = false, ncard = ndev(), hostgb = 6.0, reserve = 3.5e9,
         c = matcard(G, G.matname[m], ncard)
         for n in 1:nn; G.node[NF*(n-1)+N_M+1] == m && G.node[NF*(n-1)+N_LVL+1] == WEIGHTS && (G.node[NF*(n-1)+N_CARD+1] = c); end
     end
-    for n in 1:nn, f in 0:7                                # an edge read on another card than its producer's
+    for n in 1:nn, f in 0:7                                # read on another card
         e = hin(G, n, f); e > 0 || continue; p = G.edge[EF*(e-1)+E_PROD+1]
         p > 0 && G.node[NF*(p-1)+N_CARD+1] != G.node[NF*(n-1)+N_CARD+1] && (G.edge[EF*(e-1)+E_CROSS+1] = 1)
     end
@@ -1036,8 +1045,8 @@ function load(dir; train = false, ncard = ndev(), hostgb = 6.0, reserve = 3.5e9,
                 end
             end
         end
-        if c == ncard - 1 && nslot > 0; sl = dalloc(nslot * slotsz); push!(bufs, sl); S.slots = addr(sl); end   # (the slots: one card for now)
-        nV = vfree() - max(round(Int, reserve ÷ 2), 1 << 30); aV = dalloc(nV); push!(bufs, aV)   # (the headroom: the launch itself takes local memory)
+        if c == ncard - 1 && nslot > 0; sl = dalloc(nslot * slotsz); push!(bufs, sl); S.slots = addr(sl); end   
+        nV = vfree() - max(round(Int, reserve ÷ 2), 1 << 30); aV = dalloc(nV); push!(bufs, aV)   
         rope = dalloc(4 * 128); up!(rope, 0, rftab())
         node = dalloc(4 * length(G.node)); up!(node, 0, G.node); edge = dalloc(4 * length(G.edge)); up!(edge, 0, G.edge)
         nodef = dalloc(4 * length(G.nodef)); up!(nodef, 0, G.nodef); push!(bufs, nodef)
@@ -1061,7 +1070,7 @@ function rq(S::Sys, C::Card, P, PL, NU, NS, wanted; f2 = 1.0, iacc = 1.0)
        lp(Int64, addr(C.plan)), lp(UInt32, addr(C.cnt)), lp(UInt32, S.cntHd), lp(UInt32, addr(C.q)),
        lp(UInt8, addr(C.aV)), Int64(C.nV), lp(UInt8, S.aHd), Int64(S.nH), lp(UInt8, S.slots), Int64(S.slotsz), Int32(DBG[]), Int64(NFLAG))
 end
-function resident(C::Card, S::Sys)                         # how many blocks of the kernel the card runs at once
+function resident(C::Card, S::Sys)                         # the blocks the card runs at once
     k = C.k; A = rq(S, C, 1, 1, 1, 1, 1)
     nd, wg, it, _ = KernelAbstractions.launch_config(k, 256, nothing)
     launch = KernelAbstractions.select_launch(KernelAbstractions.sizes_only(k), wg, it)
@@ -1088,7 +1097,7 @@ function request!(S::Sys, rows::Matrix{Int32}, segs::Matrix{Int32}, lrows::Vecto
     await!(S); for C in S.cards; dev!(C.i + 1); sync(); pop!(C.bufs); end
     dev!(1); dn!(S.plan, S.cards[1].plan, 0)
     DBG[] & 64 != 0 && for C in S.cards; prof(S, C); end
-    st = S.plan[PH_STAT+1]; st == 0 || error("request: status $st, node $(S.plan[PH_S0+1]) ($(S.G.node[NF*(S.plan[PH_S0+1]-1)+N_KIND+1]), m $(S.G.node[NF*(S.plan[PH_S0+1]-1)+N_M+1])) $(S.plan[PH_S1+1] & 0xfffff) $((S.plan[PH_S1+1] >> 20) & 0xfffff) cell $(S.plan[PH_S1+1] >> 40) gen $(S.gen) (VRAM $(S.plan[PH_VUSE+1]), host $(S.plan[PH_HUSE+1]))")
+    st = S.plan[PH_STAT+1]; st == 0 || (n = S.plan[PH_S0+1]; error("request: status $st, node $n (kind $(S.G.node[NF*(n-1)+N_KIND+1])), VRAM $(S.plan[PH_VUSE+1]), host $(S.plan[PH_HUSE+1])"))
     nothing
 end
 await!(S::Sys) = nothing; prof(S::Sys, C::Card) = nothing   # (test/lfm3-dev.jl)
@@ -1121,8 +1130,8 @@ function kl(S::Sys, ids, refpath, n)
     m = length(kls)
     @printf("KL vs BF16 over %d positions: mean %.6f, median %.6f, max %.5f; top-1 %.4f; %.1f s (%.1f tok/s)\n", m, sum(kls) / m, sort(kls)[cld(m, 2)], maximum(kls), top / m, tp, n / tp)
 end
-# ---- serving: flashd's engine protocol (flash-sass kern/flashd.c) on a unix socket, a chat at a time; the slot keeps the last chat's cache ----
-function slotrun(S::Sys, toks, p0)                           # rows p0.. of the slot's chat, the last row's logits
+# ---- serving: flashd's engine protocol (flash-sass kern/flashd.c) on a unix socket; the slot keeps the last chat's cache ----
+function slotrun(S::Sys, toks, p0)                           # rows p0.. of the slot's chat; the last logits
     n = length(toks); rows = Int32[r == 1 ? 0 : r == 2 ? p0 + i - 1 : r == 3 ? toks[i] : -1 for r in 1:4, i in 1:n]
     request!(S, rows, reshape(Int32[0, p0 + n], 2, 1), Int32[n - 1], ones(Float32, 1), 1); fetch(S, S.G.names[:lg], 1)[:, 1]
 end
@@ -1134,10 +1143,10 @@ function pick(l, temp, topk, topp, rng, seen, pen)
 end
 function chat(S::Sys, c, n, ids, stops, (temp, topk, topp), seed, pen, held, cap)
     t0 = time(); P = length(ids); gone = false; (P < cap && P > 0) || (println(c, "error: ", P, " positions, the engine holds ", cap); return)
-    @async (try; eof(c); catch; end; gone = true)            # (cancel_on_eof: the client closed its side)
-    p0 = 0; while p0 < min(P - 1, length(held)) && held[p0+1] == ids[p0+1]; p0 += 1; end   # the cache's own prefix, the last token always run
+    @async (try; eof(c); catch; end; gone = true)            # (the client closed its side)
+    p0 = 0; while p0 < min(P - 1, length(held)) && held[p0+1] == ids[p0+1]; p0 += 1; end   # the cache's prefix; the last token always runs
     length(held) - p0 > 100 && (p0 = 0); resize!(held, p0); l = Float32[]
-    for a in p0+1:64:P                                       # (64 rows a request: what the rings hold)
+    for a in p0+1:64:P                                       # (64 rows a request: the rings)
         b = min(P, a + 63); l = slotrun(S, ids[a:b], a - 1); append!(held, ids[a:b]); println(c, "prog ", b, " ", P, " ", p0); flush(c)
     end
     rng = Random.Xoshiro(seed); seen = pen == 1 ? Int[] : copy(ids); gen = 0; ended = false; t1 = t0; n = clamp(n, 1, cap - P)
