@@ -245,9 +245,10 @@ end
 # ---------------------------------------------------------------------------------------------
 # The model on four dies. Die d holds DeltaNet key heads 4d .. 4d + 3 and the 12 value heads that read them
 # (h = 16j + 4d + i, j = 0..2, i = 0..3; value head h reads key head h mod 16), attention query heads 6d .. 6d + 5 and
-# KV head d, FFN rows (and down-projection columns) 4352d .., and a quarter of the vocabulary rows of the embedding
-# and the head. The residual stream x is on every die; each mixer and FFN ends in a partial sum on each die, added
-# across the dies (the exchange, xwr_ph!).
+# KV head d, FFN units (256 FFN channels: their gate and up rows, their down-projection columns) 17d - R .. 17d + 16
+# (its own 17 and the last R of its left neighbour's: the load balance, bal_begin!), and a quarter of the vocabulary
+# rows of the embedding and the head. The residual stream x is on every die; each mixer and FFN ends in a partial
+# sum on each die, added across the dies (the exchange, xwr_ph!).
 # ---------------------------------------------------------------------------------------------
 const NE, NFF, NV, NL = 5120, 17408, 248320, 64
 const DK, NKH, NVH, HD, NH, NKV, NROT = 128, 16, 48, 256, 24, 4, 64
@@ -348,6 +349,7 @@ struct KA
     nem::LP{Int32}; drf::LP{Int32}; msel::LP{Int32}        # a request's tokens out, its draft, the draft's source (0, 1)
     spec::Int32                                            # decode with MTP drafts
     stp1::Int32; stp2::Int32                               # tokens that end a request (-1: none)
+    rb::Int32; bal::Int32                                  # redundant FFN units a die (R); the load balance on (1) | off
 end
 const NR = 2                                               # requests at once
 const DW = 4                                               # the widest decode forward (with MTP: 2 positions a request)
@@ -398,6 +400,75 @@ end
     workitemIdx().x == 1 || return
     p = A.acct + 8 * (3 + 2Int64(seq)); umin64(p, t0); umax64(p + 8, memtime())
 end
+# ---- the FFN load balance (EPLB, DeepSeek open-infra-index day 4: redundant replicas, the split re-chosen from
+# measured load). Every FFN ends in an exchange that waits for the slowest die, so a die slower than the others (a
+# hot one throttles) makes the other three idle for the difference, every layer. A die holds R units of its left
+# neighbour besides its own 17 (global units 0 .. 67, die d's 17d .. 17d + 16), so a unit near a boundary can run on
+# either die: the down projection's partial sums are added across the dies anyway, so which die computes a unit
+# does not matter. Die d runs global units b_d .. b_{d+1} - 1, b_d = 17 d + δ_d with δ_d in -R .. 0 (b_4 = 68 + b_0).
+# After each forward every die publishes its FFN time (the gate up, act and down phases of its 64 layers) in host
+# memory; before the next, every die reads the four, keeps a running per-unit time u_e a die, and searches the
+# (R + 1)^4 splits for the one with the smallest max_e n_e u_e (the slowest die's FFN time). The same integer
+# arithmetic from the same numbers on every die, so they agree on the split. Prefill and decode forwards keep
+# their own split and times (a prefill's per position).
+# bar words: the FFN time of this forward (die 0 thread 0's), forwards so far, the δ_e + R (4 decode, 4 prefill),
+# the u_e (likewise), the counts (decode, prefill); this forward's units of this die (lo, hi: local unit indices,
+# 0 .. 17 + R), the last forward's kind (0 none, 1 prefill, 2 decode) and positions
+const BWF, BWN, BWD, BWU, BWK, BWLO, BWHI, BWLT, BWLP = 24, 25, 26, 34, 42, 44, 45, 46, 47
+const NBW = 18                                             # words BWD .. BWD + 17 carry over from request to request
+const NFU = 17                                             # FFN units a die owns (4352 channels)
+@inline ffnlh(A::KA, l) = l == Int32(MTPL) ? (Int32(0), Int32(NFU)) : (ld(A.bar, BWLO) % Int32, ld(A.bar, BWHI) % Int32)
+@inline pbw(A::KA, e) = reinterpret(LP{UInt64}, A.hf + 64 + 8Int64(e))     # die e's FFN time (host words 16 ..)
+@inline ftag(A::KA, n::UInt32) = (UInt64(A.rid & Int32(255)) << 24 | UInt64(n & 0x00ffffff)) << 32
+@inline function bpoll(A::KA, e, tag::UInt64)              # die e's FFN time of forward n (tag)
+    q = pbw(A, e); u = ld64a_sys(q); tw = memtime()
+    while u & 0xffffffff00000000 != tag
+        (memtime() - tw > TOUT || aborted(A)) && (atadd(A.bar + 8, UInt32(1)); break)
+        ssleep(); u = ld64a_sys(q)
+    end
+    (u & 0xffffffff) % Int64
+end
+# the slowest die's FFN time with split w (the δ_e + R) and per-unit times U
+@inline bmk(U, a, b, c, d) = max(max((Int64(NFU) + b - a) * U[1], (Int64(NFU) + c - b) * U[2]), max((Int64(NFU) + d - c) * U[3], (Int64(NFU) + a - d) * U[4]))
+# before a forward (die 0 thread 0, ahead of the barrier that orders it before the forward): the last forward's
+# times into its kind's u, a new split for that kind if it is a quarter unit faster, this forward's units
+function bal_begin!(A::KA, pre::Bool, P::Int32)
+    (wgid() == Int32(0) && tid() == Int32(0)) || return
+    R = Int64(A.rb); lt = ld(A.bar, BWLT)
+    if A.bal != Int32(0) && R > 0 && lt != UInt32(0) && !aborted(A)
+        k = lt == UInt32(1) ? 4 : 0                        # the last forward's words: decode 0 .., prefill 4 ..
+        tag = ftag(A, ld(A.bar, BWN)); f = ntuple(e -> bpoll(A, e - 1, tag), Val(ND))
+        lP = Int64(ld(A.bar, BWLP))
+        if k == 0 || 2lP >= A.npos                         # (a short last prefill forward is mostly overhead: not counted)
+            sc = k == 0 ? Int64(1) : lP; c = ld(A.bar, BWK + k ÷ 4)
+            w = ntuple(e -> Int64(ld(A.bar, BWD + k + e - 1)), Val(ND))
+            U = ntuple(Val(ND)) do e
+                u = max(Int64(1), f[e] ÷ ((Int64(NFU) + w[(e & 3) + 1] - w[e]) * sc))   # (die e - 1's units: 17 + its right word - its own)
+                o = Int64(ld(A.bar, BWU + k + e - 1))
+                max(Int64(1), c == UInt32(0) ? u : o + ((u - o) >> (k == 0 ? 2 : 1)))
+            end
+            for e in 1:ND; st!(A.bar, U[e] % UInt32, BWU + k + e - 1); end
+            st!(A.bar, min(c + UInt32(1), UInt32(1000)), BWK + k ÷ 4)
+            cur = bmk(U, w...); best = cur; bw = w
+            for a in Int64(0):R, b in Int64(0):R, c2 in Int64(0):R, d2 in Int64(0):R
+                m = bmk(U, a, b, c2, d2); m < best && (best = m; bw = (a, b, c2, d2))
+            end
+            if best + (max(max(U[1], U[2]), max(U[3], U[4])) >> 2) < cur
+                for e in 1:ND; st!(A.bar, bw[e] % UInt32, BWD + k + e - 1); end
+            end
+        end
+    end
+    k2 = pre ? 4 : 0
+    st!(A.bar, ld(A.bar, BWD + k2 + A.d), BWLO)
+    st!(A.bar, UInt32(NFU) + ld(A.bar, BWD + k2 + ((A.d + Int32(1)) & Int32(3))), BWHI)
+    st!(A.bar, UInt32(0), BWF); st!(A.bar, pre ? UInt32(1) : UInt32(2), BWLT); st!(A.bar, P % UInt32, BWLP)
+end
+# after a forward: this die's FFN time out, tagged with the forward's number
+function bal_end!(A::KA)
+    (wgid() == Int32(0) && tid() == Int32(0) && A.bal != Int32(0) && A.rb > Int32(0)) || return
+    n = ld(A.bar, BWN) + UInt32(1); st!(A.bar, n, BWN)
+    st64_sys(pbw(A, A.d), ftag(A, n) | UInt64(ld(A.bar, BWF))); fence_rel_sys()
+end
 @inline wgid() = Int32(workgroupIdx().x) - Int32(1)
 @inline tid() = Int32(workitemIdx().x) - Int32(1)
 
@@ -417,10 +488,11 @@ end
 end
 # Σ over the K slices of output row r at position p: the loads in groups of 8 independent ones (a plain loop waits
 # for each load before the next add)
-@inline function psum(A::KA, o::Int64, ns, rows, P, p, r)
+# (slices s0 .. ns - 1: a down projection's slices of this die's FFN units)
+@inline function psum(A::KA, o::Int64, ns, rows, P, p, r, s0 = Int32(0))
     s = 0.0f0; b = A.part + 4o; st = Int64(P) * rows; e = Int64(p) * rows + r
-    ns == Int32(1) && return ld(b, e)                      # a GEMM's (prefill) one complete slot
-    for q in Int32(0):Int32(16):ns-Int32(1)
+    ns - s0 == Int32(1) && return ld(b, Int64(s0) * st + e)   # a GEMM's (prefill) one complete slot
+    for q in s0:Int32(16):ns-Int32(1)
         v = let q = q; ntuple(j -> ld(b, Int64(min(q + Int32(j - 1), ns - Int32(1))) * st + e), Val(16)) end
         for j in 1:16; s += q + Int32(j - 1) < ns ? v[j] : 0.0f0; end
     end
@@ -434,12 +506,17 @@ function gemv_ph!(A::KA, l::Int32, j0::Int32, nm::Int32, seq::Int32, ::Val{P}, z
     t = tid(); lane = t & Int32(63); gw = AMDGPU.Device.readfirstlane(Int32(4) * wgid() + (t >> Int32(6))); NW = Int32(4) * A.nwg
     t0 = memtime(); did = false
     xr = sbuf(A.xt, NE * 4 * A.npos); x16 = sbuf(A.x16, NE ÷ 4 * A.npos); x32 = sbuf(A.x32, NE ÷ 8 * A.npos)
-    base = Int32(0); o = Int64(0)
+    base = Int32(0); o = Int64(0); lo, hi = ffnlh(A, l)
     for m in Int32(0):nm-Int32(1)
-        woff, rows, nb, typ, doff = mat(A, l, j0 + m); ns = nsl(nb); n = (rows >> Int32(6)) * ns
+        woff, rows, nb, typ, doff = mat(A, l, j0 + m); ns = nsl(nb)
+        # an FFN matrix of a trunk layer: the rows (gate, up) or the K slices (down) of this die's units this forward
+        fj = l < Int32(64) ? j0 + m : Int32(0); gu = fj == Int32(5) || fj == Int32(6)
+        g0 = gu ? Int32(4) * lo : Int32(0); g1 = gu ? Int32(4) * hi : rows >> Int32(6)
+        s0 = fj == Int32(7) ? lo >> Int32(1) : Int32(0); nw = (fj == Int32(7) ? (hi + Int32(1)) >> Int32(1) : ns) - s0
+        n = (g1 - g0) * nw
         g = gw + max(Int32(0), cld(base - gw, NW)) * NW
         while g < base + n
-            it = g - base; G = it ÷ ns; sl = it - G * ns
+            it = g - base; Gi = it ÷ nw; G = g0 + Gi; sl = s0 + it - Gi * nw
             if typ == Int32(GQ5_K)
                 gemv5!(A.part + 4o, reinterpret(LP{UInt8}, woff), xr, x32, nb, rows, G, sl, lane, Val(P))
             else
@@ -519,13 +596,17 @@ end
 function xwr_ph!(A::KA, l::Int32, j::Int32, w::LP{Float32}, set::Bool, xs::Int32, xf::Int32, seq::Int32, P::Int32)
     t0 = memtime(); slot = xs & Int32(1); d = A.d
     tag = UInt64(A.rid & Int32(255)) << 56 | UInt64((xs + Int32(1)) & Int32(0xffffff)) << 32
-    rows, ns, W = if j >= Int32(0)                       # (one assignment each: the closure below captures them)
-        _, r_, nb, _, _ = mat(A, l, j); (r_, nsx(nb, P), reinterpret(LP{UInt8}, Int64(0)))
+    # (one assignment each: the closure below captures them; a trunk layer's down projection at decode width: the
+    # slices of this die's FFN units)
+    fw = j == Int32(7) && l < Int32(64) && !isgemm(P); lo, hi = ffnlh(A, l)
+    rows, s0, ns, W = if j >= Int32(0)
+        _, r_, nb, _, _ = mat(A, l, j)
+        (r_, fw ? lo >> Int32(1) : Int32(0), fw ? (hi + Int32(1)) >> Int32(1) : nsx(nb, P), reinterpret(LP{UInt8}, Int64(0)))
     else
-        woff, _, _, _, _ = mat(A, Int32(64), Int32(0)); (Int32(0), Int32(0), reinterpret(LP{UInt8}, woff))
+        woff, _, _, _, _ = mat(A, Int32(64), Int32(0)); (Int32(0), Int32(0), Int32(0), reinterpret(LP{UInt8}, woff))
     end
     share(p, k) = if j >= Int32(0)
-        psum(A, Int64(0), ns, rows, P, p, k)
+        psum(A, Int64(0), ns, rows, P, p, k, s0)
     else
         r = ld(A.tok, p) - Int32(VPD) * d
         r >= Int32(0) && r < Int32(VPD) ? embval(W, r, k) : 0.0f0
@@ -1017,14 +1098,18 @@ function acomb_ph!(A::KA, amax::Int32, seq::Int32, P::Int32)
     end
     done!(A, seq, t0, did)
 end
-# FFN: silu(gate) up into xt (the down-projection's x), an element a thread, with its 16- and 32-sums (Q6_K or Q5_K)
+# FFN: silu(gate) up into xt (the down-projection's x), an element a thread, with its 16- and 32-sums (Q6_K or Q5_K):
+# the channels of this die's units this forward, and zeros over the rest of the down projection's K slices that hold
+# them (a decode GEMV reads whole slices of two units)
 function act_ph!(A::KA, l::Int32, seq::Int32, P::Int32)
     t0 = memtime()
     did = false; i = gtid()
     _, rg, nbg, _, _ = mat(A, l, Int32(5)); ns = nsx(nbg, P); ou = pof(A, l, 5, 2, P)
-    while i < Int32(4352) * P                              # a wavefront: 64 elements of one position (4352 = 68 x 64)
-        p = i ÷ Int32(4352); k = i - p * Int32(4352)
-        v = silu(psum(A, Int64(0), ns, rg, P, p, k) * rinv(A, p)) * (psum(A, ou, ns, rg, P, p, k) * rinv(A, p))
+    lo, hi = ffnlh(A, l); k0 = Int32(512) * (lo >> Int32(1)); nk = min(Int32(512) * ((hi + Int32(1)) >> Int32(1)), rg) - k0
+    a0 = Int32(256) * lo; a1 = Int32(256) * hi
+    while i < nk * P                                       # a wavefront: 64 elements of one position (nk: 256 multiples)
+        p = i ÷ nk; k = k0 + i - p * nk
+        v = k >= a0 && k < a1 ? silu(psum(A, Int64(0), ns, rg, P, p, k) * rinv(A, p)) * (psum(A, ou, ns, rg, P, p, k) * rinv(A, p)) : 0.0f0
         st!(A.xt, v, Int64(k) * P + p)
         a = v
         for sh in (Cint(1), Cint(2), Cint(4), Cint(8)); a += AMDGPU.Device.shfl_xor(a, sh); end
@@ -1241,10 +1326,11 @@ end
 # one workgroup: rows 64 G .. 64 G + 63 times positions p0 .. p0 + 63 (< P) over all of K, into part[p rows + r].
 # 32 columns at a time: the rows dequantized into Ws[k][row], x into Xs[k][p]; thread t computes rows
 # 4 (t >> 4) .. + 3 by positions 4 (t & 15) .. + 3
-@noinline function gemm_tile!(part::LP{Float32}, W::LP{UInt8}, D::LP{UInt16}, typ::Int32, nb::Int32, rows::Int32, G::Int32, p0::Int32, P::Int32, pf::Int32, xt::LP{Float32}, Ws, Xs)
+# (K blocks b0 .. b1 - 1 of nb: a down projection's blocks of this die's FFN units)
+@noinline function gemm_tile!(part::LP{Float32}, W::LP{UInt8}, D::LP{UInt16}, typ::Int32, nb::Int32, rows::Int32, G::Int32, p0::Int32, P::Int32, pf::Int32, xt::LP{Float32}, Ws, Xs, b0::Int32, b1::Int32)
     t = tid(); ar = t >> Int32(4); bq = t & Int32(15); lr = t >> Int32(2); q = t & Int32(3); kk = t >> Int32(3); pb = (t & Int32(7)) * Int32(8)
     acc = ntuple(_ -> 0.0f0, Val(16))
-    for b in Int32(0):nb-Int32(1), s in Int32(0):Int32(7)
+    for b in b0:b1-Int32(1), s in Int32(0):Int32(7)
         v = dq8(W, D, typ, nb, G, b, s, lr, q)
         for e in 1:8; st!(Ws, v[e], (Int32(8) * q + Int32(e - 1)) * Int32(64) + lr); end
         k = Int32(256) * b + Int32(32) * s + kk
@@ -1266,13 +1352,17 @@ end
 # the (64 rows, 64 positions) tiles of the matrices js of layer l, positions pf .. P - 1, over the workgroups
 function gemm_ph!(A::KA, l::Int32, j0::Int32, nm::Int32, seq::Int32, P::Int32, Ws, Xs, zs::Bool = false, pf::Int32 = Int32(0))
     zs && zero_ssq!(A, P)
-    t0 = memtime(); did = false; npt = cld(P - pf, Int32(64)); base = Int32(0); o = Int64(0); w = wgid()
+    t0 = memtime(); did = false; npt = cld(P - pf, Int32(64)); base = Int32(0); o = Int64(0); w = wgid(); lo, hi = ffnlh(A, l)
     for m in Int32(0):nm-Int32(1)
-        woff, rows, nb, typ, doff = mat(A, l, j0 + m); n = (rows >> Int32(6)) * npt
+        woff, rows, nb, typ, doff = mat(A, l, j0 + m)
+        # an FFN matrix of a trunk layer: the rows (gate, up) or the K blocks (down) of this die's units this forward
+        fj = l < Int32(64) ? j0 + m : Int32(0); gu = fj == Int32(5) || fj == Int32(6)
+        g0 = gu ? Int32(4) * lo : Int32(0); n = ((gu ? Int32(4) * hi : rows >> Int32(6)) - g0) * npt
+        b0 = fj == Int32(7) ? lo : Int32(0); b1 = fj == Int32(7) ? hi : nb
         g = w + max(Int32(0), cld(base - w, A.nwg)) * A.nwg
         while g < base + n
-            i = g - base; G = i ÷ npt; pt = i - G * npt
-            gemm_tile!(A.part + 4o, reinterpret(LP{UInt8}, woff), reinterpret(LP{UInt16}, doff), typ, nb, rows, G, pf + Int32(64) * pt, P, pf, A.xt, Ws, Xs)
+            i = g - base; Gi = i ÷ npt; G = g0 + Gi; pt = i - Gi * npt
+            gemm_tile!(A.part + 4o, reinterpret(LP{UInt8}, woff), reinterpret(LP{UInt16}, doff), typ, nb, rows, G, pf + Int32(64) * pt, P, pf, A.xt, Ws, Xs, b0, b1)
             did = true; g += A.nwg
         end
         base += n; o += Int64(P - pf) * rows                # positions pf .. P - 1 are stored from 0
@@ -1346,11 +1436,13 @@ function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, xf::Int32, he
     xwr_ph!(A, Int32(0), Int32(-1), fvec(A, 0, 0), true, xs, xf, seq, P); seq += Int32(2); xs += Int32(1); xf += bx ? Int32(1) : Int32(0); gbar!(A)
     nlr = Int32(ldacq(A.bar + 12)); nl = nlr == Int32(0) ? Int32(NL) : nlr   # bar[3]: layers to run (0: all), for debugging
     gen = A.mode == Int32(0); spec = !pre && A.spec != Int32(0)
-    l = Int32(0); i = Int32(0)
+    l = Int32(0); i = Int32(0); tf = UInt64(0)
     while l <= Int32(MTPL)
         chk = pre && i == Int32(0) && l < Int32(64)
         chk && (cancelq!(A, nc); nc += Int32(1))
         kind, j0, nm, zs = lstep(l, i)
+        ffn = kind == S_MAT && l < Int32(64)              # (a trunk FFN's time, gate up to down, for the load balance)
+        (ffn && j0 == Int32(5)) && (tf = memtime())
         hd = l == Int32(64) || (l == Int32(MTPL) && j0 == Int32(1))   # a head step
         pf = l == Int32(MTPL) ? mpf : pfirst; nq = P - pf
         if kind == S_MAT
@@ -1390,6 +1482,7 @@ function fwd!(A::KA, P::Int32, amax::Int32, seq::Int32, xs::Int32, xf::Int32, he
             dtok_ph!(A, xs & Int32(1), seq, nq, pf, pre); seq += Int32(1); xs += Int32(1)
         end
         gbar!(A)
+        (ffn && j0 == Int32(7) && wgid() == Int32(0) && tid() == Int32(0)) && st!(A.bar, ld(A.bar, BWF) + ((memtime() - tf) % UInt32), BWF)
         (chk && stopped(A)) && return seq, xs, xf, nc, true
         i += Int32(1)
         if i == nsteps(l, gen, mhead)
@@ -1421,9 +1514,10 @@ function k_req!(A::KA)
             P = min(A.npos, ninp - a); amax = a + P
             head = A.mode == Int32(1) || (a + P == ninp && ngen > Int32(0)); pfirst = A.mode == Int32(1) ? Int32(0) : P - Int32(1)
             mtp = spec && ngen > Int32(0)
-            zero_ssq!(A, P); setpos_ph!(A, r, a, P); gbar!(A)
+            zero_ssq!(A, P); setpos_ph!(A, r, a, P); bal_begin!(A, true, P); gbar!(A)
             seq, xs, xf, nc, stop = fwd!(A, P, amax, seq, xs, xf, head, pfirst, mtp, head, P - Int32(1), true, T, nc)
             stop && break
+            bal_end!(A)
             # the prompt positions run so far, for the host's progress lines (die 0; host counter word 14)
             pdone += P; (A.d == Int32(0) && wgid() == Int32(0) && tid() == Int32(0)) && strel_sys(A.hf + 56, UInt32(pdone))
             a += P
@@ -1437,8 +1531,9 @@ function k_req!(A::KA)
                 end
             end
             P == Int32(0) && break
-            zero_ssq!(A, P); setpos_ph!(A, Int32(-1), Int32(0), P); gbar!(A)
+            zero_ssq!(A, P); setpos_ph!(A, Int32(-1), Int32(0), P); bal_begin!(A, false, P); gbar!(A)
             seq, xs, xf, nc, stop = fwd!(A, P, amax, seq, xs, xf, true, Int32(0), spec, spec, Int32(0), false, T, nc)
+            bal_end!(A)
         end
     end
     tid() == Int32(0) && umax64(A.acct + 8, memtime())
@@ -1457,10 +1552,12 @@ struct DLayer
 end
 f32(g, name) = (t = g.t[name]; copy(reinterpret(Float32, view(g.map, t.off+1:t.off+4prod(t.dims)))))
 const NOV = Float32[]
-function load_layer(g::GGUF, l, d; att = !isrec(l))
-    p = "blk.$l."; all20 = [(0, 20)]
-    gate = DMat(g, p * "ffn_gate.weight", [(4352d, 4352)], all20); up = DMat(g, p * "ffn_up.weight", [(4352d, 4352)], all20)
-    down = DMat(g, p * "ffn_down.weight", [(0, NE)], [(17d, 17)])
+# die d's FFN units (first, count) of the 68: the last R of its left neighbour's, then its own 17
+ffnunits(d, R) = (s = NFU * d - R; s >= 0 ? [(s, NFU + R)] : [(4NFU + s, -s), (0, NFU + R + s)])
+function load_layer(g::GGUF, l, d; att = !isrec(l), R = 0)
+    p = "blk.$l."; all20 = [(0, 20)]; us = ffnunits(d, R)
+    gate = DMat(g, p * "ffn_gate.weight", [(256a, 256n) for (a, n) in us], all20); up = DMat(g, p * "ffn_up.weight", [(256a, 256n) for (a, n) in us], all20)
+    down = DMat(g, p * "ffn_down.weight", [(0, NE)], us)
     an = dev(f32(g, p * "attn_norm.weight")); pn = dev(f32(g, p * "post_attention_norm.weight"))
     if !att
         vh = [16j + 4d for j in 0:2]                       # the first value head of each 4-head run
@@ -1483,6 +1580,7 @@ struct Die
     dev::HIPDevice; d::Int
     L::Vector{DLayer}; emb::DMat; head::DMat; onrm::ROCVector{Float32}
     mtp::DLayer; eh::DMat; mv::ROCVector{Float32}           # the MTP layer, its eh_proj; enorm, hnorm, shared_head_norm
+    R::Int                                                 # the trunk layers' redundant FFN units (the MTP layer has none)
 end
 # a request's state on a die: DeltaNet states and conv rings, the attention cache (TurboQuant rows) up to maxctx
 struct DState
@@ -1492,28 +1590,43 @@ end
 DState(maxctx) = DState(AMDGPU.zeros(Float32, 48 * VHD * DK * DK), AMDGPU.zeros(Float32, 48 * QKVD * 3),
     AMDGPU.zeros(UInt8, 17 * maxctx * KVROW), AMDGPU.zeros(UInt8, 17 * maxctx * KVROW), maxctx,
     AMDGPU.zeros(Float32, 48 * VHD * DK * DK), AMDGPU.zeros(Float32, 48 * QKVD * 3))
-function load_die(g::GGUF, hd, d, L)
+function load_die(g::GGUF, hd, d, L, R)
     AMDGPU.device!(hd)
     m = load_layer(g, 64, d; att = true); p = "blk.64.nextn."
     eh = DMat(g, p * "eh_proj.weight", [(0, NE)], [(10d, 10)])             # K: elements 2560 d .. of emb ++ h
     mv = dev([f32(g, p * "enorm.weight"); f32(g, p * "hnorm.weight"); f32(g, p * "shared_head_norm.weight")])
-    Die(hd, d, L, DMat(g, "token_embd.weight", VPD * d, VPD), DMat(g, "output.weight", VPD * d, VPD), dev(f32(g, "output_norm.weight")), m, eh, mv)
+    Die(hd, d, L, DMat(g, "token_embd.weight", VPD * d, VPD), DMat(g, "output.weight", VPD * d, VPD), dev(f32(g, "output_norm.weight")), m, eh, mv, R)
+end
+# the redundant FFN units a die can hold (0 .. 3; 3: 5120 channels, what xt holds): the smallest die's free memory
+# before loading, less a die's share of the weights (and every f32 vector whole), the NR request slots, the kernel's
+# buffers, a request's phase-time buffer, and 512 MB, in units of a die's 64 trunk layers' FFN unit
+function balr(g::GGUF, devs)
+    fr = minimum(devs[1:ND]) do dv
+        AMDGPU.device!(dv); f = Ref{Csize_t}(0); t = Ref{Csize_t}(0); AMDGPU.HIP.hipMemGetInfo(f, t); Int(f[])
+    end
+    tb(t) = nrows(t) * rowbytes(t)
+    wts = sum(tb, values(g.t)) ÷ ND + sum(tb(t) for t in values(g.t) if t.typ == GF32)
+    unit = sum(tb(g.t["blk.$l.ffn_$m.weight"]) for l in 0:NL-1 for m in ("gate", "up", "down")) ÷ (4NFU)
+    slot = 2 * 17 * MAXCTX * KVROW + 2 * 4 * (48 * VHD * DK * DK + 48 * QKVD * 3)
+    np = 1024; buf = 4 * (2NE * np + 2 * 1536 * np + QKVD * np + 6 * (HD + 2) * max(np, NWG) + 2 * 256 * (NFU + 3) * np) +
+        16 * 1100 * (cld(MAXCTX, np) + 8192 + 2)
+    clamp((fr - wts - NR * slot - buf - (512 << 20)) ÷ unit, 0, 3)
 end
 # the layers are read in file order, each one for all four dies at once (one pass over the file: the GGUF is on a
 # spinning disk and sentry's RAM can't cache all of it)
 function load_engine(path)
     g = gguf(path); devs = AMDGPU.devices()
     length(devs) >= ND || error("need $ND dies, have $(length(devs))")
-    t0 = time(); Ls = [Vector{DLayer}(undef, NL) for _ in 1:ND]
+    t0 = time(); Ls = [Vector{DLayer}(undef, NL) for _ in 1:ND]; R = balr(g, devs)
     onall(f) = @sync for d in 0:ND-1
         Threads.@spawn (AMDGPU.device!(devs[d+1]); f(d))
     end
     for l in 0:NL-1
-        onall(d -> (Ls[d+1][l+1] = load_layer(g, l, d)))
+        onall(d -> (Ls[d+1][l+1] = load_layer(g, l, d; R)))
     end
     dies = Vector{Die}(undef, ND)
-    onall(d -> (dies[d+1] = load_die(g, devs[d+1], d, Ls[d+1])))
-    @printf("weights resident on %d dies (%.0f s)\n", ND, time() - t0)
+    onall(d -> (dies[d+1] = load_die(g, devs[d+1], d, Ls[d+1], R)))
+    @printf("weights resident on %d dies, %d redundant FFN units a die (%.0f s)\n", ND, R, time() - t0)
     dies, g
 end
 newstate(dies, maxctx) = [(AMDGPU.device!(D.dev); DState(maxctx)) for D in dies]
@@ -1551,12 +1664,13 @@ struct KDie
     ap::ROCVector{Float32}; tok::ROCVector{Int32}; bar::ROCVector{UInt32}; ssq::ROCVector{Int64}
     posr::ROCVector{Int32}; posa::ROCVector{Int32}; tks::ROCVector{Int32}; sl::ROCVector{Int64}; rq::ROCVector{Int32}
     pk::ROCVector{Int32}; nem::ROCVector{Int32}; drf::ROCVector{Int32}; msel::ROCVector{Int32}
+    R::Int                                                 # (the die's redundant FFN units)
 end
 function KDie(D::Die, npos)
     AMDGPU.device!(D.dev); z(n) = AMDGPU.zeros(Float32, n); zi(n) = AMDGPU.zeros(Int32, n)
-    KDie(ktable(D), z(NE * npos), z(NE * npos), z(NE ÷ 16 * npos), z(NE ÷ 32 * npos), z(max(VPD * 10, 2 * 4352 * npos, VPD * NSCORE)),
+    KDie(ktable(D), z(NE * npos), z(NE * npos), z(NE ÷ 16 * npos), z(NE ÷ 32 * npos), z(max(VPD * 10, 2 * 256 * (NFU + D.R) * npos, VPD * NSCORE)),
         z(2 * NWG * DW), z(QKVD * npos), z(1536 * npos), z(1536 * npos), z(6 * (HD + 2) * max(npos, NWG)),
-        zi(npos), AMDGPU.zeros(UInt32, 64), AMDGPU.zeros(Int64, npos), zi(npos), zi(npos), zi(NR), AMDGPU.zeros(Int64, 6NR), zi(4NR), zi(npos), zi(NR), zi(NR), zi(NR))
+        zi(npos), AMDGPU.zeros(UInt32, 64), AMDGPU.zeros(Int64, npos), zi(npos), zi(npos), zi(NR), AMDGPU.zeros(Int64, 6NR), zi(4NR), zi(npos), zi(NR), zi(NR), zi(NR), D.R)
 end
 # page-locked host memory every die maps. p: what only the dies touch, the exchange words (2 phases x 2 slots x dies x
 # dies x npos x QTR) and the argmax exchange (2 slots x dies x DW); c: what the host reads or writes too, the counters
@@ -1566,7 +1680,7 @@ struct HostX
     p::Ptr{UInt8}; c::Ptr{UInt8}; nbytes::Int; out::Int; tok::Int
 end
 function HostX(npos, maxgen)
-    n = 8 * 4 * ND * ND * npos * QTR + 4 * 2 * ND * DW * 2; out = 0; tok = 64; r = Ref{Ptr{Cvoid}}(C_NULL); rc = Ref{Ptr{Cvoid}}(C_NULL)
+    n = 8 * 4 * ND * ND * npos * QTR + 4 * 2 * ND * DW * 2; out = 0; tok = 128; r = Ref{Ptr{Cvoid}}(C_NULL); rc = Ref{Ptr{Cvoid}}(C_NULL)   # (bytes 64 ..: the dies' FFN times, pbw)
     H = AMDGPU.HIP
     H.hipHostMalloc(r, n, H.hipHostMallocPortable | H.hipHostMallocMapped | H.hipHostMallocCoherent)
     H.hipHostMalloc(rc, tok + 4maxgen, H.hipHostMallocPortable | H.hipHostMallocMapped | H.hipHostMallocCoherent)
@@ -1619,7 +1733,7 @@ function kargs(K, hx::HostX, d, maxctx, acct, inp, nreq, mode, nwg, lg, npos, ri
        lp(Int32, inp), lp(Int32, k.rq), Int32(nreq), lp(Int32, hx.c + hx.tok), Int32(mode), Int32(nwg), lp(Int32, k.tok),
        lp(Int32, k.posr), lp(Int32, k.posa), lp(Int32, k.tks), Int32(npos), lp(Int64, k.ssq), Int32(rid),
        lp(Int32, k.pk), lp(Int32, k.nem), lp(Int32, k.drf), lp(Int32, k.msel), Int32(mode == 0 && SPEC[] ? 1 : 0),
-       Int32(stops[1]), Int32(stops[2]))
+       Int32(stops[1]), Int32(stops[2]), Int32(k.R), Int32(BAL[] ? 1 : 0))
 end
 # up to NR requests at once on the four dies, one dispatch a die. reqs: (input ids, tokens to generate) each, with
 # its state sts[r] (one DState a die). mode 0: greedy; mode 1: score one request\x27s input (the logits of every
@@ -1638,15 +1752,19 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing, stops = (-1,
     inp = Int32.(vcat(first.(reqs)...)); ioff = cumsum([0; length.(first.(reqs))]); ooff = cumsum([0; last.(reqs)])
     rq = Int32.(vcat([[ioff[r], length(reqs[r][1]), reqs[r][2], ooff[r]] for r in 1:nr]...))
     nphase = (sum(cld(length(i), npos) for (i, _) in reqs) + maximum(last, reqs) + 2) * 1100; rid = (PE.rid[] += 1)
-    for i in 1:(ctl ? 8 : 6); unsafe_store!(Ptr{UInt64}(PE.hx.c + PE.hx.out), 0, i); end   # the counters
+    for i in [1:(ctl ? 8 : 6); 9:12]; unsafe_store!(Ptr{UInt64}(PE.hx.c + PE.hx.out), 0, i); end   # the counters, the FFN times
     Libc.memset(PE.hx.p, 0, 8 * 2 * ND * DW * NE)         # the decode exchange words (their tags restart)
+    # the bar words: the load balance's splits and per-unit times from the last request (the same on every die), or
+    # every die its own 17 units
+    R = PE.K[1].R; b0 = zeros(UInt32, 64); b0[4] = NLRUN[]; bs = BALST[]
+    bs !== nothing && bs[1] == R ? (b0[BWD+1:BWD+NBW] = bs[2]) : (b0[BWD+1:BWD+8] .= R)
     DPMLOCK[] && dpm!(dies, "high")                       # the clocks up for the request (the dies can't tell it's coming)
     accts = Vector{UInt64}[]; ibs = ROCVector{Int32}[]   # accts: host views of fine-grained device memory (the kernels write them, liveidle reads them in place)
     for d in 1:ND
         AMDGPU.device!(dies[d].dev); K = PE.K[d]
         fp = Ref{Ptr{Cvoid}}(); AMDGPU.HIP.hipExtMallocWithFlags(fp, 8 * (3 + 2nphase), AMDGPU.HIP.hipDeviceMallocFinegrained)
         ah = unsafe_wrap(Array, Ptr{UInt64}(fp[]), 3 + 2nphase); fill!(ah, 0); ah[1] = typemax(UInt64); ah[4:2:end] .= typemax(UInt64); push!(accts, ah); a = pointer(ah)
-        up!(K.bar, [UInt32[0, 0, 0, NLRUN[]]; zeros(UInt32, 60)]); up!(K.rq, rq)
+        up!(K.bar, b0); up!(K.rq, rq)
         for r in 1:nr; fill!(sts[r][d].S, 0.0f0); fill!(sts[r][d].ring, 0.0f0); end   # a request starts from zero state
         up!(K.sl, Int64[addr(getfield(sts[r][d], f)) for r in 1:nr for f in (:S, :ring, :kc, :vc, :S2, :ring2)]); up!(K.nem, zeros(Int32, NR))
         ib = dev(inp); push!(ibs, ib)
@@ -1674,6 +1792,7 @@ function request!(PE::PEngine, reqs, sts, mode::Int; lgs = nothing, stops = (-1,
     ab = [(AMDGPU.device!(D.dev); Array(K.bar)[3]) for (D, K) in zip(dies, PE.K)]
     AMDGPU.device!(dies[1].dev); bh = Array(PE.K[1].bar); ACC[] = (Int(bh[17]), Int(bh[18]))
     any(!=(0), ab) && (error("persistent kernel aborted (a wait passed 10 s): $ab"))
+    BALST[] = (R, bh[BWD+1:BWD+NBW])
     toks = [[Int(unsafe_load(Ptr{Int32}(PE.hx.c + PE.hx.tok), ooff[r] + i)) for i in 1:reqs[r][2]] for r in 1:nr]
     toks, res, tpre, tdec
 end
@@ -1734,6 +1853,10 @@ if !isdefined(Main, :DPMLOCK)
 end
 if !isdefined(Main, :SPEC)
     const SPEC = Ref(true)                                 # decode with MTP drafts (spec 0 | 1)
+end
+if !isdefined(Main, :BAL)
+    const BAL = Ref(true)                                  # the FFN load balance on | off (bal 0 | 1)
+    const BALST = Ref{Any}(nothing)                       # (R, the balance words BWD ..) after the last request
 end
 if !isdefined(Main, :ACC)
     const ACC = Ref((0, 0))                                # the last request's accepted and drafted counts
@@ -1889,6 +2012,8 @@ function handle(c, line)
         DPMLOCK[] = a[2] == "1"; println(c, "dpm ", DPMLOCK[])
     elseif a[1] == "spec"                                # spec 0 | 1: MTP drafting off or on
         SPEC[] = a[2] == "1"; println(c, "spec ", SPEC[])
+    elseif a[1] == "bal"                                 # bal 0 | 1: the FFN load balance off (every die its own units) or on
+        BAL[] = a[2] == "1"; BALST[] = nothing; println(c, "bal ", BAL[])
     elseif a[1] == "reload"
         Base.include(Main, s.file); Base.invokelatest(pinit); println(c, "reloaded ", s.file)
     elseif a[1] == "eval"
