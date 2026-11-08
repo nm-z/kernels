@@ -1,16 +1,6 @@
 # sentry's ai-mux (~/.config/ai-mux/ai-mux.yaml there)
 listen: 0.0.0.0:18100
 socket: /run/user/1000/ai-mux.sock
-endpoints:
-  qwen3.8-27b:
-    up: true
-    gguf: /data/models/qwen3.8-27b-q5/Qwen3.8-27B.Q5_K_M.gguf
-    ctx: 262144
-    efforts: [none, low, medium, high, xhigh]
-    vision: false
-    device: sentry 4x Radeon Pro V340 (gfx900)
-    command: [/usr/bin/julia, -t, "24", qwen3.8-27b.jl, --model, /data/models/qwen3.8-27b-q5/Qwen3.8-27B.Q5_K_M.gguf, --console, /data/models/q27/console.sock]
-    cwd: /data/models/q27
-    env: {JULIA_DEPOT_PATH: /data/julia-depot}
-    post_stop: [sh, -c, "for f in /sys/class/drm/card*/device/power_dpm_force_performance_level; do echo auto > $f; done"]
-    restart: on-failure
+services_dir: /data/ai-mux/services      # a checkout of codex/services
+services:
+  qwen3.8-27b: {up: true}

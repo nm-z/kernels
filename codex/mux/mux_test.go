@@ -122,9 +122,19 @@ func TestResponsesStreaming(t *testing.T) {
 		if (o["phase"] != "prefill" && o["phase"] != "decode") || pf["total"] == nil || pf["done"] == nil || pf["tps"] == nil || dc["tokens"] == nil || dc["tps"] == nil || o["ctx"] != float64(100000) {
 			t.Errorf("stats %d: %s", i, ev.Data)
 		}
-		if _, has := o["idle_pct"]; has != (i == len(stats)-1) {
-			t.Errorf("stats %d idle_pct presence = %v: %s", i, has, ev.Data)
+		// idle_pct is on every update: null until the engine has one, then live, then the final value
+		if v, has := o["idle_pct"]; !has || (i == len(stats)-1 && v != 4.2) {
+			t.Errorf("stats %d idle_pct = %v (present %v): %s", i, v, has, ev.Data)
 		}
+	}
+	sawLive := false
+	for _, ev := range stats[1 : len(stats)-1] {
+		if ev.obj()["idle_pct"] == 3.5 {
+			sawLive = true
+		}
+	}
+	if stats[0].obj()["idle_pct"] != nil || !sawLive {
+		t.Errorf("idle_pct should be null at first and then live (3.5): first %s", stats[0].Data)
 	}
 	lastStats := stats[len(stats)-1].obj()
 	if lastStats["idle_pct"] != 4.2 || lastStats["decode"].(map[string]any)["tps"] != 67.8 || lastStats["prefill"].(map[string]any)["tps"] != 1234.5 || lastStats["phase"] != "decode" {
@@ -171,11 +181,11 @@ func TestResponsesStreaming(t *testing.T) {
 	}
 
 	// the endpoint shows the last run
-	waitFor(t, 2*time.Second, "endpoint back to up", func() bool { return e.srv.Endpoint("m1").Info().State == StateUp })
-	var eps struct{ Data []EndpointInfo }
-	e.getJSON("/v1/endpoints", &eps)
+	waitFor(t, 2*time.Second, "endpoint back to up", func() bool { return e.srv.Service("m1").Info().State == StateUp })
+	var eps struct{ Data []ServiceInfo }
+	e.getJSON("/v1/services", &eps)
 	in := eps.Data[0]
-	if in.Name != "m1" || in.State != "up" || in.Last == nil || in.Last.PrefillTPS != 1234.5 || in.Last.DecodeTPS != 67.8 || in.Last.IdlePct != 4.2 ||
+	if in.Name != "m1" || in.State != "up" || in.Last == nil || in.Last.PrefillTPS == nil || *in.Last.PrefillTPS != 1234.5 || *in.Last.DecodeTPS != 67.8 || *in.Last.IdlePct != 4.2 ||
 		in.PID == 0 || in.Ctx != 100000 || in.Slots != 1 || in.Device != "test device" || in.Since == "" || !strings.HasSuffix(in.Log, "m1.log") {
 		t.Errorf("endpoint info %+v", in)
 	}
@@ -194,7 +204,7 @@ drain:
 			break drain
 		}
 	}
-	for _, typ := range []string{"run.start", "run.prefill", "run.stats", "run.tokens", "run.end", "endpoint.state"} {
+	for _, typ := range []string{"run.start", "run.prefill", "run.stats", "run.tokens", "run.end", "service.state"} {
 		if seen[typ] == 0 {
 			t.Errorf("no %s event (saw %v)", typ, seen)
 		}
@@ -324,16 +334,16 @@ func TestCancelOnClientDisconnect(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no output")
 	}
-	waitFor(t, 3*time.Second, "endpoint busy", func() bool { return e.srv.Endpoint("h").Info().State == StateBusy })
+	waitFor(t, 3*time.Second, "endpoint busy", func() bool { return e.srv.Service("h").Info().State == StateBusy })
 	cancel()
 	resp.Body.Close()
 	waitFor(t, 5*time.Second, "engine to receive cancel", func() bool { return strings.Contains(e.readOut("cancel"), "r1") })
 	waitFor(t, 5*time.Second, "engine to stop the run", func() bool { return strings.Contains(e.readOut("cancelled"), "yes") })
 	waitFor(t, 5*time.Second, "endpoint idle again", func() bool {
-		in := e.srv.Endpoint("h").Info()
+		in := e.srv.Service("h").Info()
 		return in.State == StateUp && in.Active == 0
 	})
-	if st := e.srv.Endpoint("h").Info(); st.Reason != "" {
+	if st := e.srv.Service("h").Info(); st.Reason != "" {
 		t.Errorf("a cancelled run marked the endpoint: %+v", st)
 	}
 	// the endpoint takes the next request
@@ -358,7 +368,7 @@ func TestRule5(t *testing.T) {
 			e.waitState("bad", StateUp, 10*time.Second)
 			sub := e.srv.Hub().Subscribe()
 			defer e.srv.Hub().Unsubscribe(sub)
-			pid := e.srv.Endpoint("bad").Info().PID
+			pid := e.srv.Service("bad").Info().PID
 
 			resp := e.post("/v1/responses", `{"model":"bad","stream":true,"input":"hi"}`)
 			res := readSSE(t, resp.Body)
@@ -370,11 +380,11 @@ func TestRule5(t *testing.T) {
 			if !strings.Contains(in.Reason, "rule 5") || !strings.Contains(in.Reason, c.why) {
 				t.Errorf("reason %q", in.Reason)
 			}
-			// visible in /v1/endpoints …
-			var eps struct{ Data []EndpointInfo }
-			e.getJSON("/v1/endpoints", &eps)
+			// visible in /v1/services …
+			var eps struct{ Data []ServiceInfo }
+			e.getJSON("/v1/services", &eps)
 			if eps.Data[0].State != "failed" || !strings.Contains(eps.Data[0].Reason, c.why) || eps.Data[0].Slots != 0 {
-				t.Errorf("/v1/endpoints: %+v", eps.Data[0])
+				t.Errorf("/v1/services: %+v", eps.Data[0])
 			}
 			// … and in /v1/events
 			found := false
@@ -382,7 +392,7 @@ func TestRule5(t *testing.T) {
 			for {
 				select {
 				case ev := <-sub.C:
-					if ev.Type == "endpoint.state" && strings.Contains(string(ev.Data), `"state":"failed"`) && strings.Contains(string(ev.Data), c.why) {
+					if ev.Type == "service.state" && strings.Contains(string(ev.Data), `"state":"failed"`) && strings.Contains(string(ev.Data), c.why) {
 						found = true
 					}
 				default:
@@ -399,7 +409,7 @@ func TestRule5(t *testing.T) {
 				t.Errorf("request to a failed endpoint: %d %s", resp.StatusCode, readBody(t, resp))
 			}
 			// the other endpoint is unaffected
-			if e.srv.Endpoint("good").Info().State != StateUp {
+			if e.srv.Service("good").Info().State != StateUp {
 				t.Error("other endpoint affected")
 			}
 		})
@@ -472,7 +482,7 @@ func TestEngineErrorFailsResponse(t *testing.T) {
 		t.Fatalf("events %v", res.events)
 	}
 	// a run error does not drop the engine
-	if st := e.srv.Endpoint("m").Info().State; st != StateUp {
+	if st := e.srv.Service("m").Info().State; st != StateUp {
 		t.Errorf("state %s", st)
 	}
 	resp = e.post("/v1/responses", `{"model":"m","input":"hi"}`)
@@ -496,8 +506,8 @@ func TestQueueOneSlot(t *testing.T) {
 			resp.Body.Close()
 		}()
 	}
-	waitFor(t, 3*time.Second, "two requests to queue", func() bool { return e.srv.Endpoint("q").Info().Queued == 2 })
-	if in := e.srv.Endpoint("q").Info(); in.Active != 1 || in.State != StateBusy {
+	waitFor(t, 3*time.Second, "two requests to queue", func() bool { return e.srv.Service("q").Info().Queued == 2 })
+	if in := e.srv.Service("q").Info(); in.Active != 1 || in.State != StateBusy {
 		t.Errorf("info %+v", in)
 	}
 	wg.Wait()
@@ -522,9 +532,9 @@ func TestTwoSlotsRunTogether(t *testing.T) {
 			resp.Body.Close()
 		}()
 	}
-	waitFor(t, 3*time.Second, "two active runs", func() bool { return e.srv.Endpoint("q").Info().Active == 2 })
+	waitFor(t, 3*time.Second, "two active runs", func() bool { return e.srv.Service("q").Info().Active == 2 })
 	wg.Wait()
-	if e.srv.Endpoint("q").Info().Slots != 2 {
+	if e.srv.Service("q").Info().Slots != 2 {
 		t.Error("slots not reported")
 	}
 }
@@ -540,7 +550,7 @@ func TestUnknownPeerCannotRegister(t *testing.T) {
 		}
 	}
 	// and the real engine is still the endpoint's
-	if st := e.srv.Endpoint("m").Info(); st.State != StateUp {
+	if st := e.srv.Service("m").Info(); st.State != StateUp {
 		t.Errorf("state %s", st.State)
 	}
 }
@@ -551,7 +561,7 @@ func TestPositionsBelowCtxRefused(t *testing.T) {
 	if !strings.Contains(in.Reason, "exit code 3") {
 		t.Errorf("reason %q", in.Reason)
 	}
-	if got := e.readOut("refused"); !strings.Contains(got, "positions 10 is less than the endpoint's ctx") {
+	if got := e.readOut("refused"); !strings.Contains(got, "positions 10 is less than the service's ctx") {
 		t.Errorf("engine was told %q", got)
 	}
 }
@@ -582,10 +592,10 @@ func TestRestartNoStaysFailedUntilUp(t *testing.T) {
 	syscallKill(in.PID)
 	e.waitState("m", StateFailed, 3*time.Second)
 	time.Sleep(600 * time.Millisecond) // longer than the backoff
-	if st := e.srv.Endpoint("m").Info().State; st != StateFailed {
+	if st := e.srv.Service("m").Info().State; st != StateFailed {
 		t.Fatalf("restarted with restart: no (%s)", st)
 	}
-	resp := e.post("/v1/endpoints/m/up", "")
+	resp := e.post("/v1/services/m/up", "")
 	resp.Body.Close()
 	e.waitState("m", StateUp, 10*time.Second)
 }
@@ -595,7 +605,9 @@ func TestDownKillsEverythingAndRewritesYAML(t *testing.T) {
 	cfgPath := filepath.Join(dir, "ai-mux.yaml")
 	out := filepath.Join(dir, "out")
 	os.MkdirAll(out, 0o755)
-	yaml := "# test\nlisten: 127.0.0.1:0\nsocket: " + filepath.Join(dir, "s.sock") + "\nendpoints:\n  m:\n    up: true # keep\n    gguf: fake.gguf\n    ctx: 1000\n    command: [" + os.Args[0] + "]\n    env: {AIMUX_FAKE_ENGINE: spawn, AIMUX_FAKE_OUT: " + out + "}\n    post_stop: [sh, -c, \"echo stopped > " + filepath.Join(out, "post_stop") + "\"]\n    restart: no\n"
+	svc := "kind: engine\ngguf: fake.gguf\nctx: 1000\ncommand: [" + os.Args[0] + "]\nenv: {AIMUX_FAKE_ENGINE: spawn, AIMUX_FAKE_OUT: " + out + "}\npost_stop: [sh, -c, \"echo stopped > " + filepath.Join(out, "post_stop") + "\"]\nrestart: no\n"
+	writeService(t, filepath.Join(dir, "svcs"), "m", svc)
+	yaml := "# test\nlisten: 127.0.0.1:0\nsocket: " + filepath.Join(dir, "s.sock") + "\nservices_dir: svcs\nservices:\n  m: {up: true} # keep\n"
 	os.WriteFile(cfgPath, []byte(yaml), 0o644)
 	cfg, err := LoadConfig(cfgPath)
 	if err != nil {
@@ -609,7 +621,7 @@ func TestDownKillsEverythingAndRewritesYAML(t *testing.T) {
 	if !pidAlive(child) || !pidAlive(in.PID) {
 		t.Fatalf("engine %d / child %d not running", in.PID, child)
 	}
-	resp := e.post("/v1/endpoints/m/down", "")
+	resp := e.post("/v1/services/m/down", "")
 	if resp.StatusCode != 200 {
 		t.Fatalf("down: %d %s", resp.StatusCode, readBody(t, resp))
 	}
@@ -620,10 +632,10 @@ func TestDownKillsEverythingAndRewritesYAML(t *testing.T) {
 	}
 	waitFor(t, 3*time.Second, "post_stop", func() bool { return strings.Contains(e.readOut("post_stop"), "stopped") })
 	b, _ := os.ReadFile(cfgPath)
-	if !strings.Contains(string(b), "up: false # keep") || !strings.Contains(string(b), "# test") {
+	if !strings.Contains(string(b), "{up: false} # keep") || !strings.Contains(string(b), "# test") {
 		t.Errorf("yaml:\n%s", b)
 	}
-	if st := e.srv.Endpoint("m").Info(); st.Up || st.PID != 0 {
+	if st := e.srv.Service("m").Info(); st.Up || st.PID != 0 {
 		t.Errorf("info %+v", st)
 	}
 	// requests to a down endpoint: 503
@@ -633,14 +645,14 @@ func TestDownKillsEverythingAndRewritesYAML(t *testing.T) {
 	}
 	resp.Body.Close()
 	// and up brings it back
-	resp = e.post("/v1/endpoints/m/up", "")
+	resp = e.post("/v1/services/m/up", "")
 	resp.Body.Close()
 	in2 := e.waitState("m", StateUp, 10*time.Second)
 	if in2.PID == in.PID {
 		t.Error("same pid after up")
 	}
 	b, _ = os.ReadFile(cfgPath)
-	if !strings.Contains(string(b), "up: true # keep") {
+	if !strings.Contains(string(b), "{up: true} # keep") {
 		t.Errorf("yaml after up:\n%s", b)
 	}
 	// shutdown stops everything
@@ -648,7 +660,7 @@ func TestDownKillsEverythingAndRewritesYAML(t *testing.T) {
 	if pidAlive(in2.PID) {
 		t.Error("engine survived shutdown")
 	}
-	for _, r := range []struct{ method, path string }{{"GET", "/v1/endpoints/zzz/up"}, {"POST", "/v1/endpoints/zzz/up"}, {"POST", "/v1/endpoints/m/sideways"}} {
+	for _, r := range []struct{ method, path string }{{"GET", "/v1/services/zzz/up"}, {"POST", "/v1/services/zzz/up"}, {"POST", "/v1/services/m/sideways"}} {
 		req, _ := http.NewRequest(r.method, e.base+r.path, nil)
 		if resp, err := http.DefaultClient.Do(req); err == nil {
 			resp.Body.Close()
@@ -689,7 +701,7 @@ func TestEventsStream(t *testing.T) {
 				t.Errorf("token text leaked into /v1/events: %s", ev.Data)
 			}
 		}
-		if have["snapshot"] != 1 || have["run.start"] != 1 || have["run.end"] != 1 || have["run.prefill"] < 2 || have["run.tokens"] < 1 || have["endpoint.state"] < 2 {
+		if have["snapshot"] != 1 || have["run.start"] != 1 || have["run.end"] != 1 || have["run.prefill"] < 2 || have["run.tokens"] < 1 || have["service.state"] < 2 {
 			t.Errorf("observer %d saw %v", i, have)
 		}
 	}

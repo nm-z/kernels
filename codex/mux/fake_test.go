@@ -20,7 +20,16 @@ import (
 // AIMUX_FAKE_ENGINE=<scenario>; TestMain turns that into fakeEngine().
 func TestMain(m *testing.M) {
 	if sc := os.Getenv("AIMUX_FAKE_ENGINE"); sc != "" {
-		fakeEngine(sc)
+		switch os.Getenv("AIMUX_FAKE_KIND") {
+		case KindShim:
+			fakeShim(sc)
+		case KindEmbed:
+			fakeEmbed(sc)
+		case KindJob:
+			fakeJob(sc)
+		default:
+			fakeEngine(sc)
+		}
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
@@ -246,7 +255,7 @@ func fakeEngine(scenario string) {
 		note("child.pid", strconv.Itoa(child.Process.Pid)+"\n")
 	}
 	note("pid", strconv.Itoa(os.Getpid())+"\n")
-	send(map[string]any{"op": "register", "endpoint": os.Getenv("AI_MUX_ENDPOINT"), "positions": positions, "max_new": maxNew, "slots": slots, "vision": true})
+	send(map[string]any{"op": "register", "service": os.Getenv("AI_MUX_SERVICE"), "kind": "engine", "positions": positions, "max_new": maxNew, "slots": slots, "vision": true})
 
 	br := bufio.NewReaderSize(conn, 1<<20)
 	var mu sync.Mutex
@@ -361,6 +370,8 @@ func fakeRunOne(scenario string, model Model, r *fakeRun, send func(map[string]a
 				send(map[string]any{"op": "stats", "id": r.id, "prefill_tps": 100.0, "decode_tps": 10.0})
 			}
 		}
+	case "summary":
+		ids, _ = model.Encode("Summary: weather in Paris, 3 days.<|im_end|>")
 	case "maxnew":
 		for i := 0; i < r.maxNew; i++ {
 			ids = append(ids, 'a')
@@ -394,7 +405,11 @@ func fakeRunOne(scenario string, model Model, r *fakeRun, send func(map[string]a
 		}
 		send(map[string]any{"op": "tokens", "id": r.id, "ids": ids[i:j]})
 		if scenario != "nostats" && (i/chunk)%3 == 0 {
-			send(map[string]any{"op": "stats", "id": r.id, "prefill_tps": 1234.5, "decode_tps": float64(i+1) / time.Since(start).Seconds()})
+			var idle any // null at first: the engine has no idle % yet
+			if i > 0 {
+				idle = 3.5
+			}
+			send(map[string]any{"op": "stats", "id": r.id, "prefill_tps": 1234.5, "decode_tps": float64(i+1) / time.Since(start).Seconds(), "idle_pct": idle})
 		}
 		time.Sleep(delay)
 	}

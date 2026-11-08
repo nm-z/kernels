@@ -24,6 +24,7 @@ type epSpec struct {
 	restart  string
 	slots    int
 	maxNew   int
+	kind     string // engine (default), shim, embed, job
 	postStop []string
 	efforts  []string
 	extraEnv map[string]string
@@ -89,8 +90,19 @@ func startMuxOpts(t *testing.T, opts Options, specs ...epSpec) *tenv {
 		if gguf == "" {
 			gguf = "fake.gguf"
 		}
-		cfg.Endpoints = append(cfg.Endpoints, &EndpointConfig{
-			Name: sp.name, Up: true, GGUF: gguf, Ctx: ctxN, Efforts: efforts, Vision: true,
+		kind := sp.kind
+		if kind == "" {
+			kind = KindEngine
+		}
+		env["AIMUX_FAKE_KIND"] = kind
+		if kind == KindEmbed || kind == KindJob {
+			ctxN, efforts, gguf = 0, nil, ""
+		}
+		if kind == KindShim {
+			gguf = ""
+		}
+		cfg.Services = append(cfg.Services, &ServiceConfig{
+			Name: sp.name, Dir: dir, Up: true, Kind: kind, GGUF: gguf, Ctx: ctxN, Efforts: efforts, Vision: kind == KindEngine || kind == KindShim,
 			Device: "test device", Command: []string{os.Args[0]}, Cwd: dir, Env: env, PostStop: sp.postStop, Restart: restart,
 		})
 	}
@@ -105,6 +117,12 @@ func startMuxOpts(t *testing.T, opts Options, specs ...epSpec) *tenv {
 	}
 	if opts.LoadModel == nil {
 		opts.LoadModel = func(string) (Model, error) { return fakeModel{}, nil }
+	}
+	if opts.JobProgressEvery == 0 {
+		opts.JobProgressEvery = 400 * time.Millisecond
+	}
+	if opts.JobFinishGrace == 0 {
+		opts.JobFinishGrace = 3 * time.Second
 	}
 	if opts.MinBackoff == 0 {
 		opts.MinBackoff = 200 * time.Millisecond
@@ -122,12 +140,12 @@ func startMuxOpts(t *testing.T, opts Options, specs ...epSpec) *tenv {
 	return &tenv{t: t, srv: srv, base: "http://" + srv.Addr(), dir: dir, out: out}
 }
 
-func (e *tenv) waitState(name, state string, d time.Duration) EndpointInfo {
+func (e *tenv) waitState(name, state string, d time.Duration) ServiceInfo {
 	e.t.Helper()
 	deadline := time.Now().Add(d)
-	var in EndpointInfo
+	var in ServiceInfo
 	for time.Now().Before(deadline) {
-		in = e.srv.Endpoint(name).Info()
+		in = e.srv.Service(name).Info()
 		if in.State == state {
 			return in
 		}
@@ -143,6 +161,7 @@ func (e *tenv) readOut(name string) string {
 }
 
 type sseEvent struct {
+	ID   string
 	Name string
 	Data json.RawMessage
 	At   time.Time
@@ -186,6 +205,8 @@ func readSSE(t *testing.T, body io.Reader) sseResult {
 			cur = sseEvent{}
 		case strings.HasPrefix(line, ":"):
 			res.keepalives++
+		case strings.HasPrefix(line, "id: "):
+			cur.ID = line[len("id: "):]
 		case strings.HasPrefix(line, "event: "):
 			cur.Name = line[len("event: "):]
 			cur.At = time.Now()

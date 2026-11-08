@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-func testEndpoint() *Endpoint {
-	return &Endpoint{name: "m", cfg: &EndpointConfig{Name: "m", Ctx: 1000, Vision: true, Efforts: defaultEfforts}}
+func testEndpoint() *ServiceConfig {
+	return &ServiceConfig{Name: "m", Kind: KindEngine, Ctx: 1000, Vision: true, Efforts: defaultEfforts}
 }
 
 func prep(t *testing.T, body string) *prepared {
@@ -126,11 +126,11 @@ func TestConvertImages(t *testing.T) {
 	if len(p.images) != 1 || string(p.images[0].bytes) != "\x89PNGfake" || len(p.images[0].hash) != 64 {
 		t.Fatalf("images %+v", p.images)
 	}
-	if got := msgsJSON(p); got != `[{"role":"user","content":[{"text":"see","type":"text"},{"type":"image"}]}]` {
+	if got := msgsJSON(p); got != `[{"role":"user","content":[{"text":"see","type":"text"},{"img":"`+hashBytes([]byte("\x89PNGfake"))+`","type":"image"}]}]` {
 		t.Errorf("messages %s", got)
 	}
 	ep := testEndpoint()
-	ep.cfg.Vision = false
+	ep.Vision = false
 	if _, err := prepare([]byte(`{"model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,`+png+`"}]}]}`), ep); err == nil || err.Code != "images_not_supported" {
 		t.Errorf("image on a text-only endpoint: %v", err)
 	}

@@ -52,7 +52,7 @@ func TestSystemdScopes(t *testing.T) {
 	}
 
 	// down: the scope is stopped, which kills the engine and its child
-	resp := e.post("/v1/endpoints/"+name+"/down", "")
+	resp := e.post("/v1/services/"+name+"/down", "")
 	resp.Body.Close()
 	e.waitState(name, StateDown, 20*time.Second)
 	if pidAlive(in.PID) || pidAlive(child) {
@@ -61,7 +61,7 @@ func TestSystemdScopes(t *testing.T) {
 	if out, _ := exec.Command("systemctl", "--user", "is-active", scope).Output(); strings.TrimSpace(string(out)) == "active" {
 		t.Error("scope still active after down")
 	}
-	resp = e.post("/v1/endpoints/"+name+"/up", "")
+	resp = e.post("/v1/services/"+name+"/up", "")
 	resp.Body.Close()
 	in = e.waitState(name, StateUp, 15*time.Second)
 	waitFor(t, 3*time.Second, "child pid", func() bool { return len(strings.Fields(e.readOut("child.pid"))) == 2 })

@@ -1,6 +1,7 @@
 package mux
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -91,4 +92,37 @@ func sortStrings(s []string) { sort.Strings(s) }
 func hashBytes(b []byte) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
+}
+
+func mustJSON(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return []byte("null")
+	}
+	return b
+}
+
+func jsonMarshal(v any) ([]byte, error) { return json.Marshal(v) }
+
+// toolArgsText is a tool_call's arguments as JSON text: a shim may send the text itself (a JSON string)
+// or the object.
+func toolArgsText(raw json.RawMessage) string {
+	t := bytes.TrimSpace(raw)
+	if len(t) == 0 || bytes.Equal(t, []byte("null")) {
+		return "{}"
+	}
+	if t[0] == '"' {
+		var s string
+		if json.Unmarshal(t, &s) == nil {
+			if strings.TrimSpace(s) == "" {
+				return "{}"
+			}
+			return s
+		}
+	}
+	var buf bytes.Buffer
+	if json.Compact(&buf, t) == nil {
+		return buf.String()
+	}
+	return string(t)
 }

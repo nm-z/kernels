@@ -10,10 +10,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// EndpointConfig is one entry of ai-mux.yaml's endpoints.
-type EndpointConfig struct {
+// Service kinds (PROTOCOL.md).
+const (
+	KindEngine = "engine"
+	KindShim   = "shim"
+	KindEmbed  = "embed"
+	KindJob    = "job"
+)
+
+// ServiceConfig is one service: its service.yaml, plus its desired state from the host file.
+type ServiceConfig struct {
 	Name     string            `yaml:"-"`
-	Up       bool              `yaml:"up"`
+	Dir      string            `yaml:"-"` // the service folder (services_dir/NAME)
+	Up       bool              `yaml:"-"` // desired state, from the host file
+	Kind     string            `yaml:"kind"`
 	GGUF     string            `yaml:"gguf"`
 	Ctx      int               `yaml:"ctx"`
 	Efforts  []string          `yaml:"efforts"`
@@ -26,23 +36,101 @@ type EndpointConfig struct {
 	Restart  string            `yaml:"restart"`
 }
 
-// Config is ai-mux.yaml.
+// Config is a host's ai-mux.yaml with the services it names loaded from services_dir.
 type Config struct {
-	Listen    string
-	Socket    string
-	Endpoints []*EndpointConfig // in file order
-	Path      string            // where it was read from ("" for a built one)
+	Listen      string
+	Socket      string
+	ServicesDir string
+	Services    []*ServiceConfig // in host-file order
+	Path        string           // where the host file was read from ("" for a built one)
 }
 
 var defaultEfforts = []string{"none", "low", "medium", "high", "xhigh"}
 
-// LoadConfig reads and validates a compose file.
+// hostFile is ai-mux.yaml as written.
+type hostFile struct {
+	Listen      string    `yaml:"listen"`
+	Socket      string    `yaml:"socket"`
+	ServicesDir string    `yaml:"services_dir"`
+	Services    yaml.Node `yaml:"services"`
+}
+
+// HostService is one entry of the host file's services.
+type HostService struct {
+	Name string
+	Up   bool
+}
+
+// Host is the host file alone (what the CLI and the tests of the file need).
+type Host struct {
+	Listen      string
+	Socket      string
+	ServicesDir string
+	Services    []HostService
+}
+
+// ParseHost reads the text of a host file. Relative services_dir is resolved against base (the
+// directory of the file).
+func ParseHost(b []byte, base string) (*Host, error) {
+	var raw hostFile
+	if err := yaml.NewDecoder(bytes.NewReader(b)).Decode(&raw); err != nil {
+		return nil, err
+	}
+	home, _ := os.UserHomeDir()
+	h := &Host{Listen: raw.Listen, Socket: expandHome(raw.Socket, home), ServicesDir: expandHome(raw.ServicesDir, home)}
+	if h.Listen == "" {
+		h.Listen = "127.0.0.1:18100"
+	}
+	if h.Socket == "" {
+		d := os.Getenv("XDG_RUNTIME_DIR")
+		if d == "" {
+			return nil, fmt.Errorf("socket: not set and there is no XDG_RUNTIME_DIR")
+		}
+		h.Socket = filepath.Join(d, "ai-mux.sock")
+	}
+	if h.ServicesDir == "" {
+		return nil, fmt.Errorf("services_dir: required (the folder holding NAME/service.yaml)")
+	}
+	if !filepath.IsAbs(h.ServicesDir) && base != "" {
+		h.ServicesDir = filepath.Join(base, h.ServicesDir)
+	}
+	if raw.Services.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("services: want a mapping of name to {up: bool}")
+	}
+	seen := map[string]bool{}
+	for i := 0; i+1 < len(raw.Services.Content); i += 2 {
+		name := raw.Services.Content[i].Value
+		if name == "" || strings.ContainsAny(name, "/ \t\n") || name == "." || name == ".." {
+			return nil, fmt.Errorf("services.%s: the name must not contain slashes or spaces", name)
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("services.%s: defined twice", name)
+		}
+		seen[name] = true
+		var v struct {
+			Up bool `yaml:"up"`
+		}
+		if n := raw.Services.Content[i+1]; !(n.Kind == yaml.ScalarNode && n.Tag == "!!null") {
+			if err := n.Decode(&v); err != nil {
+				return nil, fmt.Errorf("services.%s: %w", name, err)
+			}
+		}
+		h.Services = append(h.Services, HostService{Name: name, Up: v.Up})
+	}
+	return h, nil
+}
+
+// LoadConfig reads the host file and every service it names.
 func LoadConfig(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	c, err := ParseConfig(b)
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	c, err := loadConfig(b, filepath.Dir(abs))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -50,74 +138,90 @@ func LoadConfig(path string) (*Config, error) {
 	return c, nil
 }
 
-// ParseConfig parses and validates a compose file's text.
-func ParseConfig(b []byte) (*Config, error) {
-	var raw struct {
-		Listen    string    `yaml:"listen"`
-		Socket    string    `yaml:"socket"`
-		Endpoints yaml.Node `yaml:"endpoints"`
-	}
-	dec := yaml.NewDecoder(bytes.NewReader(b))
-	if err := dec.Decode(&raw); err != nil {
+// ParseConfig is LoadConfig for host-file text; relative services_dir is relative to the current directory.
+func ParseConfig(b []byte) (*Config, error) { return loadConfig(b, "") }
+
+func loadConfig(b []byte, base string) (*Config, error) {
+	h, err := ParseHost(b, base)
+	if err != nil {
 		return nil, err
 	}
-	home, _ := os.UserHomeDir()
-	c := &Config{Listen: raw.Listen, Socket: expandHome(raw.Socket, home)}
-	if c.Listen == "" {
-		c.Listen = "127.0.0.1:18100"
-	}
-	if c.Socket == "" {
-		if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
-			c.Socket = filepath.Join(d, "ai-mux.sock")
-		} else {
-			return nil, fmt.Errorf("socket: not set and there is no XDG_RUNTIME_DIR")
+	c := &Config{Listen: h.Listen, Socket: h.Socket, ServicesDir: h.ServicesDir}
+	for _, hs := range h.Services {
+		sc, err := LoadService(h.ServicesDir, hs.Name)
+		if err != nil {
+			return nil, err
 		}
-	}
-	if raw.Endpoints.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("endpoints: want a mapping of name to endpoint")
-	}
-	seen := map[string]bool{}
-	for i := 0; i+1 < len(raw.Endpoints.Content); i += 2 {
-		name := raw.Endpoints.Content[i].Value
-		e := &EndpointConfig{Name: name}
-		if err := raw.Endpoints.Content[i+1].Decode(e); err != nil {
-			return nil, fmt.Errorf("endpoints.%s: %w", name, err)
-		}
-		if seen[name] {
-			return nil, fmt.Errorf("endpoints.%s: defined twice", name)
-		}
-		seen[name] = true
-		if strings.ContainsAny(name, "/ \t\n") || name == "" {
-			return nil, fmt.Errorf("endpoints.%s: the name must not contain slashes or spaces", name)
-		}
-		e.GGUF = expandHome(e.GGUF, home)
-		e.Cwd = expandHome(e.Cwd, home)
-		if e.GGUF == "" {
-			return nil, fmt.Errorf("endpoints.%s.gguf: required (tokenizer and chat template)", name)
-		}
-		if e.Ctx < 1 {
-			return nil, fmt.Errorf("endpoints.%s.ctx: required", name)
-		}
-		if len(e.Command) == 0 {
-			return nil, fmt.Errorf("endpoints.%s.command: required", name)
-		}
-		if len(e.Efforts) == 0 {
-			e.Efforts = append([]string(nil), defaultEfforts...)
-		}
-		switch e.Restart {
-		case "":
-			e.Restart = "on-failure"
-		case "on-failure", "no":
-		default:
-			return nil, fmt.Errorf("endpoints.%s.restart: %q is neither on-failure nor no", name, e.Restart)
-		}
-		c.Endpoints = append(c.Endpoints, e)
+		sc.Up = hs.Up
+		c.Services = append(c.Services, sc)
 	}
 	return c, nil
 }
 
-// SetUpInFile rewrites `up:` of one endpoint in the compose file, keeping the rest of it (comments,
-// order) as yaml.v3 allows. The write is atomic.
+// LoadService reads services_dir/NAME/service.yaml.
+func LoadService(servicesDir, name string) (*ServiceConfig, error) {
+	dir := filepath.Join(servicesDir, name)
+	file := filepath.Join(dir, "service.yaml")
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return nil, fmt.Errorf("service %s: %w", name, err)
+	}
+	s, err := ParseService(name, dir, b)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", file, err)
+	}
+	return s, nil
+}
+
+// ParseService reads and validates the text of a service.yaml.
+func ParseService(name, dir string, b []byte) (*ServiceConfig, error) {
+	s := &ServiceConfig{Name: name, Dir: dir}
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	if err := dec.Decode(s); err != nil {
+		return nil, err
+	}
+	home, _ := os.UserHomeDir()
+	s.GGUF = expandHome(s.GGUF, home)
+	s.Cwd = expandHome(s.Cwd, home)
+	switch s.Kind {
+	case KindEngine, KindShim, KindEmbed, KindJob:
+	case "":
+		return nil, fmt.Errorf("kind: required (engine, shim, embed or job)")
+	default:
+		return nil, fmt.Errorf("kind: %q is none of engine, shim, embed, job", s.Kind)
+	}
+	if len(s.Command) == 0 {
+		return nil, fmt.Errorf("command: required")
+	}
+	if s.Kind == KindEngine && s.GGUF == "" {
+		return nil, fmt.Errorf("gguf: required for an engine (tokenizer and chat template)")
+	}
+	if (s.Kind == KindEngine || s.Kind == KindShim) && s.Ctx < 1 {
+		return nil, fmt.Errorf("ctx: required for an engine or shim (the context window broadcast to clients)")
+	}
+	if (s.Kind == KindEngine || s.Kind == KindShim) && len(s.Efforts) == 0 {
+		s.Efforts = append([]string(nil), defaultEfforts...)
+	}
+	switch s.Restart {
+	case "":
+		s.Restart = "on-failure"
+		if s.Kind == KindJob {
+			s.Restart = "no"
+		}
+	case "on-failure", "no":
+	default:
+		return nil, fmt.Errorf("restart: %q is neither on-failure nor no", s.Restart)
+	}
+	if s.Cwd == "" {
+		s.Cwd = dir
+	} else if !filepath.IsAbs(s.Cwd) && dir != "" {
+		s.Cwd = filepath.Join(dir, s.Cwd)
+	}
+	return s, nil
+}
+
+// SetUpInFile rewrites `up:` of one service in the host file, keeping the rest of it (comments, order)
+// as yaml.v3 allows. The write is atomic.
 func SetUpInFile(path, name string, up bool) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -130,20 +234,32 @@ func SetUpInFile(path, name string, up bool) error {
 	if doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
 		return fmt.Errorf("%s: not a mapping", path)
 	}
-	ep := mapGet(mapGet(doc.Content[0], "endpoints"), name)
-	if ep == nil || ep.Kind != yaml.MappingNode {
-		return fmt.Errorf("%s: no endpoint %q", path, name)
+	svcs := mapGet(doc.Content[0], "services")
+	var idx = -1
+	if svcs != nil && svcs.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(svcs.Content); i += 2 {
+			if svcs.Content[i].Value == name {
+				idx = i + 1
+			}
+		}
+	}
+	if idx < 0 {
+		return fmt.Errorf("%s: no service %q", path, name)
 	}
 	val := "false"
 	if up {
 		val = "true"
 	}
-	if n := mapGet(ep, "up"); n != nil {
+	entry := svcs.Content[idx]
+	if entry.Kind != yaml.MappingNode { // `NAME:` with nothing after it
+		*entry = yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Style: yaml.FlowStyle}
+	}
+	if n := mapGet(entry, "up"); n != nil {
 		n.Kind, n.Tag, n.Value, n.Style = yaml.ScalarNode, "!!bool", val, 0
 	} else {
 		k := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "up"}
 		v := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: val}
-		ep.Content = append([]*yaml.Node{k, v}, ep.Content...)
+		entry.Content = append([]*yaml.Node{k, v}, entry.Content...)
 	}
 	var out bytes.Buffer
 	enc := yaml.NewEncoder(&out)
@@ -175,7 +291,7 @@ func mapGet(m *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-// ReadListen reads only `listen:` of a compose file (what the CLI needs to find the daemon).
+// ReadListen reads only `listen:` of a host file (what the CLI needs to find the daemon).
 func ReadListen(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {

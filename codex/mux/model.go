@@ -56,3 +56,13 @@ func (c *modelCache) get(gguf string) (Model, error) {
 	}
 	return e.m, e.err
 }
+
+// noModel is the Model of a response that has no vocabulary (a shim's output arrives as text).
+type noModel struct{}
+
+func (noModel) Render(map[string]any) (string, error) { return "", nil }
+func (noModel) Encode(string) ([]uint32, error)       { return nil, nil }
+func (noModel) Piece(uint32) []byte                   { return nil }
+func (noModel) Hidden(uint32) bool                    { return false }
+func (noModel) Find(string) int                       { return -1 }
+func (noModel) EOS() uint32                           { return 0xffffffff }

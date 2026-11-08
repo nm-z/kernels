@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// proc is a running endpoint process. With systemd it lives in the transient scope
+// proc is a running service process. With systemd it lives in the transient scope
 // ai-mux-<name>.scope (BindsTo=ai-mux.service); without, it leads its own process group.
 type proc struct {
 	cmd    *exec.Cmd
@@ -32,11 +32,11 @@ type proc struct {
 
 var unitUnsafe = regexp.MustCompile(`[^A-Za-z0-9:_.-]`)
 
-func scopeName(endpoint string) string {
-	return "ai-mux-" + unitUnsafe.ReplaceAllString(endpoint, "_") + ".scope"
+func scopeName(service string) string {
+	return "ai-mux-" + unitUnsafe.ReplaceAllString(service, "_") + ".scope"
 }
 
-// useSystemd decides how endpoints are started: "systemd" always, "plain" never, "auto" (the
+// useSystemd decides how services are started: "systemd" always, "plain" never, "auto" (the
 // default) when ai-mux itself runs as ai-mux.service.
 func useSystemd(mode, unit string) bool {
 	switch mode {
@@ -93,8 +93,8 @@ func (p *proc) uptime() time.Duration {
 
 func (p *proc) exitDescription() string { return describeExit(p.err) }
 
-// startProc launches the endpoint's command.
-func (s *Server) startProc(e *Endpoint) (*proc, error) {
+// startProc launches the service's command.
+func (s *Server) startProc(e *Service) (*proc, error) {
 	if err := os.MkdirAll(s.logDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -103,8 +103,8 @@ func (s *Server) startProc(e *Endpoint) (*proc, error) {
 		return nil, err
 	}
 	cfg := e.cfg
-	env := append(os.Environ(), "AI_MUX_SOCK="+s.cfg.Socket, "AI_MUX_ENDPOINT="+e.name)
-	setenv := []string{"--setenv=AI_MUX_SOCK=" + s.cfg.Socket, "--setenv=AI_MUX_ENDPOINT=" + e.name}
+	env := append(os.Environ(), "AI_MUX_SOCK="+s.cfg.Socket, "AI_MUX_SERVICE="+e.name, "AI_MUX_SERVICE_DIR="+cfg.Dir)
+	setenv := []string{"--setenv=AI_MUX_SOCK=" + s.cfg.Socket, "--setenv=AI_MUX_SERVICE=" + e.name, "--setenv=AI_MUX_SERVICE_DIR=" + cfg.Dir}
 	keys := make([]string, 0, len(cfg.Env))
 	for k := range cfg.Env {
 		keys = append(keys, k)
@@ -192,8 +192,8 @@ func (p *proc) reap() {
 	syscall.Kill(-p.pid, syscall.SIGKILL)
 }
 
-// runPostStop runs the endpoint's post_stop command after its process is gone.
-func (s *Server) runPostStop(e *Endpoint, p *proc) {
+// runPostStop runs the service's post_stop command after its process is gone.
+func (s *Server) runPostStop(e *Service, p *proc) {
 	if len(e.cfg.PostStop) == 0 {
 		return
 	}
@@ -206,7 +206,7 @@ func (s *Server) runPostStop(e *Endpoint, p *proc) {
 	err := cmd.Run()
 	p.mark("post_stop: %s", describeExit(err))
 	if err != nil {
-		s.logf("endpoint %s: post_stop: %v", e.name, err)
+		s.logf("service %s: post_stop: %v", e.name, err)
 	}
 }
 
@@ -235,7 +235,7 @@ type syscallConn interface {
 	SyscallConn() (syscall.RawConn, error)
 }
 
-// inEndpoint reports whether pid is one of the processes ai-mux started for p: in its scope, or (no
+// inService reports whether pid is one of the processes ai-mux started for p: in its scope, or (no
 // systemd) its descendant.
 func (p *proc) contains(pid int) bool {
 	if p.scope != "" {

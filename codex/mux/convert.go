@@ -18,6 +18,7 @@ var refusedFields = []string{
 // imageData is one input_image: its bytes (from a data: URL) and its hash, in prompt order.
 type imageData struct {
 	hash  string
+	mime  string
 	bytes []byte
 }
 
@@ -35,10 +36,11 @@ type prepared struct {
 	model    string
 	stream   bool
 	effort   string
-	messages []any
+	messages []chatMsg // system first (all system and developer text folded into it)
 	tools    []any
 	toolInfo map[string]*toolInfo
 	images   []imageData
+	compact  bool // the input ended in compaction_trigger: the answer is a summary of the conversation
 }
 
 // chatFn / chatTool are the OpenAI chat tool shape, with a stable field order (it is part of the prompt).
@@ -75,8 +77,8 @@ func isNull(b json.RawMessage) bool {
 	return len(t) == 0 || bytes.Equal(t, []byte("null"))
 }
 
-// prepare validates a /v1/responses body against the endpoint and translates it.
-func prepare(body []byte, ep *Endpoint) (*prepared, *apiError) {
+// prepare validates a /v1/responses body against the service and translates it.
+func prepare(body []byte, sc *ServiceConfig) (*prepared, *apiError) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(body, &top); err != nil {
 		return nil, badRequest("invalid_json", "", "the body is not a JSON object: %v", err)
@@ -114,19 +116,19 @@ func prepare(body []byte, ep *Endpoint) (*prepared, *apiError) {
 		if r.Effort != nil && *r.Effort != "" {
 			p.effort = *r.Effort
 			ok := false
-			for _, e := range ep.cfg.Efforts {
+			for _, e := range sc.Efforts {
 				if e == p.effort {
 					ok = true
 				}
 			}
 			if !ok {
 				return nil, badRequest("unsupported_reasoning_effort", "reasoning.effort",
-					"reasoning effort %q is not offered by %s (efforts: %s)", p.effort, ep.name, strings.Join(ep.cfg.Efforts, ", "))
+					"reasoning effort %q is not offered by %s (efforts: %s)", p.effort, sc.Name, strings.Join(sc.Efforts, ", "))
 			}
 		}
 	}
 
-	cb := &chatBuilder{vision: ep.cfg.Vision, tools: p.toolInfo}
+	cb := &chatBuilder{vision: sc.Vision, tools: p.toolInfo}
 	var instr string
 	if v, ok := top["instructions"]; ok && !isNull(v) {
 		if err := json.Unmarshal(v, &instr); err != nil {
@@ -168,6 +170,12 @@ func prepare(body []byte, ep *Endpoint) (*prepared, *apiError) {
 		if err := json.Unmarshal(inRaw, &items); err != nil {
 			return nil, badRequest("invalid_input", "input", "input must be a string or an array of items")
 		}
+		// a compaction_trigger ends the input; it asks for a summary instead of an answer
+		if n := len(items); n > 0 && itemType(items[n-1]) == "compaction_trigger" {
+			p.compact = true
+			items = items[:n-1]
+			cb.noImages = true
+		}
 		for i, it := range items {
 			if err := cb.addItem(it); err != nil {
 				err.Param = fmt.Sprintf("input[%d]", i)
@@ -179,14 +187,10 @@ func prepare(body []byte, ep *Endpoint) (*prepared, *apiError) {
 	if len(cb.msgs) == 0 {
 		return nil, badRequest("empty_input", "input", "input has no messages")
 	}
-	msgs := make([]any, 0, len(cb.msgs)+1)
 	if len(cb.system) > 0 {
-		msgs = append(msgs, chatMsg{Role: "system", Content: strings.Join(cb.system, "\n\n")})
+		p.messages = append(p.messages, chatMsg{Role: "system", Content: strings.Join(cb.system, "\n\n")})
 	}
-	for _, m := range cb.msgs {
-		msgs = append(msgs, m)
-	}
-	p.messages = msgs
+	p.messages = append(p.messages, cb.msgs...)
 	if !dropTools {
 		p.tools = cb.chatTools
 	}
@@ -194,11 +198,31 @@ func prepare(body []byte, ep *Endpoint) (*prepared, *apiError) {
 	return p, nil
 }
 
+// itemType is an input item's type ("message" for a bare role/content object).
+func itemType(raw json.RawMessage) string {
+	var it struct {
+		Type string `json:"type"`
+		Role string `json:"role"`
+	}
+	json.Unmarshal(raw, &it)
+	if it.Type == "" && it.Role != "" {
+		return "message"
+	}
+	return it.Type
+}
+
 // templateVars are the variables the chat template is rendered with.
-func (p *prepared) templateVars() map[string]any {
-	v := map[string]any{"messages": p.messages, "add_generation_prompt": true}
-	if len(p.tools) > 0 {
-		v["tools"] = p.tools
+func (p *prepared) templateVars() map[string]any { return p.varsFor(p.messages, p.tools) }
+
+// varsFor are the template variables for these messages and tools (the request's effort applies).
+func (p *prepared) varsFor(msgs []chatMsg, tools []any) map[string]any {
+	ms := make([]any, len(msgs))
+	for i := range msgs {
+		ms[i] = msgs[i]
+	}
+	v := map[string]any{"messages": ms, "add_generation_prompt": true}
+	if len(tools) > 0 {
+		v["tools"] = tools
 	}
 	switch p.effort {
 	case "":
@@ -226,6 +250,7 @@ type chatBuilder struct {
 	images    []imageData
 	tools     map[string]*toolInfo
 	chatTools []any
+	noImages  bool // compaction: images are not sent, the summary mentions them as text
 }
 
 func (b *chatBuilder) flush() {
@@ -259,6 +284,7 @@ func (b *chatBuilder) addItem(raw json.RawMessage) *apiError {
 		Input     json.RawMessage   `json:"input"`
 		Output    json.RawMessage   `json:"output"`
 		Tools     []json.RawMessage `json:"tools"`
+		Encrypted *string           `json:"encrypted_content"`
 	}
 	if err := json.Unmarshal(raw, &it); err != nil {
 		return badRequest("invalid_input_item", "", "an input item is not an object: %v", err)
@@ -305,8 +331,23 @@ func (b *chatBuilder) addItem(raw json.RawMessage) *apiError {
 		b.msgs = append(b.msgs, chatMsg{Role: "tool", ToolCallID: it.CallID, Content: content})
 	case "additional_tools":
 		return b.addTools(it.Tools)
-	case "item_reference", "compaction", "compaction_summary", "context_compaction", "compaction_trigger",
-		"configuration_update", "web_search_call", "image_generation_call", "tool_search_call", "tool_search_output",
+	case "compaction", "compaction_summary", "context_compaction":
+		// an earlier compaction: its summary stands in for the history it replaced, at its place
+		if it.Encrypted == nil || *it.Encrypted == "" {
+			if typ == "context_compaction" {
+				return nil
+			}
+			return badRequest("invalid_compaction", "", "a compaction item needs encrypted_content")
+		}
+		summary, err := decodeCompaction(*it.Encrypted)
+		if err != nil {
+			return badRequest("invalid_compaction", "", "%v (a compaction made by another provider cannot be expanded here)", err)
+		}
+		b.flush()
+		b.msgs = append(b.msgs, chatMsg{Role: "user", Content: summaryPrefix + summary})
+	case "compaction_trigger":
+		return badRequest("invalid_compaction", "", "compaction_trigger must be the last input item")
+	case "item_reference", "configuration_update", "web_search_call", "image_generation_call", "tool_search_call", "tool_search_output",
 		"local_shell_call", "agent_message":
 		// items with no chat-template form: they carry nothing the model can read
 	default:
@@ -382,7 +423,7 @@ func (b *chatBuilder) content(raw json.RawMessage, allowImages bool) (any, *apiE
 	}
 	hasImage := false
 	for _, p := range parts {
-		if p.Type == "input_image" || p.Type == "image_url" || p.Type == "image" {
+		if (p.Type == "input_image" || p.Type == "image_url" || p.Type == "image") && !b.noImages {
 			hasImage = true
 		}
 	}
@@ -394,6 +435,8 @@ func (b *chatBuilder) content(raw json.RawMessage, allowImages bool) (any, *apiE
 				sb.WriteString(p.Text)
 			case "refusal":
 				sb.WriteString(p.Refusal)
+			case "input_image", "image_url", "image": // only when noImages
+				sb.WriteString("[an image]")
 			default:
 				return nil, badRequest("unsupported_content_part", "", "content part type %q is not supported", p.Type)
 			}
@@ -417,7 +460,7 @@ func (b *chatBuilder) content(raw json.RawMessage, allowImages bool) (any, *apiE
 				return nil, err
 			}
 			b.images = append(b.images, img)
-			out = append(out, map[string]any{"type": "image"})
+			out = append(out, map[string]any{"type": "image", "img": img.hash})
 		default:
 			return nil, badRequest("unsupported_content_part", "", "content part type %q is not supported", p.Type)
 		}
@@ -447,7 +490,11 @@ func decodeImage(raw json.RawMessage) (imageData, *apiError) {
 	if err != nil || len(bs) == 0 {
 		return imageData{}, badRequest("invalid_image", "", "the image is not valid base64")
 	}
-	return imageData{hash: hashBytes(bs), bytes: bs}, nil
+	mime := strings.TrimPrefix(strings.SplitN(head, ";", 2)[0], "data:")
+	if mime == "" {
+		mime = "application/octet-stream"
+	}
+	return imageData{hash: hashBytes(bs), mime: mime, bytes: bs}, nil
 }
 
 func (b *chatBuilder) addMessage(role string, raw json.RawMessage) *apiError {

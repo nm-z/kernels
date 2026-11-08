@@ -1,37 +1,42 @@
 # Running ai-mux
 
-ai-mux (PROTOCOL.md) is the one process on a host that serves AI: it starts every endpoint's engine,
-takes its registration on a Unix socket and serves the Responses API over HTTP.
+ai-mux (PROTOCOL.md) is the one process on a host that serves AI. Everything AI here is a **service**: a
+process ai-mux starts and stops itself (an engine, a shim, an embed server, a job) that registers over a
+Unix socket. Clients use HTTP.
 
     cd codex && go build -o bin/ai-mux ./cmd/ai-mux && go test ./...
 
-## Compose file: `~/.config/ai-mux/ai-mux.yaml` (an example: hosts/sentry.yaml)
+## Services and the host file
 
-`listen`, `socket`, and per endpoint: `up`, `gguf` (tokenizer + chat template), `ctx`, `efforts`, `vision`,
-`device`, `command`, `cwd`, `env`, `post_stop`, `restart` (`on-failure`: 10 s, 20 s, 40 s … 5 min; or `no`).
-The endpoint process gets `AI_MUX_SOCK` and `AI_MUX_ENDPOINT`.
+`services/NAME/service.yaml` (+ the service's code): `kind` (`engine|shim|embed|job`), `gguf` (engines:
+tokenizer + chat template), `ctx`, `efforts`, `vision`, `device`, `command`, `cwd` (default: the folder),
+`env`, `post_stop`, `restart` (`on-failure`: 10 s, 20 s … 5 min; jobs default to `no`).
+`~/.config/ai-mux/ai-mux.yaml` (example: hosts/sentry.yaml): `listen`, `socket`, `services_dir`,
+`services: {NAME: {up: bool}}`. The process gets `AI_MUX_SOCK`, `AI_MUX_SERVICE`, `AI_MUX_SERVICE_DIR`.
+A service that breaks rule 5 is killed and `failed`: an engine run without prefill lines, stats lines or its
+measured `done`; a shim delta before `ttft` (or an auto shim without `route`); wrong embed vectors; a job with
+no `progress` for 12.5 s or a `pct` outside 0-100. A shim's `run` has `messages` (chat form; images are
+`{"type":"image","img":HASH}` parts), `tools`, `effort`, `images` (`[{img, mime, bytes(base64)}]`).
 
-## Service
+## Service unit
 
     install -m755 bin/ai-mux ~/.local/bin/ai-mux
     install -Dm644 ai-mux.service ~/.config/systemd/user/ai-mux.service
-    systemctl --user daemon-reload && systemctl --user enable --now ai-mux
-    loginctl enable-linger $USER          # keep it running when logged out
+    systemctl --user daemon-reload && systemctl --user enable --now ai-mux && loginctl enable-linger $USER
 
-Each endpoint runs in `ai-mux-<name>.scope` (`systemd-run --user --scope`, `BindsTo=ai-mux.service`): stopping
-or killing ai-mux stops every endpoint, `down` stops the scope and runs `post_stop`. Only a process in that
-scope may register. Outside systemd (a dev run) endpoints are plain process groups killed with ai-mux
-(`AI_MUX_SUPERVISOR=systemd|plain` forces one; `AI_MUX_UNIT` names the unit scopes bind to).
+Each service runs in `ai-mux-<name>.scope` (`systemd-run --user --scope`, `BindsTo=ai-mux.service`): stopping
+ai-mux stops every service, `down` stops the scope and runs `post_stop`, only a process in the scope may
+register. A dev run outside systemd uses process groups (`AI_MUX_SUPERVISOR=systemd|plain`, `AI_MUX_UNIT`).
 
 ## CLI (finds the daemon through `-f FILE`'s `listen`, default the file above, or `AI_MUX_URL`)
 
-    ai-mux serve [-f FILE]     the daemon
-    ai-mux ps                  every endpoint: state, pid, ctx, slots, last run's prefill/decode tok/s and idle %
-    ai-mux up NAME | down NAME desired state; also rewrites `up:` in the file
-    ai-mux events              the /v1/events stream
+    ai-mux serve [-f FILE]            the daemon
+    ai-mux ps                         every service: kind, state, pid, last run or job progress
+    ai-mux up NAME | down NAME        desired state; rewrites `up:` (`up` re-runs a done job)
+    ai-mux events [-since TS]         recorded events since TS (RFC 3339 or Unix seconds), then live
 
-## Logs
+## Logs and events
 
-stdout and stderr of each endpoint: `~/.local/state/ai-mux/<name>.log` (appended; ai-mux lines mark every
-start, stop and exit code). The path is `log` in `GET /v1/endpoints`; a failed endpoint's `reason` is there too.
-ai-mux's own log is the journal: `journalctl --user -u ai-mux`.
+`~/.local/state/ai-mux/<name>.log`: the service's stdout and stderr plus ai-mux lines for each start, stop and
+exit code (`log` in `GET /v1/services`). `~/.local/state/ai-mux/events.db`: SQLite `events(ts, service, run,
+type, json)`, every event. ai-mux's own log: `journalctl --user -u ai-mux`.

@@ -86,6 +86,9 @@ type respBuilder struct {
 	rTrim, aTrim trimmer
 	rOpen        *openItem // the reasoning item being streamed
 	aOpen        *openItem // the message item being streamed
+
+	compact bool            // the answer is a summary for a compaction item, not output
+	summary strings.Builder // what the model wrote as its summary
 }
 
 type openItem struct {
@@ -305,6 +308,9 @@ func (b *respBuilder) endThink() {
 // ---- reasoning item ---------------------------------------------------------------------------------------
 
 func (b *respBuilder) reasoning(s string) {
+	if b.compact {
+		return // a summary is the answer only
+	}
 	s = b.rTrim.push(s)
 	if s == "" {
 		return
@@ -344,6 +350,10 @@ func (b *respBuilder) text(s string) {
 		return
 	}
 	b.any = true
+	if b.compact {
+		b.summary.WriteString(s)
+		return
+	}
 	if b.aOpen == nil {
 		b.aOpen = &openItem{id: newID("msg_"), idx: b.outIdx}
 		b.outIdx++
@@ -380,18 +390,16 @@ func (b *respBuilder) toolCall(body string) bool {
 	if !ok {
 		return false
 	}
-	b.any = true
-	b.closeReasoning() // a call after unfinished reasoning (no </think>) ends it
-	idx := b.outIdx
-	b.outIdx++
+	if b.compact {
+		return true // a summary calls nothing
+	}
 	info := b.tools[name]
-	callID := newID("call_")
 	var types map[string][]string
 	if info != nil {
 		types = info.params
 	}
+	input := ""
 	if info != nil && info.custom {
-		input := ""
 		for _, p := range params {
 			if p.name == "input" {
 				input = p.value
@@ -400,23 +408,61 @@ func (b *respBuilder) toolCall(body string) bool {
 		if input == "" && len(params) == 1 && params[0].name != "input" {
 			input = params[0].value
 		}
+	}
+	b.callItem(info, name, newID("call_"), string(argsObject(params, types)), input)
+	return true
+}
+
+// shimCall is a shim's tool_call: arguments is JSON text.
+func (b *respBuilder) shimCall(callID, name, arguments string) {
+	if b.compact {
+		return
+	}
+	if callID == "" {
+		callID = newID("call_")
+	}
+	info := b.tools[name]
+	input := ""
+	if info != nil && info.custom {
+		var m map[string]json.RawMessage
+		if json.Unmarshal([]byte(arguments), &m) == nil {
+			var s string
+			if v, ok := m["input"]; ok && json.Unmarshal(v, &s) == nil {
+				input = s
+			} else if len(m) == 1 {
+				for _, v := range m {
+					json.Unmarshal(v, &s)
+					input = s
+				}
+			}
+		} else {
+			input = arguments
+		}
+	}
+	b.callItem(info, name, callID, arguments, input)
+}
+
+// callItem emits a finished call: a custom_tool_call (input) for a freeform tool, else a function_call.
+func (b *respBuilder) callItem(info *toolInfo, name, callID, args, input string) {
+	b.any = true
+	b.closeReasoning() // a call after unfinished reasoning (no </think>) ends it
+	b.closeMessage()
+	idx := b.outIdx
+	b.outIdx++
+	if info != nil && info.custom {
 		id := newID("ctc_")
 		item := map[string]any{"id": id, "type": "custom_tool_call", "status": "completed", "call_id": callID, "name": info.name, "input": input}
-		if info.namespace != "" {
-			item["namespace"] = info.namespace
-		}
 		added := map[string]any{"id": id, "type": "custom_tool_call", "status": "in_progress", "call_id": callID, "name": info.name, "input": ""}
 		if info.namespace != "" {
-			added["namespace"] = info.namespace
+			item["namespace"], added["namespace"] = info.namespace, info.namespace
 		}
 		b.emit("response.output_item.added", map[string]any{"output_index": idx, "item": added})
 		b.emit("response.custom_tool_call_input.delta", map[string]any{"item_id": id, "call_id": callID, "output_index": idx, "delta": input})
 		b.emit("response.custom_tool_call_input.done", map[string]any{"item_id": id, "call_id": callID, "output_index": idx, "input": input})
 		b.emit("response.output_item.done", map[string]any{"output_index": idx, "item": item})
 		b.items = append(b.items, item)
-		return true
+		return
 	}
-	args := string(argsObject(params, types))
 	vis, ns := name, ""
 	if info != nil {
 		vis, ns = info.name, info.namespace
@@ -432,7 +478,17 @@ func (b *respBuilder) toolCall(body string) bool {
 	b.emit("response.function_call_arguments.done", map[string]any{"item_id": id, "output_index": idx, "arguments": args})
 	b.emit("response.output_item.done", map[string]any{"output_index": idx, "item": item})
 	b.items = append(b.items, item)
-	return true
+}
+
+// compaction emits the compaction item that answers a compaction_trigger.
+func (b *respBuilder) compactionItem(summary string) {
+	idx := b.outIdx
+	b.outIdx++
+	id := newID("cmp_")
+	b.emit("response.output_item.added", map[string]any{"output_index": idx, "item": map[string]any{"id": id, "type": "compaction", "encrypted_content": ""}})
+	item := map[string]any{"id": id, "type": "compaction", "encrypted_content": encodeCompaction(b.model, summary)}
+	b.emit("response.output_item.done", map[string]any{"output_index": idx, "item": item})
+	b.items = append(b.items, item)
 }
 
 // finish ends the text: whatever is held back is handled, open items are closed. A tool call cut off
@@ -452,6 +508,12 @@ func (b *respBuilder) finish() {
 	b.closeMessage()
 }
 
+// finishDirect ends a shim's output (nothing is held back; there is nothing to parse).
+func (b *respBuilder) finishDirect() {
+	b.closeReasoning()
+	b.closeMessage()
+}
+
 // ---- stats and the end ------------------------------------------------------------------------------------
 
 type statsEvent struct {
@@ -466,8 +528,8 @@ type statsEvent struct {
 		Tokens int     `json:"tokens"`
 		TPS    float64 `json:"tps"`
 	} `json:"decode"`
+	IdlePct *float64 `json:"idle_pct"` // the run's idle % so far; null until the engine has one
 	Ctx     int      `json:"ctx"`
-	IdlePct *float64 `json:"idle_pct,omitempty"`
 }
 
 // liveStats is what the engine has reported so far about the running request.
@@ -477,10 +539,11 @@ type liveStats struct {
 	prefillTPS              float64
 	tokens                  int
 	decodeTPS               float64
+	idle                    *float64
 	ctx                     int
 }
 
-func (b *respBuilder) stats(s *liveStats, idle *float64) {
+func (b *respBuilder) stats(s *liveStats) {
 	if b.sink == nil {
 		return
 	}
@@ -489,8 +552,8 @@ func (b *respBuilder) stats(s *liveStats, idle *float64) {
 	e.Phase = s.phase
 	e.Prefill.Done, e.Prefill.Total, e.Prefill.TPS = s.prefillDone, s.prefillTot, s.prefillTPS
 	e.Decode.Tokens, e.Decode.TPS = s.tokens, s.decodeTPS
+	e.IdlePct = s.idle
 	e.Ctx = s.ctx
-	e.IdlePct = idle
 	data, err := json.Marshal(e)
 	if err != nil {
 		return
