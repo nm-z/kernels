@@ -85,8 +85,9 @@ mutable struct Graph
     node::Vector{Int32}; nodef::Vector{Float32}; edge::Vector{Int32}; nn::Int; ne::Int
     names::Dict{Symbol,Int}                                # an edge by (layer, name)
     nmat::Int; nvec::Int; matname::Vector{String}; vecname::Vector{String}
+    upd::Vector{Tuple{Int,Int,Float64,Float64}}            # the update's groups in node order: (first node, last node, Muon flops, elements)
 end
-Graph() = Graph(Int32[], Float32[], Int32[], 0, 0, Dict{Symbol,Int}(), 0, 0, String[], String[])
+Graph() = Graph(Int32[], Float32[], Int32[], 0, 0, Dict{Symbol,Int}(), 0, 0, String[], String[], Tuple{Int,Int,Float64,Float64}[])
 function edge!(G::Graph, name, w, dt; rows = ALL, r = 0, cache = 0, reach = 0)
     G.ne += 1; append!(G.edge, Int32[w, dt, rows, r, cache, reach, 0, 0]); G.names[name] = G.ne; G.ne
 end
@@ -229,10 +230,12 @@ function recipe(; lr = 0.002, lrv = 0.0002, lre = 0.002)
     node!(G, EMBB, 0, GRAD; rows = WT, dep = DALL, in = (gx, gdm[me], 0, 0), out = (dmat(me), 0), m = me, wr = 0)
     # the update: Muon, momentum for the rest
     for m in 1:G.nmat
-        R, K = matdims(G.matname[m])
+        R, K = matdims(G.matname[m]); n0 = G.nn + 1; q = Float64(min(R, K)); p = Float64(max(R, K))
         m == me ? node!(G, STEP, 0, WEIGHTS; rows = WT, dep = DALL, in = (0, gdm[m], 0, 0), m = m, wr = R, K = K, f = (lre, 0, 0, 0)) : muon!(G, m, R, K, lr, gdm[m])
+        push!(G.upd, (n0, G.nn, m == me ? 0.0 : 5 * (4q * q * p + 2q^3), Float64(R) * K))   # (5 iterations of A = X X', B = b A + c A A, X = a X + B X)
     end
-    for v in 1:G.nvec; node!(G, STEPV, 0, WEIGHTS; rows = WT, dep = DALL, in = (gdv[v], 0, 0, 0), wv = v, wr = 1, f = (lrv, 0, 0, 0)); end
+    n0 = G.nn + 1; for v in 1:G.nvec; node!(G, STEPV, 0, WEIGHTS; rows = WT, dep = DALL, in = (gdv[v], 0, 0, 0), wv = v, wr = 1, f = (lrv, 0, 0, 0)); end
+    push!(G.upd, (n0, G.nn, 0.0, 0.0))
     G
 end
 function matdims(name)
@@ -247,7 +250,7 @@ veclen(name) = occursin("conv.conv", name) ? 7NE : NE
 
 # ---- the request, all the kernel sees: rows [P][4] segment, position, token, target ----
 struct RQ
-    P::Int32; PL::Int32; NU::Int32; NS::Int32; wanted::Int32; nblk::Int32; card::Int32; ncard::Int32; gen::UInt32; nn::Int32; ne::Int32; cap::Int32
+    P::Int32; PL::Int32; NU::Int32; NS::Int32; wanted::Int64; nblk::Int32; card::Int32; ncard::Int32; gen::UInt32; nn::Int32; ne::Int32; cap::Int32
     f2::Float32; iacc::Float32; lossR::Float32
     rows::LP{Int32}; lrows::LP{Int32}; linv::LP{Int32}; wgt::LP{Float32}; uniq::LP{Int32}; urows::LP{Int32}; segs::LP{Int32}
     node::LP{Int32}; nodef::LP{Float32}; edge::LP{Int32}; mat::LP{Int64}; vec::LP{Int64}; rope::LP{Float32}
@@ -301,12 +304,16 @@ end
 end
 @inline function pow2ge(x::Int64); p = Int64(1); while p < x; p <<= 1; end; p; end
 # the derivation (one thread); status 1: no room
+@inline function wantn(R::RQ, n)                            # node n is in the request: its level is wanted, and it is in the node range asked (bits 8..31 first, 32..55 last; 0: all)
+    hi = (R.wanted >> 32) & 0xffffff
+    lvlmask(nd(R, n, N_LVL)) & R.wanted & 0xff != 0 && (hi == 0 || (((R.wanted >> 8) & 0xffffff) <= n && n <= hi))
+end
 @inline function derive!(R::RQ)
-    P = R.P; w = R.wanted; nn = R.nn; ne = R.ne
+    P = R.P; nn = R.nn; ne = R.ne
     for e in 1:ne; pl!(R, PE(R, e, PL_LAST), 0); pl!(R, PE(R, e, PL_LOC), 0); pl!(R, PE(R, e, PL_MOD), -1); pl!(R, PE(R, e, PL_SZ), 0); end
     persist = false; for s in 0:R.NS-1; ld(R.segs, 2s) >= 0 && (persist = true); end
     for n in 1:nn
-        lvlmask(nd(R, n, N_LVL)) & w != 0 || continue
+        wantn(R, n) || continue
         for f in 0:7; e = nin(R, n, f); e > 0 && pl(R, PE(R, e, PL_LAST)) < n && pl!(R, PE(R, e, PL_LAST), n); end
     end
 # the slots
@@ -330,7 +337,7 @@ end
 # tiles and flag cells of every node
     f0 = Int64(0); t0 = Int64(0); s0 = 0; s1 = 0
     for n in 1:nn
-        k = nd(R, n, N_KIND); rk = nd(R, n, N_ROWS); on = lvlmask(nd(R, n, N_LVL)) & w != 0 && nd(R, n, N_CARD) == R.card
+        k = nd(R, n, N_KIND); rk = nd(R, n, N_ROWS); on = wantn(R, n) && nd(R, n, N_CARD) == R.card
         nr = Int64(nrows(R, n)); att = k == ATTN || k == ATTBKV || k == ATTBQ; ct = 64; no = Int64(nd(R, n, N_NO)); nb = Int64(R.nblk)
         rows2 = max(Int64(8), pow2ge(cld(nr, 2 * nb)))     # two tasks a block
         aq = Int64(16); ac = k == ATTN ? 162 : k == ATTBKV ? 160 : 226; ab = k == ATTBKV ? 4128 : 4096   # the tile's rows: smem bytes = ac a row + ab (Q, K, V, scores per method), while the heads' tiles still fill the blocks
@@ -359,7 +366,7 @@ end
 # locations
     for h in 0:NHOLE-1; pl!(R, PO(R, h, 1), 0); end; hmax = 0
     for n in 1:nn
-        lvlmask(nd(R, n, N_LVL)) & w != 0 || continue
+        wantn(R, n) || continue
         for f in 0:7                                        # free what nothing after n - 1 reads
             e = n > 1 ? nin(R, n - 1, f) : Int32(0)
             (e > 0 && pl(R, PE(R, e, PL_LAST)) == n - 1 && pl(R, PE(R, e, PL_SZ)) > 0 && ed(R, e, E_CACHE) == 0) || continue
@@ -414,7 +421,7 @@ end
 @inline function waitin!(R::RQ, n, t)
     dep = nd(R, n, N_DEP); rt = pln(R, n, NP_RT); rk = nd(R, n, N_ROWS); nr = Int64(nrows(R, n))
     for f in 0:7
-        e = nin(R, n, f); e > 0 || continue; p = ed(R, e, E_PROD); (p > 0 && p != n && lvlmask(nd(R, p, N_LVL)) & R.wanted != 0) || continue
+        e = nin(R, n, f); e > 0 || continue; p = ed(R, e, E_PROD); (p > 0 && p != n && wantn(R, p)) || continue
         rtp = pln(R, p, NP_RT)
         if dep == DALL || rk == WT || nd(R, p, N_ROWS) != rk
             waitnode(R, p)
@@ -1116,7 +1123,7 @@ end
 const DBG = Ref(parse(Int, get(ENV, "LFM3_DBG", "0")))
 function rq(S::Sys, C::Card, P, PL, NU, NS, wanted; f2 = 1.0, iacc = 1.0)
     G = S.G; nf = dalloc(4 * length(G.nodef)); up!(nf, 0, G.nodef); push!(C.bufs, nf)   # (nodef: its own copy, the lr may change)
-    RQ(Int32(P), Int32(PL), Int32(NU), Int32(NS), Int32(wanted), Int32(C.nblk), Int32(C.i), Int32(length(S.cards)), S.gen, Int32(G.nn), Int32(G.ne), Int32(S.cap),
+    RQ(Int32(P), Int32(PL), Int32(NU), Int32(NS), Int64(wanted), Int32(C.nblk), Int32(C.i), Int32(length(S.cards)), S.gen, Int32(G.nn), Int32(G.ne), Int32(S.cap),
        Float32(f2), Float32(iacc), Float32(1 / max(PL, 1)),
        lp(Int32, addr(C.rows)), lp(Int32, addr(C.lrows)), lp(Int32, addr(C.linv)), lp(Float32, addr(C.wgt)), lp(Int32, addr(C.uniq)), lp(Int32, addr(C.urows)), lp(Int32, addr(C.segs)),
        lp(Int32, addr(C.node)), lp(Float32, addr(nf)), lp(Int32, addr(C.edge)), lp(Int64, addr(C.matd)), lp(Int64, addr(C.vecd)), lp(Float32, addr(C.rope)),
@@ -1153,6 +1160,17 @@ function request!(S::Sys, rows::Matrix{Int32}, segs::Matrix{Int32}, lrows::Vecto
     st = S.plan[PH_STAT+1]; st == 0 || (n = S.plan[PH_S0+1]; error("request: status $st, node $n (kind $(S.G.node[NF*(n-1)+N_KIND+1])), VRAM $(S.plan[PH_VUSE+1]), host $(S.plan[PH_HUSE+1])"))
     nothing
 end
+# the update, a request a slice: consecutive groups (a matrix's nodes) packed up to `seconds` of the rate measured on the slices before (Muon: flops a second; momentum steps: elements a second)
+const UPDCUR = Ref(1); const UPDRATE = zeros(2)
+function stepslice!(S::Sys; seconds = 10.0)                 # the next slice; true when the step is done
+    U = S.G.upd; i = UPDCUR[]; i == 1 && fill!(UPDRATE, 0.0)   # (a step measures its own rates: an untouched momentum is skipped on the device, a rate carried over would be too high)
+    cost(u) = u[3] > 0 ? u[3] : u[4]; cls(u) = u[3] > 0 ? 1 : 2; c = cls(U[i]); lim = UPDRATE[c] > 0 ? 0.8 * seconds * UPDRATE[c] : 0.0   # (unmeasured: one group, to measure)
+    j = i; tot = cost(U[i])
+    while j < length(U) && (cost(U[j+1]) == 0 || (cls(U[j+1]) == c && tot + cost(U[j+1]) <= lim)); j += 1; tot += cost(U[j]); end
+    t0 = time(); request!(S, reshape(Int32[0, 0, 0, -1], 4, 1), reshape(Int32[-1, 1], 2, 1), Int32[0], Float32[1], 8 | (Int64(U[i][1]) << 8) | (Int64(U[j][2]) << 32)); dt = time() - t0
+    tot > 0 && dt > 0.05 && (UPDRATE[c] = tot / dt); UPDCUR[] = j == length(U) ? 1 : j + 1; j == length(U)
+end
+step!(S::Sys; seconds = 10.0) = (UPDCUR[] = 1; while !stepslice!(S; seconds); end)
 await!(S::Sys) = nothing; prof(S::Sys, C::Card) = nothing   # (test/lfm3-dev.jl)
 # an edge's rows as a matrix (width x rows): from VRAM or host memory
 function fetch(S::Sys, e::Int, nr; card = 0, T = Float32)

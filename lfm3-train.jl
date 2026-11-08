@@ -36,7 +36,6 @@ function window!(S::Sys, D::Data, w; grad = true, f2 = 1.0, iacc = 1.0)
     request!(S, rows, reshape(Int32[-1, N], 2, 1), Int32.(pos), ones(Float32, length(pos)), grad ? 6 : 2; f2, iacc)
     L = fetch(S, S.G.names[:lse], length(pos)); sum(L[2, :]) / length(pos)
 end
-step!(S::Sys) = request!(S, reshape(Int32[0, 0, 0, -1], 4, 1), reshape(Int32[-1, 1], 2, 1), Int32[0], Float32[1], 8)
 function heldout(S::Sys, D::Data, W)
     t0 = time(); tot = 0.0; n = 0
     for w in W; tot += window!(S, D, w; grad = false) * length(w[4]); n += length(w[4]); end
