@@ -415,8 +415,7 @@ end
     w = pln(R, n, NP_WAR); (w > 0 && w != n && pln(R, w, NP_ON) == 1) && waitnode(R, w)   # the memory reused: its last reader done
 end
 
-# ---- the matrix product, written once: out[m, n] = Σ_k a(m, k) b(n, k); an operand a row edge (or transposed), a strided
-# matrix, or weights, a norm or scale applied as it is read ----
+# ---- the matrix product, written once: out[m, n] = Σ_k a(m, k) b(n, k); an operand a row edge (or transposed), a strided matrix, or weights ----
 struct OPD; p::LP{UInt8}; dt::Int32; mode::Int32; e::Int32; nk::Int32; ms::Int64; ks::Int64; off::Int32; m0::Int32; nm::Int32; end
 @inline sp!(sm, i, v::Int64) = (sm[i + 1] = reinterpret(Float32, UInt32(v & 0xffffffff)); sm[i + 2] = reinterpret(Float32, UInt32((v >>> 32) & 0xffffffff)))
 @inline sp(sm, i) = Int64(reinterpret(UInt32, sm[i + 1])) | (Int64(reinterpret(UInt32, sm[i + 2])) << 32)
@@ -431,8 +430,7 @@ struct OPD; p::LP{UInt8}; dt::Int32; mode::Int32; e::Int32; nk::Int32; ms::Int64
 end
 @inline ld4(sm, i) = unsafe_load(reinterpret(Core.LLVMPtr{NTuple{4,VecElement{Float32}},3}, pointer(sm)), (i >> 2) + 1, Val(16))
 @inline isk(o::OPD) = o.mode == 1 || o.mode == 4 || (o.mode == 3 && o.ks == 1)
-# an operand's 32-k slice into smem, k-major (sm[so + k * stride + m], each k row rotated by 8 (k >> 3)); a line is the operand's row along k
-# (kfast: one per m, its address held for the task) or along m (one per k, resolved each slice)
+# a 32-k slice into smem, k-major, each k row rotated by 8 (k >> 3); a line is a row along k (kfast: per m, held for the task) or along m (per k)
 @inline function lin(R::RQ, o::OPD, i, lmax, kfast)          # the address of line i (0 past lmax)
     eb = o.dt == BF ? Int64(2) : Int64(4); a = Int64(0)
     if i < lmax
@@ -464,7 +462,7 @@ end
     es = o.mode == 3 ? o.ms : Int64(1); sh = trailing_zeros(Int64(nrow)) - 3; ng = Int64(32) << sh
     Base.Cartesian.@nexprs 2 q -> begin
         i_q = Int64(tid) + 256 * (q - 1); l_q = i_q >> sh; g_q = (i_q & ((Int64(1) << sh) - 1)) << 3; jj_q = m0 + g_q; ok_q = i_q < ng && k0 + l_q < K && jj_q < mmax
-        a_q = lp(UInt8, ok_q ? sp(sm, sp0 + 2l_q) : Int64(0)); v_q = (0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0)   # (an unwritten entry is any bits)
+        a_q = lp(UInt8, ok_q ? sp(sm, sp0 + 2l_q) : Int64(0)); v_q = (0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0, 0.0f0)   # (unwritten: any bits)
         if ok_q
             if es == 1 && jj_q + 7 < mmax; v_q = rd8(a_q, o.dt, jj_q)
             else; v_q = Base.Cartesian.@ntuple 8 e -> (jj_q + e - 1 < mmax ? rdv(a_q, o.dt, (jj_q + e - 1) * es) : 0.0f0); end
@@ -513,6 +511,14 @@ end
     end
     Base.Cartesian.@ntuple 32 i -> c_i
 end
+@inline function put!(a::LP{UInt8}, d::Int32, v::NTuple{4,Float32}, i::Int64, nv)   # 4 consecutive elements from i (a multiple of 4): one vector store when whole and aligned, else element by element
+    if nv == 4 && (pint(a) + i * (d == BF ? 2 : 4)) & (d == BF ? 7 : 15) == 0
+        if d == BF
+            h(x) = UInt64(reinterpret(UInt32, bfr(x)) >> 16); unsafe_store!(reinterpret(LP{UInt64}, a), h(v[1]) | (h(v[2]) << 16) | (h(v[3]) << 32) | (h(v[4]) << 48), (i >> 2) + 1, Val(8))
+        else; unsafe_store!(reinterpret(LP{NTuple{4,VecElement{Float32}}}, a), (VecElement(v[1]), VecElement(v[2]), VecElement(v[3]), VecElement(v[4])), (i >> 2) + 1, Val(16)); end
+    else; Base.Cartesian.@nexprs 4 j -> (j <= nv && wrv!(a, d, v[j], i + j - 1)); end
+    nothing
+end
 @inline function gemm!(R::RQ, sm, n, tile, col, tid)
     fl = nd(R, n, N_FL); epi = nd(R, n, N_EPI); rt = Int32(pln(R, n, NP_RT)); ct = Int32(pln(R, n, NP_CT)); m0 = Int64(tile) * rt; n0 = Int64(col) * ct
     K = Int64(nd(R, n, N_K)); e1 = nd(R, n, N_I1); e2 = nd(R, n, N_I2); rk = nd(R, n, N_ROWS); kk = rk; nr = Int64(nrows(R, n)); no = Int64(nd(R, n, N_NO))
@@ -537,20 +543,24 @@ end
     act = tid < ntm * ntn * ntk; tk = tid ÷ (ntm * ntn); rem = tid % (ntm * ntn); tm = rem ÷ ntn; tn = rem % ntn
     o1 = nd(R, n, N_O1); o2 = nd(R, n, N_O2); e3 = nd(R, n, N_I3); f1 = ndf(R, n, 0); f2 = ndf(R, n, 1)
     epi == EP_LSE && bar()
-    if act && tk == 0
-        Base.Cartesian.@nexprs 8 i -> Base.Cartesian.@nexprs 4 j -> begin
-            mm = Int64(tm * tr + i - 1); nn = Int64(tn * 4 + j - 1); mr = m0 + mm; nc = n0 + nn; v = c1[(i - 1) * 4 + j]
-            if i <= tr && mm < rt && mr < nr && nc < no
-                if epi == EP_SILU
-                    a = eaddr(R, o1, rowof(R, rk, mr)); wrv!(a, ed(R, o1, E_DT), v, nc); wrv!(a, ed(R, o1, E_DT), c2[(i - 1) * 4 + j], Int64(NFF) + nc)
-                    wrv!(eaddr(R, o2, rowof(R, rk, mr)), ed(R, o2, E_DT), v * sigm(v) * c2[(i - 1) * 4 + j], nc)
-                elseif epi == EP_AXPY                     # f1 acc + f2 other: other a weight-shaped edge, or the momentum scaled
-                    ot = e3 > 0 ? rdv(waddr(R, e3, mr), ed(R, e3, E_DT), nc) : ld(lp(Float32, mt(R, m, 4)), mr * no + nc) * ld(lp(Float32, waddr(R, rs, 0)), 0)
-                    wrv!(waddr(R, o1, mr), ed(R, o1, E_DT), f1 * v + f2 * ot, nc)
-                elseif epi == EP_LSE
-                    wrv!(eaddr(R, o1, rowof(R, rk, mr)), F32, v, nc); sm[mm * 65 + nn + 1] = v
-                elseif rk == WT; wrv!(waddr(R, o1, mr), ed(R, o1, E_DT), v, nc)
-                else; wrv!(eaddr(R, o1, rowof(R, rk, mr)), ed(R, o1, E_DT), v, nc)
+    d1 = ed(R, o1, E_DT); d2 = epi == EP_SILU ? ed(R, o2, E_DT) : d1; d3 = e3 > 0 ? ed(R, e3, E_DT) : d1
+    mw = epi == EP_AXPY && e3 <= 0; mom = lp(Float32, mw ? mt(R, m, 4) : Int64(0)); msc = mw ? ld(lp(Float32, waddr(R, rs, 0)), 0) : 0.0f0   # (the momentum, scaled)
+    if act && tk == 0                                      # a row's address once, then its 4 columns
+        Base.Cartesian.@nexprs 8 i -> begin
+            mm = Int64(tm * tr + i - 1); mr = m0 + mm
+            if i <= tr && mm < rt && mr < nr
+                r = rowof(R, rk, mr); a1 = epi == EP_AXPY || rk == WT ? waddr(R, o1, mr) : eaddr(R, o1, r); a2 = epi == EP_SILU ? eaddr(R, o2, r) : a1; a3 = epi == EP_AXPY && e3 > 0 ? waddr(R, e3, mr) : a1
+                nc0 = n0 + Int64(tn) * 4; nv = min(Int64(4), no - nc0)
+                if nv > 0
+                    v4 = Base.Cartesian.@ntuple 4 j -> c1[(i - 1) * 4 + j]
+                    if epi == EP_SILU
+                        w4 = Base.Cartesian.@ntuple 4 j -> c2[(i - 1) * 4 + j]
+                        put!(a1, d1, v4, nc0, nv); put!(a1, d1, w4, Int64(NFF) + nc0, nv); put!(a2, d2, Base.Cartesian.@ntuple(4, j -> v4[j] * sigm(v4[j]) * w4[j]), nc0, nv)
+                    elseif epi == EP_AXPY                     # f1 acc + f2 other
+                        put!(a1, d1, Base.Cartesian.@ntuple(4, j -> (j <= nv ? f1 * v4[j] + f2 * (e3 > 0 ? rdv(a3, d3, nc0 + j - 1) : ld(mom, mr * no + nc0 + j - 1) * msc) : 0.0f0)), nc0, nv)
+                    elseif epi == EP_LSE; put!(a1, F32, v4, nc0, nv); Base.Cartesian.@nexprs 4 j -> (j <= nv && (sm[mm * 65 + Int64(tn) * 4 + j] = v4[j]))
+                    else; put!(a1, d1, v4, nc0, nv)
+                    end
                 end
             end
         end
