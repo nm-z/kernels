@@ -52,6 +52,7 @@ sync() = KernelAbstractions.synchronize(BE)
 
 # ---- device primitives; a BF16 is a Float32's upper half ----
 @inline ld(p::LP{T}, i) where {T} = unsafe_load(p, i + 1, Val(sizeof(T)))   # (natural alignment)
+@eval @inline ldn(p::LP{T}, i) where {T} = $(CUDAON ? :(CUDA.unsafe_cached_load(p, i + 1, Val(sizeof(T)))) : :(unsafe_load(p, i + 1, Val(sizeof(T)))))   # (a table only read: cached)
 @inline st!(p::LP{T}, v, i) where {T} = unsafe_store!(p, v, i + 1, Val(sizeof(T)))
 @inline bfr(x::Float32) = (u = reinterpret(UInt32, x); reinterpret(Float32, (u + 0x00007fff + ((u >> 16) & 0x1)) & 0xffff0000))
 @inline rdv(p::LP{UInt8}, dt::Int32, i::Int64) = dt == Int32(1) ? reinterpret(Float32, UInt32(ld(reinterpret(LP{UInt16}, p), i)) << 16) : ld(reinterpret(LP{Float32}, p), i)
@@ -258,7 +259,7 @@ struct RQ
     node::LP{Int32}; nodef::LP{Float32}; edge::LP{Int32}; mat::LP{Int64}; vec::LP{Int64}; rope::LP{Float32}
     plan::LP{Int64}; cnt::LP{UInt32}; cntH::LP{UInt32}; q::LP{UInt32}
     aV::LP{UInt8}; nV::Int64; aH::LP{UInt8}; nH::Int64; slots::LP{UInt8}; slotsz::Int64; dbg::Int32; reuse::Int32; nflag::Int64
-    samp::Int32; seed::UInt32; step::Int32; rowsn::LP{Int32}; ring::LP{Int32}   # sampling on the device: 1 greedy, 2 the model's own; the next step's rows; the tokens out (host memory)
+    samp::Int32; seed::UInt32; step::Int32; rowsn::LP{Int32}; ring::LP{Int32}   # device sampling: 1 greedy, 2 the model's own; the next step's rows; the tokens out (host memory)
 end
 # the plan: a header; per edge; per node; per segment; the holes
 const PHN, PL_LOC, PL_OFF, PL_MOD, PL_LAST, PL_CA, PL_CB, PL_SZ = 16, 0, 1, 2, 3, 4, 5, 6
@@ -267,26 +268,26 @@ const TILEA = 256 * 32   # a tile's accumulators (smem: a 132 stride a slice row
 const NP_F0, NP_NT, NP_NC, NP_RT, NP_CT, NP_T0, NP_ON, NP_FL, NP_WAR = 0, 1, 2, 3, 4, 5, 6, 7, 8   # (WAR: the last reader of reused memory)
 const PH_NT, PH_NFLAG, PH_STAT, PH_ORDER, PH_S0, PH_S1, PH_SECT, PH_T0S, PH_T1S, PH_VUSE, PH_HUSE, PH_SLOT = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
 const NSEG, NHOLE = 64, 512
-@inline nd(R::RQ, n, f) = ld(R.node, Int64(n - 1) * NF + f)
-@inline ndf(R::RQ, n, i) = ld(R.nodef, Int64(n - 1) * 4 + i)
-@inline ed(R::RQ, e, f) = ld(R.edge, Int64(e - 1) * EF + f)
-@inline mt(R::RQ, m, f) = ld(R.mat, Int64(m - 1) * MF + f)
-@inline vp(R::RQ, v) = lp(Float32, ld(R.vec, Int64(v - 1) * VF)); @inline vmo(R::RQ, v) = lp(Float32, ld(R.vec, Int64(v - 1) * VF + 2))
-@inline rw(R::RQ, r, f) = ld(R.rows, Int64(r) * 4 + f)
+@inline nd(R::RQ, n, f) = ldn(R.node, Int64(n - 1) * NF + f)
+@inline ndf(R::RQ, n, i) = ldn(R.nodef, Int64(n - 1) * 4 + i)
+@inline ed(R::RQ, e, f) = ldn(R.edge, Int64(e - 1) * EF + f)
+@inline mt(R::RQ, m, f) = ldn(R.mat, Int64(m - 1) * MF + f)
+@inline vp(R::RQ, v) = lp(Float32, ldn(R.vec, Int64(v - 1) * VF)); @inline vmo(R::RQ, v) = lp(Float32, ldn(R.vec, Int64(v - 1) * VF + 2))
+@inline rw(R::RQ, r, f) = ldn(R.rows, Int64(r) * 4 + f)
 @inline pl(R::RQ, i) = ld(R.plan, Int64(i)); @inline pl!(R::RQ, i, v) = st!(R.plan, Int64(v), Int64(i))
 @inline PE(R::RQ, e, f) = PHN + 8 * (Int64(e) - 1) + f; @inline PN(R::RQ, n, f) = PHN + 8 * Int64(R.ne) + 9 * (Int64(n) - 1) + f
 @inline PS(R::RQ, s, f) = PHN + 8 * Int64(R.ne) + 9 * Int64(R.nn) + 2 * Int64(s) + f; @inline PO(R::RQ, h, f) = PS(R, NSEG, 0) + 4 * Int64(h) + f
-@inline ple(R::RQ, e, f) = pl(R, PE(R, e, f)); @inline pln(R::RQ, n, f) = pl(R, PN(R, n, f)); @inline pls(R::RQ, s, f) = pl(R, PS(R, s, f))
+@inline ple(R::RQ, e, f) = ldn(R.plan, PE(R, e, f)); @inline pln(R::RQ, n, f) = ldn(R.plan, PN(R, n, f)); @inline pls(R::RQ, s, f) = ldn(R.plan, PS(R, s, f))   # (derive! uses pl, pl!)
 @inline ebytes(R::RQ, e) = Int64(ed(R, e, E_W)) * (ed(R, e, E_DT) == BF ? 2 : 4)
 @inline ebase(R::RQ, e) = (ple(R, e, PL_LOC) == 1 ? R.aV : R.aH) + ple(R, e, PL_OFF)
 @inline caddr(R::RQ, e, s, pos) = lp(UInt8, pls(R, s, 0)) + ple(R, e, PL_CA) * pls(R, s, 1) + ple(R, e, PL_CB) + (Int64(pos) & ple(R, e, PL_MOD)) * ebytes(R, e)
 @inline function eaddr(R::RQ, e, r)                        # row r (a request row) of edge e
     ed(R, e, E_CACHE) != 0 && return caddr(R, e, rw(R, r, 0), rw(R, r, 1))
-    i = ed(R, e, E_ROWS) == LOSS ? ld(R.linv, r) : r
+    i = ed(R, e, E_ROWS) == LOSS ? ldn(R.linv, r) : r
     ebase(R, e) + (Int64(i) & ple(R, e, PL_MOD)) * ebytes(R, e)
 end
 @inline waddr(R::RQ, e, m) = ebase(R, e) + Int64(m) * ebytes(R, e)   # row m of a weight-shaped edge
-@inline rowof(R::RQ, kind, i) = kind == LOSS ? ld(R.lrows, i) : Int32(i)   # a node's i-th row as a request row
+@inline rowof(R::RQ, kind, i) = kind == LOSS ? ldn(R.lrows, i) : Int32(i)   # a node's i-th row as a request row
 @inline function nin(R::RQ, n, i)                        # the i-th edge node n reads (0..7), 0 for none
     i < 4 && return nd(R, n, N_I1 + i)
     i == 4 && return nd(R, n, N_RS)
@@ -307,7 +308,7 @@ end
 end
 @inline function pow2ge(x::Int64); p = Int64(1); while p < x; p <<= 1; end; p; end
 # the derivation (one thread); status 1: no room
-@inline function wantn(R::RQ, n)                            # node n is in the request: its level is wanted, and it is in the node range asked (bits 8..31 first, 32..55 last; 0: all)
+@inline function wantn(R::RQ, n)                            # node n is in the request: its level is wanted and it is in the range asked (bits 8..31 first, 32..55 last; 0: all)
     hi = (R.wanted >> 32) & 0xffffff
     lvlmask(nd(R, n, N_LVL)) & R.wanted & 0xff != 0 && (hi == 0 || (((R.wanted >> 8) & 0xffffff) <= n && n <= hi)) && (R.samp != 0 || nd(R, n, N_KIND) != SAMPLE)
 end
@@ -331,7 +332,7 @@ end
         (ed(R, e, E_CACHE) != 0 && ed(R, e, E_REACH) == 0) || continue; pl!(R, PE(R, e, PL_CA), ca); pl!(R, PE(R, e, PL_CB), cb); ca += ebytes(R, e)
     end
     pl!(R, PH_SLOT, ca * 1000000 + cb)
-    vtop = Int64(0); htop = Int64(0); nh = 0
+    vtop = Int64(0); htop = Int64(0)
     for s in 0:R.NS-1                                      # transient segments: a pool slot
         slot = ld(R.segs, 2s); len = ld(R.segs, 2s + 1)
         if slot >= 0; pl!(R, PS(R, s, 0), Core.Intrinsics.bitcast(Int64, R.slots) + slot * R.slotsz); pl!(R, PS(R, s, 1), R.cap)
@@ -343,7 +344,7 @@ end
         k = nd(R, n, N_KIND); rk = nd(R, n, N_ROWS); on = wantn(R, n) && nd(R, n, N_CARD) == R.card
         nr = Int64(nrows(R, n)); att = k == ATTN || k == ATTBKV || k == ATTBQ; ct = 64; no = Int64(nd(R, n, N_NO)); nb = Int64(R.nblk)
         rows2 = max(Int64(8), pow2ge(cld(nr, 2 * nb)))     # two tasks a block
-        aq = Int64(16); ac = k == ATTN ? 162 : k == ATTBKV ? 160 : 226; ab = k == ATTBKV ? 4128 : 4096   # the tile's rows: smem bytes = ac a row + ab (Q, K, V, scores per method), while the heads' tiles still fill the blocks
+        aq = Int64(16); ac = k == ATTN ? 162 : k == ATTBKV ? 160 : 226; ab = k == ATTBKV ? 4128 : k == ATTN ? 4112 : 4096   # the tile's rows: smem words = ac a row + ab (Q, K, V, scores), while the heads' tiles still fill the blocks
         while att && R.dbg & 512 == 0 && 2aq <= 32 && 2aq * ac + ab <= SMW && cld(nr, 2aq) * (k == ATTBKV ? NKV : NH) >= 2nb; aq *= 2; end   # (rows a thread: 1 or 2)
         rt = att ? Int(aq) : k == SAMPLE ? 1 : k in (NRM, STAGE, STEP, MOMU) ? Int(rows2) : rk == WT ? 64 : Int(min(rows2, Int64(64)))
         nc = att && k != ATTBKV ? Int64(NH) : k == ATTBKV ? Int64(NKV) : k == DLOG ? Int64(cld(NV, 4096)) : Int64(1)
@@ -479,8 +480,7 @@ end
         d[2q] >= 0 && Base.Cartesian.@nexprs 8 e -> (sm[so + d[2q] + (e - 1) * st + 1] = v[e])
     end
 end
-const RAW0 = ((UInt64(0), UInt64(0), UInt64(0), UInt64(0)), (UInt64(0), UInt64(0), UInt64(0), UInt64(0)))
-@inline function kget(dt, d, k0)                             # a whole slice of the held lines into registers, raw (BF16: 2 words a group, Float32: 4)
+@inline function kget(dt, d, k0)                            # a whole slice of the held lines into registers, raw (BF16: 2 words a group, Float32: 4)
     eb = dt == BF ? Int64(2) : Int64(4)
     Base.Cartesian.@ntuple 2 q -> begin
         p = d[2q - 1]
@@ -514,14 +514,14 @@ end
     Base.Cartesian.@nexprs 2 q -> (i_q < ng && Base.Cartesian.@nexprs 8 e -> (sm[so + l_q * sa + ((g_q + 8 * (l_q >> 3)) & (nrow - 1)) + e] = v_q[e]))
 end
 @inline function kl(R, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk, t8)
-    f = isk(oA) && isk(oB) && K % 32 == 0 ? (oA.dt != BF && oB.dt == BF ? 2 : 1) : 0
+    f = isk(oA) && isk(oB) && K % 32 == 0 ? (oB.dt == BF ? (oA.dt == BF ? 3 : 2) : 1) : 0
     t8 ? kf(f, Val(true), R, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk) : kf(f, Val(false), R, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk)
 end
-@inline kf(f, v, args...) = f == 2 ? kloop(args..., v, Val(2)) : f == 1 ? kloop(args..., v, Val(1)) : kloop(args..., v, Val(0))   # (the loop is compiled for the tile (the 8 x 4 tile keeps 32 accumulators, the others 16) and for whole slices of two kfast operands (the loads need none of the generic path's registers; 2: Float32 rows, BF16 weights))
+@inline kf(f, v, args...) = f == 3 ? kloop(args..., v, Val(3)) : f == 2 ? kloop(args..., v, Val(2)) : f == 1 ? kloop(args..., v, Val(1)) : kloop(args..., v, Val(0))   # (compiled for the tile (8 x 4: 32 accumulators, else 16) and for whole slices of two kfast operands: 3 BF16 rows, 2 Float32 rows, 1 other)
 @inline function kloop(R::RQ, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk, ::Val{T8}, ::Val{FAST}) where {T8,FAST}
     act = tid < ntm * ntn * ntk; tk = tid ÷ (ntm * ntn); rem = tid % (ntm * ntn); tm = rem ÷ ntn; tn = rem % ntn; sa = Int64(132); sb = Int64(4224); sbs = Int64(132)   # (constant strides)
     Base.Cartesian.@nexprs 32 i -> (c_i = 0.0f0)
-    k0 = Int64(0); ka = isk(oA); kb = isk(oB); dtA = FAST == 2 ? F32 : oA.dt; dtB = FAST == 2 ? BF : oB.dt
+    k0 = Int64(0); ka = isk(oA); kb = isk(oB); dtA = FAST == 2 ? F32 : FAST == 3 ? BF : oA.dt; dtB = FAST >= 2 ? BF : oB.dt
     g = (Int64(tid) & 3) << 3; ka && ltab!(R, sm, 0, oA, m0, nr, rt, true, tid); kb && ltab!(R, sm, sb, oB, n0, no, ct, true, tid)
     dA = ka ? kdesc(sm, 0, oA, Int64(rt), tid, sa) : (Int64(0), Int64(-1), Int64(0), Int64(-1)); dB = kb ? kdesc(sm, sb, oB, Int64(ct), tid, sbs) : (Int64(0), Int64(-1), Int64(0), Int64(-1))
     while k0 < K
@@ -781,7 +781,7 @@ end
 @inline function attn!(R::RQ, sm, n, tile, j, tid)         # the query tile: qt rows, 16 a pass of the thread layout (tr, tc), so qt / 16 rows a thread
     qr = nd(R, n, N_I1); kr = nd(R, n, N_I2); v = nd(R, n, N_I3); qkv = nd(R, n, N_I4); ao = nd(R, n, N_O1); lse = nd(R, n, N_O2); win = nd(R, n, N_WIN)
     qt = Int64(pln(R, n, NP_RT)); r0 = Int64(tile) * qt; nr = min(qt, Int64(R.P) - r0); tr = tid ÷ 16; tc = tid % 16; g = j ÷ 4
-    ko = qt * HD; vo = ko + 2048; so = vo + 2048; po = so + qt * 16; mo_ = po + qt * 16; lo = mo_ + qt   # smem: Q, K, V, scores, p, running max, running sum
+    ko = qt * HD; vo = ko + 16 * (HD + 1); so = vo + 2048; po = so + qt * 16; mo_ = po + qt * 16; lo = mo_ + qt   # smem: Q, K (rows HD + 1 apart: no bank conflicts), V, scores, p, running max, running sum
     for i in tid:256:qt*HD-1; (r = i ÷ HD; r < nr) && (sm[i + 1] = ev(R, qr, r0 + r, j * HD + i % HD)); end
     Base.Cartesian.@nexprs 16 d -> (o_d = 0.0f0)
     if tid < qt; sm[mo_ + tid + 1] = -Inf32; sm[lo + tid + 1] = 0.0f0; end
@@ -797,13 +797,16 @@ end
         while kt <= hi
             bar()
             kb = caddr(R, kr, s0, kt); vb = caddr(R, v, s0, kt); ebk = ebytes(R, kr); ebv = ebytes(R, v)
-            for i in tid:256:16*HD-1; c = i ÷ HD; ok = kt + c <= hi; sm[ko + i + 1] = ok ? rdv(kb + c * ebk, BF, g * HD + i % HD) : 0.0f0; sm[vo + i + 1] = ok ? rdv(vb + c * ebv, BF, g * HD + i % HD) : 0.0f0; end
+            let c = tid >> 4, dd = Int64(tid & 15) << 3, ok = kt + (tid >> 4) <= hi      # a key's 8 dims a thread: one 16-byte load each of K and V
+                kv = ok ? rd8(kb + c * ebk, BF, g * HD + dd) : ntuple(_ -> 0.0f0, 8); vv = ok ? rd8(vb + c * ebv, BF, g * HD + dd) : ntuple(_ -> 0.0f0, 8)
+                Base.Cartesian.@nexprs 8 e -> (sm[ko + c * (HD + 1) + dd + e] = kv[e]; sm[vo + c * HD + dd + e] = vv[e])
+            end
             bar()
             kp = kt + tc
             Base.Cartesian.@nexprs 2 b -> begin
                 s_b = -Inf32
                 if rb_b < nr && sg_b == s0 && kp <= pos_b && kp >= pos_b - (win > 0 ? win - 1 : pos_b) && kp <= hi
-                    s_b = 0.0f0; for d in 0:HD-1; s_b = fma(sm[rb_b * HD + d + 1], sm[ko + tc * HD + d + 1], s_b); end; s_b *= SCALE
+                    s_b = 0.0f0; for d in 0:HD-1; s_b = fma(sm[rb_b * HD + d + 1], sm[ko + tc * (HD + 1) + d + 1], s_b); end; s_b *= SCALE
                 end
                 ac_b && (sm[so + rb_b * 16 + tc + 1] = s_b)
             end
@@ -818,7 +821,7 @@ end
                 if ac_b
                     tc == 0 && (sm[mo_ + rb_b + 1] = mx_b; l = sm[lo + rb_b + 1] * sc_b; for c in 0:15; l += sm[po + rb_b * 16 + c + 1]; end; sm[lo + rb_b + 1] = l)
                     Base.Cartesian.@nexprs 8 d -> (o_{(b - 1) * 8 + d} *= sc_b)
-                    for c in 0:15; pc = sm[po + rb_b * 16 + c + 1]; Base.Cartesian.@nexprs 8 d -> (o_{(b - 1) * 8 + d} = fma(pc, sm[vo + c * HD + tc * 8 + d], o_{(b - 1) * 8 + d})); end
+                    for c in 0:15; pc = sm[po + rb_b * 16 + c + 1]; Base.Cartesian.@nexprs 8 d -> (o_{(b - 1) * 8 + d} = fma(pc, sm[vo + c * HD + tc + 16 * (d - 1) + 1], o_{(b - 1) * 8 + d})); end
                 end
             end
             kt += 16
@@ -830,14 +833,14 @@ end
     Base.Cartesian.@nexprs 2 b -> begin
         if rb_b < nr
             l = sm[lo + rb_b + 1]; gt = sigm(ev(R, qkv, r0 + rb_b, NE + 2NKV * HD + j)); a = eaddr(R, ao, r0 + rb_b)
-            Base.Cartesian.@nexprs 8 d -> wrv!(a, BF, o_{(b - 1) * 8 + d} / l * gt, Int64(j) * HD + tc * 8 + d - 1)
+            Base.Cartesian.@nexprs 8 d -> wrv!(a, BF, o_{(b - 1) * 8 + d} / l * gt, Int64(j) * HD + tc + 16 * (d - 1))
             tc == 0 && wrv!(eaddr(R, lse, r0 + rb_b), F32, sm[mo_ + rb_b + 1] + log(l), Int64(j))
         end
     end
 end
 @inline pk2(a::Float32, b::Float32) = reinterpret(Float32, (reinterpret(UInt32, a) >> 16) | (reinterpret(UInt32, b) & 0xffff0000))   # two BF16 values in a word
 @inline up2(w::Float32) = (reinterpret(Float32, reinterpret(UInt32, w) << 16), reinterpret(Float32, reinterpret(UInt32, w) & 0xffff0000))
-@inline function attb!(R::RQ, sm, n, tile, col, tid, kvpass::Bool)   # the tile (key tile in the kv pass, query tile in the q pass): qt rows, qt / 16 rows a thread; the kept tile's BF16 rows are packed two a word
+@inline function attb!(R::RQ, sm, n, tile, col, tid, kvpass::Bool)   # the tile (key tile in the kv pass, query tile in the q pass): qt rows, qt / 16 a thread; BF16 rows packed two a word
     qr = nd(R, n, N_I1); kr = nd(R, n, N_I2); v = nd(R, n, N_I3); qkv = nd(R, n, N_I4); ao = nd(R, n, N_M); gao = nd(R, n, N_NM); lse = nd(R, n, N_D); out = nd(R, n, N_O1); win = nd(R, n, N_WIN)
     qt = Int64(pln(R, n, NP_RT)); rp = qt ÷ 16; t0 = Int64(tile) * qt; nt = cld(Int64(R.P), 16); tr = tid ÷ 16; tc = tid % 16
     Base.Cartesian.@nexprs 16 d -> (k_d = 0.0f0); Base.Cartesian.@nexprs 16 d -> (v_d = 0.0f0)   # (the tile's sub-block b: 8 (b - 1) + d)
@@ -1011,7 +1014,7 @@ end
     v = nd(R, n, N_WV); p = vp(R, v); mo = vmo(R, v); len = ld(R.vec, Int64(v - 1) * VF + 1); f = ndf(R, n, 0); i = Int64(tid)
     while i < len; st!(p, ld(p, i) - f * ld(mo, i), i); i += 256; end
 end
-@inline function sample!(R::RQ, sm, n, tile, tid)           # a loss row's next token: each thread keeps its STOPK largest logits, a block-wide max a round merges them (ties to the lower id), then the model's temperature and top-p and a draw
+@inline function sample!(R::RQ, sm, n, tile, tid)           # a loss row's next token: each thread keeps its STOPK largest logits, a block-wide max a round merges them (ties to the lower id), then temperature, top-p, a draw
     lg = nd(R, n, N_I1); out = nd(R, n, N_O1); rt = pln(R, n, NP_RT); V0 = 0; I0 = 5120; S0 = 10240; tl = V0 + (STOPK - 1) * 256 + tid + 1
     for j in 0:min(rt, nrows(R, n) - Int64(tile) * rt)-1
         i = Int64(tile) * rt + j; r = rowof(R, LOSS, i); a = lp(Float32, eaddr(R, lg, r))
@@ -1231,13 +1234,13 @@ function resident(C::Card, S::Sys)                         # the blocks the card
     max(1, Int(nb[])) * KI.multiprocessor_count(BE)
 end
 # a request: rows, segments, loss rows and weights, wanted
-const SIGS = Dict{Any,UInt}(); const HUSED = Dict{Any,Int}()   # per system: the shape of the last request (its plan stands), the host cells a request has written
+const SIGS = Dict{Any,UInt}(); const HUSED = Dict{Any,Int}()   # per system: the last request's shape (its plan stands), the host cells written
 function request!(S::Sys, rows::Matrix{Int32}, segs::Matrix{Int32}, lrows::Vector{Int32}, wgt::Vector{Float32}, wanted; f2 = 1.0, iacc = 1.0, samp = 0, seed = 0)
     P = size(rows, 2); PL = length(lrows); NS = size(segs, 2); S.gen += 1
     linv = fill(Int32(-1), P); for (i, r) in enumerate(lrows); linv[r+1] = i - 1; end
     order = sortperm(rows[3, :]); urows = Int32.(order .- 1); uniq = Int32[]; i = 1
     while i <= P; j = i; while j < P && rows[3, order[j+1]] == rows[3, order[i]]; j += 1; end; push!(uniq, i - 1, j - i + 1); i = j + 1; end
-    sig = hash((P, PL, length(uniq) ÷ 2, NS, wanted, samp, DBG[], [(segs[1, j], segs[1, j] >= 0 ? Int32(0) : segs[2, j]) for j in 1:NS])); reuse = get(SIGS, S, UInt(0)) == sig ? 1 : 0   # the plan of the last request stands if it was this shape (a slot segment's length is not read by the planner)
+    sig = hash((P, PL, length(uniq) ÷ 2, NS, wanted, samp, DBG[], [(segs[1, j], segs[1, j] >= 0 ? Int32(0) : segs[2, j]) for j in 1:NS])); reuse = get(SIGS, S, UInt(0)) == sig ? 1 : 0   # the last request's plan stands if it had this shape (the planner does not read a slot segment's length)
     hu0 = get(HUSED, S, -1); hu = hu0 < 0 ? NFLAG : hu0; ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), S.cntH, 0, 4 * min(NFLAG, hu + 4096)); ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), S.cntH + 4 * (NFLAG - 256), 0, 4 * 256)   # (the cells a request wrote are below the largest plan seen; the rest were never written)
     for C in S.cards
         dev!(C.i + 1); up!(C.rows, 0, vec(rows)); up!(C.segs, 0, vec(segs)); up!(C.lrows, 0, lrows); up!(C.linv, 0, linv); up!(C.wgt, 0, wgt); up!(C.uniq, 0, uniq); up!(C.urows, 0, urows)
@@ -1251,7 +1254,7 @@ function request!(S::Sys, rows::Matrix{Int32}, segs::Matrix{Int32}, lrows::Vecto
     st == 0 || (delete!(SIGS, S); delete!(HUSED, S); n = S.plan[PH_S0+1]; error("request: status $st, node $n (kind $(S.G.node[NF*(n-1)+N_KIND+1])), VRAM $(S.plan[PH_VUSE+1]), host $(S.plan[PH_HUSE+1])"))
     nothing
 end
-await!(S::Sys) = nothing; prof(S::Sys, C::Card) = nothing   # (test/lfm3-dev.jl)
+await!(::Sys) = nothing; prof(::Sys, ::Card) = nothing   # (test/lfm3-dev.jl)
 # an edge's rows as a matrix (width x rows): from VRAM or host memory
 function fetch(S::Sys, e::Int, nr; card = 0, T = Float32)
     p = S.G.edge[EF*(e-1)+E_PROD+1]; card == 0 && (card = p > 0 ? S.G.node[NF*(p-1)+N_CARD+1] + 1 : 1)   # the producer's card holds it: that card's plan
