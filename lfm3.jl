@@ -349,8 +349,8 @@ end
         rt = att ? Int(aq) : k == SAMPLE ? 1 : k in (NRM, STAGE, STEP, MOMU) ? Int(rows2) : rk == WT ? 64 : Int(min(rows2, Int64(64)))
         nc = att && k != ATTBKV ? Int64(NH) : k == ATTBKV ? Int64(NKV) : k == DLOG ? Int64(cld(NV, 4096)) : Int64(1)
         if k == GEMM                                       # the tile with the least time
-            best = typemax(Int64); nrp = max(Int64(8), pow2ge(nr)); nop = max(Int64(16), pow2ge(no))
-            for lr in 3:7, lc in 4:7
+            best = typemax(Int64); nrp = max(Int64(4), pow2ge(nr)); nop = max(Int64(16), pow2ge(no))
+            for lr in 2:7, lc in 4:7
                 r_ = 1 << lr; c_ = 1 << lc; (r_ * c_ <= TILEA && r_ <= nrp && c_ <= nop) || continue
                 sc = cld(((nr + r_ - 1) >> lr) * ((no + c_ - 1) >> lc), nb) * (4096 + 2 * r_ * c_)   # waves x a slice's cost
                 (sc < best || (sc == best && r_ > rt)) && (best = sc; rt = r_; ct = c_)
