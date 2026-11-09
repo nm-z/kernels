@@ -156,4 +156,15 @@ function train(args)
         ckpt_write(S, ck, ep, length(order), best); flush(stdout)
     end
 end
+# the update, a request a slice: consecutive groups (a matrix's nodes) packed up to `seconds` of the rate measured on the slices before (Muon: flops a second; momentum steps: elements a second)
+const UPDCUR = Ref(1); const UPDRATE = zeros(2)
+function stepslice!(S::Sys; seconds = 10.0)                 # the next slice; true when the step is done
+    U = S.G.upd; i = UPDCUR[]; i == 1 && fill!(UPDRATE, 0.0)   # (a step measures its own rates: an untouched momentum is skipped on the device, a rate carried over would be too high)
+    cost(u) = u[3] > 0 ? u[3] : u[4]; cls(u) = u[3] > 0 ? 1 : 2; c = cls(U[i]); lim = UPDRATE[c] > 0 ? 0.8 * seconds * UPDRATE[c] : 0.0   # (unmeasured: one group, to measure)
+    j = i; tot = cost(U[i])
+    while j < length(U) && (cost(U[j+1]) == 0 || (cls(U[j+1]) == c && tot + cost(U[j+1]) <= lim)); j += 1; tot += cost(U[j]); end
+    t0 = time(); request!(S, reshape(Int32[0, 0, 0, -1], 4, 1), reshape(Int32[-1, 1], 2, 1), Int32[0], Float32[1], 8 | (Int64(U[i][1]) << 8) | (Int64(U[j][2]) << 32)); dt = time() - t0
+    tot > 0 && dt > 0.05 && (UPDRATE[c] = tot / dt); UPDCUR[] = j == length(U) ? 1 : j + 1; j == length(U)
+end
+step!(S::Sys; seconds = 10.0) = (UPDCUR[] = 1; while !stepslice!(S; seconds); end)
 (abspath(PROGRAM_FILE) == @__FILE__) && train(ARGS)

@@ -68,7 +68,8 @@ const SCOPE = CUDAON ? "syncscope(\"device\") " : "syncscope(\"agent\") "
 @eval @inline bar() = $(CUDAON ? :(CUDA.sync_threads()) : :(KI.barrier()))   # (bar.sync alone orders shared memory within the block; KI.barrier adds a MEMBAR.CTA)
 
 # ---- the graph: nodes (a method each), edges (what flows between them), mats and vecs ----
-const EMB, NORM, GEMM, CONV, ROPE, ATTN, RESID, LSE, DLOG, NORMB, SILUB, ATTBKV, ATTBQ, ROTNB, CONVB1, CONVB2, CONVW, NORMW, EMBB, NRM, STEP, STEPV, NRMS, STAGE, MOMU = Int32.(1:25)
+const EMB, NORM, GEMM, CONV, ROPE, ATTN, RESID, LSE, DLOG, NORMB, SILUB, ATTBKV, ATTBQ, ROTNB, CONVB1, CONVB2, CONVW, NORMW, EMBB, NRM, STEP, STEPV, NRMS, STAGE, MOMU, SAMPLE = Int32.(1:26)
+const STEMP, STOPK, STOPP = 0.7f0, 20, 0.95f0              # the model's own sampling (its GGUF)
 const NG = 16                                              # the attention gate's rows
 const NQKV = NE + 2NKV * HD + NG                           # q | k | v | gate
 const ALL, LOSS, WT = Int32(1), Int32(2), Int32(3)        # rows: all positions, loss positions, a weight's shape
@@ -172,6 +173,7 @@ function recipe(; lr = 0.002, lrv = 0.0002, lre = 0.002)
     rsh = edge!(G, :rsh, 1, F32; rows = LOSS); xh = edge!(G, :xh, NE, F32; rows = LOSS); node!(G, NORM, NL, LOGITS; rows = LOSS, in = (x, 0, 0, 0), out = (rsh, xh), wv = onv, D = NE, K = NE)
     lg = edge!(G, :lg, NV, F32; rows = LOSS); lpart = edge!(G, :lpart, 2 * cld(NV, 16), F32; rows = LOSS)
     node!(G, GEMM, NL, LOGITS; rows = LOSS, in = (xh, 0, 0, 0), out = (lg, lpart), m = me, nm = 1, fl = A_ROW | B_MAT, K = NE, no = NV, epi = EP_LSE)
+    tk = edge!(G, :tk, 1, F32; rows = LOSS); node!(G, SAMPLE, NL, LOGITS; rows = LOSS, in = (lg, 0, 0, 0), out = (tk, 0))   # the next token of each loss row (a request that samples on the device)
     lsev = edge!(G, :lse, 2, F32; rows = LOSS); node!(G, LSE, NL, LOSSW; rows = LOSS, in = (lpart, lg, 0, 0), out = (lsev, 0))
     # the adjoint: dlg, dxn = dlg E, dE = dlg' xn
     dlg = edge!(G, :dlg, NV, F32; rows = LOSS); node!(G, DLOG, NL, GRAD; rows = LOSS, in = (lg, lsev, 0, 0), out = (dlg, 0))
@@ -256,6 +258,7 @@ struct RQ
     node::LP{Int32}; nodef::LP{Float32}; edge::LP{Int32}; mat::LP{Int64}; vec::LP{Int64}; rope::LP{Float32}
     plan::LP{Int64}; cnt::LP{UInt32}; cntH::LP{UInt32}; q::LP{UInt32}
     aV::LP{UInt8}; nV::Int64; aH::LP{UInt8}; nH::Int64; slots::LP{UInt8}; slotsz::Int64; dbg::Int32; reuse::Int32; nflag::Int64
+    samp::Int32; seed::UInt32; step::Int32; rowsn::LP{Int32}; ring::LP{Int32}   # sampling on the device: 1 greedy, 2 the model's own; the next step's rows; the tokens out (host memory)
 end
 # the plan: a header; per edge; per node; per segment; the holes
 const PHN, PL_LOC, PL_OFF, PL_MOD, PL_LAST, PL_CA, PL_CB, PL_SZ = 16, 0, 1, 2, 3, 4, 5, 6
@@ -306,7 +309,7 @@ end
 # the derivation (one thread); status 1: no room
 @inline function wantn(R::RQ, n)                            # node n is in the request: its level is wanted, and it is in the node range asked (bits 8..31 first, 32..55 last; 0: all)
     hi = (R.wanted >> 32) & 0xffffff
-    lvlmask(nd(R, n, N_LVL)) & R.wanted & 0xff != 0 && (hi == 0 || (((R.wanted >> 8) & 0xffffff) <= n && n <= hi))
+    lvlmask(nd(R, n, N_LVL)) & R.wanted & 0xff != 0 && (hi == 0 || (((R.wanted >> 8) & 0xffffff) <= n && n <= hi)) && (R.samp != 0 || nd(R, n, N_KIND) != SAMPLE)
 end
 @inline function derive!(R::RQ)
     P = R.P; nn = R.nn; ne = R.ne
@@ -342,7 +345,7 @@ end
         rows2 = max(Int64(8), pow2ge(cld(nr, 2 * nb)))     # two tasks a block
         aq = Int64(16); ac = k == ATTN ? 162 : k == ATTBKV ? 160 : 226; ab = k == ATTBKV ? 4128 : 4096   # the tile's rows: smem bytes = ac a row + ab (Q, K, V, scores per method), while the heads' tiles still fill the blocks
         while att && R.dbg & 512 == 0 && 2aq <= 32 && 2aq * ac + ab <= SMW && cld(nr, 2aq) * (k == ATTBKV ? NKV : NH) >= 2nb; aq *= 2; end   # (rows a thread: 1 or 2)
-        rt = att ? Int(aq) : k in (NRM, STAGE, STEP, MOMU) ? Int(rows2) : rk == WT ? 64 : Int(min(rows2, Int64(64)))
+        rt = att ? Int(aq) : k == SAMPLE ? 1 : k in (NRM, STAGE, STEP, MOMU) ? Int(rows2) : rk == WT ? 64 : Int(min(rows2, Int64(64)))
         nc = att && k != ATTBKV ? Int64(NH) : k == ATTBKV ? Int64(NKV) : k == DLOG ? Int64(cld(NV, 4096)) : Int64(1)
         if k == GEMM                                       # the tile with the least time
             best = typemax(Int64); nrp = max(Int64(8), pow2ge(nr)); nop = max(Int64(16), pow2ge(no))
@@ -1008,6 +1011,45 @@ end
     v = nd(R, n, N_WV); p = vp(R, v); mo = vmo(R, v); len = ld(R.vec, Int64(v - 1) * VF + 1); f = ndf(R, n, 0); i = Int64(tid)
     while i < len; st!(p, ld(p, i) - f * ld(mo, i), i); i += 256; end
 end
+@inline function sample!(R::RQ, sm, n, tile, tid)           # a loss row's next token: each thread keeps its STOPK largest logits, a block-wide max a round merges them (ties to the lower id), then the model's temperature and top-p and a draw
+    lg = nd(R, n, N_I1); out = nd(R, n, N_O1); rt = pln(R, n, NP_RT); V0 = 0; I0 = 5120; S0 = 10240; tl = V0 + (STOPK - 1) * 256 + tid + 1
+    for j in 0:min(rt, nrows(R, n) - Int64(tile) * rt)-1
+        i = Int64(tile) * rt + j; r = rowof(R, LOSS, i); a = lp(Float32, eaddr(R, lg, r))
+        for q in 0:STOPK-1; sm[V0 + q * 256 + tid + 1] = -Inf32; sm[I0 + q * 256 + tid + 1] = reinterpret(Float32, typemax(Int32)); end
+        ins(x, e) = if x > sm[tl]                          # (x beats the thread's smallest: it moves up past what it beats)
+            p = STOPK - 1; while p > 0 && x > sm[V0 + (p - 1) * 256 + tid + 1]; sm[V0 + p * 256 + tid + 1] = sm[V0 + (p - 1) * 256 + tid + 1]; sm[I0 + p * 256 + tid + 1] = sm[I0 + (p - 1) * 256 + tid + 1]; p -= 1; end
+            sm[V0 + p * 256 + tid + 1] = x; sm[I0 + p * 256 + tid + 1] = reinterpret(Float32, e)
+        end
+        for c in 0:NV÷1024-1
+            e = Int32(tid + c * 1024); x1 = ld(a, e); x2 = ld(a, e + Int32(256)); x3 = ld(a, e + Int32(512)); x4 = ld(a, e + Int32(768))
+            ins(x1, e); ins(x2, e + Int32(256)); ins(x3, e + Int32(512)); ins(x4, e + Int32(768))
+        end
+        hp = 0
+        for q in 1:STOPK
+            ie = hp < STOPK ? reinterpret(Int32, sm[I0 + hp * 256 + tid + 1]) : typemax(Int32); sm[S0 + tid + 1] = hp < STOPK ? sm[V0 + hp * 256 + tid + 1] : -Inf32; sm[S0 + 257 + tid] = reinterpret(Float32, ie); bar()
+            s = 128; while s > 0
+                if tid < s
+                    v2 = sm[S0 + tid + 1 + s]; e2 = reinterpret(Int32, sm[S0 + 257 + tid + s]); v1 = sm[S0 + tid + 1]
+                    (v2 > v1 || (v2 == v1 && e2 < reinterpret(Int32, sm[S0 + 257 + tid]))) && (sm[S0 + tid + 1] = v2; sm[S0 + 257 + tid] = reinterpret(Float32, e2))
+                end
+                bar(); s >>= 1
+            end
+            we = reinterpret(Int32, sm[S0 + 257]); ie == we && (hp += 1)
+            tid == 0 && (sm[S0 + 513 + q] = sm[S0 + 1]; sm[S0 + 541 + q] = sm[S0 + 257]); bar()
+        end
+        if tid == 0
+            mx = sm[S0 + 514]; c = 0.0f0; for q in 1:STOPK; c += exp((sm[S0 + 513 + q] - mx) / STEMP); sm[S0 + 571 + q] = c; end
+            kc = STOPK; for q in STOPK-1:-1:1; sm[S0 + 571 + q] >= STOPP * c && (kc = q); end
+            h = R.seed ⊻ (UInt32(R.step) * 0x9e3779b1) ⊻ (UInt32(i) * 0x85ebca6b); h ⊻= h >> 16; h *= 0x85ebca6b; h ⊻= h >> 13; h *= 0xc2b2ae35; h ⊻= h >> 16
+            tg = Float32(h >> 8) * 5.9604645f-8 * sm[S0 + 571 + kc]; pk = kc; for q in kc-1:-1:1; sm[S0 + 571 + q] >= tg && (pk = q); end
+            tk = reinterpret(Int32, sm[S0 + 541 + (R.samp == 1 ? 1 : pk)]); wrv!(eaddr(R, out, r), F32, Float32(tk), 0)
+            pint(reinterpret(LP{UInt8}, R.rowsn)) != 0 && st!(R.rowsn, tk, 4r + 2)
+            pint(reinterpret(LP{UInt8}, R.ring)) != 0 && st!(R.ring, tk, Int64(R.step - 1) * 128 + i)
+        end
+        bar()
+    end
+    fence()
+end
 @inline function exec!(R::RQ, sm, n, tile, col, tid)
     k = nd(R, n, N_KIND)
     if nd(R, n, N_LVL) == WEIGHTS && (k == GEMM || k == STEP || k == STAGE) && nd(R, n, N_RS) > 0   # an untouched momentum: nothing to do
@@ -1037,6 +1079,7 @@ end
     elseif k == STAGE; stage!(R, n, tile, tid)
     elseif k == MOMU; momu!(R, n, tile, tid)
     elseif k == STEPV; stepv!(R, n, tid)
+    elseif k == SAMPLE; sample!(R, sm, n, tile, tid)
     end
 end
 # ---- the kernel: block 0 derives the plan; every block claims tasks in order ----
@@ -1045,11 +1088,11 @@ end
     tid = Int32(KI.get_local_id(Int32).x - 1); gid = Int32(KI.get_group_id(Int32).x - 1)
     if gid == 0 && tid == 0
         t0 = tick(); R.reuse == 0 && derive!(R); fence(); R.dbg & 64 != 0 && atomst!(R.cnt + 4 * (R.nflag - 4 * (Int64(R.nn) + 1)), UInt32((tick() - t0) >> 8))
-        atomst!(R.cntH + 4 * (R.nflag - 3), UInt32(pl(R, PH_STAT) + 16 * pl(R, PH_NT))); atomst!(R.q + 4, R.gen)
+        atomst!(R.cntH + 4 * (R.nflag - 3), UInt32(pl(R, PH_STAT) + 16 * pl(R, PH_NT))); atomst!(R.q + 4, R.gen | (atomld(R.cntH + 4 * (R.nflag - 5)) != 0 ? 0x80000000 : UInt32(0)))   # (a host-set word aborts the request: its blocks skip every task)
     end
-    if tid == 0; while atomld(R.q + 4) != R.gen; end; end
+    if tid == 0; v = atomld(R.q + 4); while v & 0x7fffffff != R.gen; v = atomld(R.q + 4); end; si[2] = Int32(v >> 31); end
     bar(); fence()
-    if pl(R, PH_STAT) == 0
+    if pl(R, PH_STAT) == 0 && si[2] == 0
         nt = pl(R, PH_NT)
         while true
             tid == 0 && (si[1] = Int32(atomadd!(R.q, UInt32(1))))
@@ -1165,14 +1208,15 @@ function load(dir; train = false, ncard = ndev(), hostgb = 6.0, reserve = 3.5e9,
     S
 end
 const DBG = Ref(parse(Int, get(ENV, "LFM3_DBG", "0")))
-function rq(S::Sys, C::Card, P, PL, NU, NS, wanted; f2 = 1.0, iacc = 1.0, reuse = 0)
-    G = S.G; nf = dalloc(4 * length(G.nodef)); up!(nf, 0, G.nodef); push!(C.bufs, nf)   # (nodef: its own copy, the lr may change)
+function rq(S::Sys, C::Card, P, PL, NU, NS, wanted; f2 = 1.0, iacc = 1.0, reuse = 0, samp = 0, seed = 0, step = 0, rows = addr(C.rows), segs = addr(C.segs), rowsn = 0, ring = 0, nf = nothing)
+    G = S.G; nf === nothing && (nf = dalloc(4 * length(G.nodef)); up!(nf, 0, G.nodef); push!(C.bufs, nf))   # (nodef: its own copy, the lr may change)
     RQ(Int32(P), Int32(PL), Int32(NU), Int32(NS), Int64(wanted), Int32(C.nblk), Int32(C.i), Int32(length(S.cards)), S.gen, Int32(G.nn), Int32(G.ne), Int32(S.cap),
        Float32(f2), Float32(iacc), Float32(1 / max(PL, 1)),
-       lp(Int32, addr(C.rows)), lp(Int32, addr(C.lrows)), lp(Int32, addr(C.linv)), lp(Float32, addr(C.wgt)), lp(Int32, addr(C.uniq)), lp(Int32, addr(C.urows)), lp(Int32, addr(C.segs)),
+       lp(Int32, rows), lp(Int32, addr(C.lrows)), lp(Int32, addr(C.linv)), lp(Float32, addr(C.wgt)), lp(Int32, addr(C.uniq)), lp(Int32, addr(C.urows)), lp(Int32, segs),
        lp(Int32, addr(C.node)), lp(Float32, addr(nf)), lp(Int32, addr(C.edge)), lp(Int64, addr(C.matd)), lp(Int64, addr(C.vecd)), lp(Float32, addr(C.rope)),
        lp(Int64, addr(C.plan)), lp(UInt32, addr(C.cnt)), lp(UInt32, S.cntHd), lp(UInt32, addr(C.q)),
-       lp(UInt8, addr(C.aV)), Int64(C.nV), lp(UInt8, S.aHd), Int64(S.nH), lp(UInt8, S.slots), Int64(S.slotsz), Int32(DBG[]), Int32(reuse), Int64(NFLAG))
+       lp(UInt8, addr(C.aV)), Int64(C.nV), lp(UInt8, S.aHd), Int64(S.nH), lp(UInt8, S.slots), Int64(S.slotsz), Int32(DBG[]), Int32(reuse), Int64(NFLAG),
+       Int32(samp), UInt32(seed), Int32(step), lp(Int32, rowsn), lp(Int32, ring))
 end
 function resident(C::Card, S::Sys)                         # the blocks the card runs at once
     k = C.k; A = rq(S, C, 1, 1, 1, 1, 1)
@@ -1188,17 +1232,17 @@ function resident(C::Card, S::Sys)                         # the blocks the card
 end
 # a request: rows, segments, loss rows and weights, wanted
 const SIGS = Dict{Any,UInt}(); const HUSED = Dict{Any,Int}()   # per system: the shape of the last request (its plan stands), the host cells a request has written
-function request!(S::Sys, rows::Matrix{Int32}, segs::Matrix{Int32}, lrows::Vector{Int32}, wgt::Vector{Float32}, wanted; f2 = 1.0, iacc = 1.0)
+function request!(S::Sys, rows::Matrix{Int32}, segs::Matrix{Int32}, lrows::Vector{Int32}, wgt::Vector{Float32}, wanted; f2 = 1.0, iacc = 1.0, samp = 0, seed = 0)
     P = size(rows, 2); PL = length(lrows); NS = size(segs, 2); S.gen += 1
     linv = fill(Int32(-1), P); for (i, r) in enumerate(lrows); linv[r+1] = i - 1; end
     order = sortperm(rows[3, :]); urows = Int32.(order .- 1); uniq = Int32[]; i = 1
     while i <= P; j = i; while j < P && rows[3, order[j+1]] == rows[3, order[i]]; j += 1; end; push!(uniq, i - 1, j - i + 1); i = j + 1; end
-    sig = hash((P, PL, length(uniq) ÷ 2, NS, wanted, DBG[], [(segs[1, j], segs[1, j] >= 0 ? Int32(0) : segs[2, j]) for j in 1:NS])); reuse = get(SIGS, S, UInt(0)) == sig ? 1 : 0   # the plan of the last request stands if it was this shape (a slot segment's length is not read by the planner)
+    sig = hash((P, PL, length(uniq) ÷ 2, NS, wanted, samp, DBG[], [(segs[1, j], segs[1, j] >= 0 ? Int32(0) : segs[2, j]) for j in 1:NS])); reuse = get(SIGS, S, UInt(0)) == sig ? 1 : 0   # the plan of the last request stands if it was this shape (a slot segment's length is not read by the planner)
     hu0 = get(HUSED, S, -1); hu = hu0 < 0 ? NFLAG : hu0; ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), S.cntH, 0, 4 * min(NFLAG, hu + 4096)); ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), S.cntH + 4 * (NFLAG - 256), 0, 4 * 256)   # (the cells a request wrote are below the largest plan seen; the rest were never written)
     for C in S.cards
         dev!(C.i + 1); up!(C.rows, 0, vec(rows)); up!(C.segs, 0, vec(segs)); up!(C.lrows, 0, lrows); up!(C.linv, 0, linv); up!(C.wgt, 0, wgt); up!(C.uniq, 0, uniq); up!(C.urows, 0, urows)
         up!(C.q, 0, UInt32[0, 0, 0, 0]); fill!(C.cnt, 0)
-        R = rq(S, C, P, PL, length(uniq) ÷ 2, NS, wanted; f2, iacc, reuse); C.k(R; ndrange = 256 * C.nblk)
+        R = rq(S, C, P, PL, length(uniq) ÷ 2, NS, wanted; f2, iacc, reuse, samp, seed, step = 1); C.k(R; ndrange = 256 * C.nblk)
     end
     await!(S); for C in S.cards; dev!(C.i + 1); sync(); pop!(C.bufs); end
     dev!(1); dn!(S.plan, S.cards[1].plan, 0)
@@ -1207,17 +1251,6 @@ function request!(S::Sys, rows::Matrix{Int32}, segs::Matrix{Int32}, lrows::Vecto
     st == 0 || (delete!(SIGS, S); delete!(HUSED, S); n = S.plan[PH_S0+1]; error("request: status $st, node $n (kind $(S.G.node[NF*(n-1)+N_KIND+1])), VRAM $(S.plan[PH_VUSE+1]), host $(S.plan[PH_HUSE+1])"))
     nothing
 end
-# the update, a request a slice: consecutive groups (a matrix's nodes) packed up to `seconds` of the rate measured on the slices before (Muon: flops a second; momentum steps: elements a second)
-const UPDCUR = Ref(1); const UPDRATE = zeros(2)
-function stepslice!(S::Sys; seconds = 10.0)                 # the next slice; true when the step is done
-    U = S.G.upd; i = UPDCUR[]; i == 1 && fill!(UPDRATE, 0.0)   # (a step measures its own rates: an untouched momentum is skipped on the device, a rate carried over would be too high)
-    cost(u) = u[3] > 0 ? u[3] : u[4]; cls(u) = u[3] > 0 ? 1 : 2; c = cls(U[i]); lim = UPDRATE[c] > 0 ? 0.8 * seconds * UPDRATE[c] : 0.0   # (unmeasured: one group, to measure)
-    j = i; tot = cost(U[i])
-    while j < length(U) && (cost(U[j+1]) == 0 || (cls(U[j+1]) == c && tot + cost(U[j+1]) <= lim)); j += 1; tot += cost(U[j]); end
-    t0 = time(); request!(S, reshape(Int32[0, 0, 0, -1], 4, 1), reshape(Int32[-1, 1], 2, 1), Int32[0], Float32[1], 8 | (Int64(U[i][1]) << 8) | (Int64(U[j][2]) << 32)); dt = time() - t0
-    tot > 0 && dt > 0.05 && (UPDRATE[c] = tot / dt); UPDCUR[] = j == length(U) ? 1 : j + 1; j == length(U)
-end
-step!(S::Sys; seconds = 10.0) = (UPDCUR[] = 1; while !stepslice!(S; seconds); end)
 await!(S::Sys) = nothing; prof(S::Sys, C::Card) = nothing   # (test/lfm3-dev.jl)
 # an edge's rows as a matrix (width x rows): from VRAM or host memory
 function fetch(S::Sys, e::Int, nr; card = 0, T = Float32)
@@ -1237,24 +1270,4 @@ function logits(S::Sys, ids::Vector{Int}; lrows = Int32.(0:length(ids)-1))
     request!(S, rows, reshape(Int32[-1, P], 2, 1), lrows, ones(Float32, length(lrows)), 1)
     fetch(S, S.G.names[:lg], length(lrows))
 end
-function kl(S::Sys, ids, refpath, n)
-    t0 = time(); Lg = logits(S, ids[1:n]); tp = time() - t0
-    ref = Mmap.mmap(refpath, Matrix{UInt16}, (NV, n)); kls = Float64[]; top = 0
-    for p in 1:n
-        r = Float64.(bf32.(view(ref, :, p))); o = Float64.(view(Lg, :, p)); (all(isfinite, r) && all(isfinite, o)) || (push!(kls, Inf); continue)
-        lr = r .- (maximum(r) + log(sum(exp.(r .- maximum(r))))); lo = o .- (maximum(o) + log(sum(exp.(o .- maximum(o)))))
-        push!(kls, sum(exp.(lr) .* (lr .- lo))); top += argmax(r) == argmax(o)
-    end
-    m = length(kls)
-    @printf("KL vs BF16 over %d positions: mean %.6f, median %.6f, max %.5f; top-1 %.4f; %.1f s (%.1f tok/s)\n", m, sum(kls) / m, sort(kls)[cld(m, 2)], maximum(kls), top / m, tp, n / tp)
-end
-function main(args)
-    arg(k, d) = (i = findfirst(==(k), args); i === nothing ? d : args[i+1])
-    if (i = findfirst(==("--kl"), args)) !== nothing
-        n = parse(Int, args[i+1]); ref = args[i+2]; S = load(arg("--model", expanduser("~/models/lfm3-1.7b-base")); nslot = 0)
-        ids = Int.(reinterpret(Int32, read(replace(ref, ".logits.bf16" => ".ids"))))
-        kl(S, ids, ref, n)
-    end
-end
 const NPMAX = Ref(1568)   # positions a window: what the pool holds (load sets it)
-(abspath(PROGRAM_FILE) == @__FILE__) && main(ARGS)
