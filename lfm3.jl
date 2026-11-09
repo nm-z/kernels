@@ -65,7 +65,7 @@ const SCOPE = CUDAON ? "syncscope(\"device\") " : "syncscope(\"agent\") "
 @eval @inline tick() = $(CUDAON ? :(Int64(CUDA.clock(UInt64))) : :(ccall("llvm.readcyclecounter", llvmcall, Int64, ())))   # (the SM clock: cycles)
 @eval @inline atomst!(p::LP{UInt32}, v::UInt32) = Base.llvmcall($("%p = inttoptr i64 %0 to ptr addrspace(1)\nstore atomic i32 %1, ptr addrspace(1) %p $(SCOPE)seq_cst, align 4\nret void"), Cvoid, Tuple{Int64,UInt32}, Core.Intrinsics.bitcast(Int64, p), v)
 @inline fence() = Base.llvmcall("fence seq_cst\nret void", Cvoid, Tuple{})
-@inline bar() = KI.barrier()
+@eval @inline bar() = $(CUDAON ? :(CUDA.sync_threads()) : :(KI.barrier()))   # (bar.sync alone orders shared memory within the block; KI.barrier adds a MEMBAR.CTA)
 
 # ---- the graph: nodes (a method each), edges (what flows between them), mats and vecs ----
 const EMB, NORM, GEMM, CONV, ROPE, ATTN, RESID, LSE, DLOG, NORMB, SILUB, ATTBKV, ATTBQ, ROTNB, CONVB1, CONVB2, CONVW, NORMW, EMBB, NRM, STEP, STEPV, NRMS, STAGE, MOMU = Int32.(1:25)
@@ -510,23 +510,28 @@ end
     end
     Base.Cartesian.@nexprs 2 q -> (i_q < ng && Base.Cartesian.@nexprs 8 e -> (sm[so + l_q * sa + ((g_q + 8 * (l_q >> 3)) & (nrow - 1)) + e] = v_q[e]))
 end
-@inline function kloop(R::RQ, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk, t8::Bool)
+@inline function kl(R, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk, t8)
+    f = isk(oA) && isk(oB) && K % 32 == 0 ? (oA.dt != BF && oB.dt == BF ? 2 : 1) : 0
+    t8 ? kf(f, Val(true), R, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk) : kf(f, Val(false), R, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk)
+end
+@inline kf(f, v, args...) = f == 2 ? kloop(args..., v, Val(2)) : f == 1 ? kloop(args..., v, Val(1)) : kloop(args..., v, Val(0))   # (the loop is compiled for the tile (the 8 x 4 tile keeps 32 accumulators, the others 16) and for whole slices of two kfast operands (the loads need none of the generic path's registers; 2: Float32 rows, BF16 weights))
+@inline function kloop(R::RQ, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk, ::Val{T8}, ::Val{FAST}) where {T8,FAST}
     act = tid < ntm * ntn * ntk; tk = tid ÷ (ntm * ntn); rem = tid % (ntm * ntn); tm = rem ÷ ntn; tn = rem % ntn; sa = Int64(132); sb = Int64(4224); sbs = Int64(132)   # (constant strides)
     Base.Cartesian.@nexprs 32 i -> (c_i = 0.0f0)
-    k0 = Int64(0); ka = isk(oA); kb = isk(oB)
+    k0 = Int64(0); ka = isk(oA); kb = isk(oB); dtA = FAST == 2 ? F32 : oA.dt; dtB = FAST == 2 ? BF : oB.dt
     g = (Int64(tid) & 3) << 3; ka && ltab!(R, sm, 0, oA, m0, nr, rt, true, tid); kb && ltab!(R, sm, sb, oB, n0, no, ct, true, tid)
     dA = ka ? kdesc(sm, 0, oA, Int64(rt), tid, sa) : (Int64(0), Int64(-1), Int64(0), Int64(-1)); dB = kb ? kdesc(sm, sb, oB, Int64(ct), tid, sbs) : (Int64(0), Int64(-1), Int64(0), Int64(-1))
     while k0 < K
         bar()
-        if ka && kb && k0 + 32 <= K                           # a whole slice of both operands: every load first, then every store (one memory round trip)
-            ra = kget(oA.dt, dA, k0); rb = kget(oB.dt, dB, k0); kput!(sm, 0, oA.dt, dA, ra, sa); kput!(sm, sb, oB.dt, dB, rb, sbs)
+        if FAST > 0 || (ka && kb && k0 + 32 <= K)            # a whole slice of both operands: every load first, then every store (one memory round trip)
+            ra = kget(dtA, dA, k0); rb = kget(dtB, dB, k0); kput!(sm, 0, dtA, dA, ra, sa); kput!(sm, sb, dtB, dB, rb, sbs)
         else
             if ka; kld!(sm, 0, oA.dt, dA, k0, K, g, sa) else ldtile!(R, sm, 0, oA, rt, nr, m0, k0, K, tid, sa) end; if kb; kld!(sm, sb, oB.dt, dB, k0, K, g, sbs) else ldtile!(R, sm, sb, oB, ct, no, n0, k0, K, tid, sbs) end
         end
         bar()
         if act                                              # a k: 8 (or 4) rows, 4 columns
             kend = Int32(32) + Int32(K < 0)                  # (opaque: the loop stays a loop)
-            if t8
+            if T8
                 kq = Int32(0)
                 while kq < kend
                     rk = Int64((kq >> 3) << 3); pa = (tm * 8 + rk) & (rt - 1); pb = (tn * 4 + rk) & (ct - 1)
@@ -585,8 +590,8 @@ end
         W = Int64(ed(R, e2, E_W)); tr = fl & B_TR != 0; oB = OPD(ebase(R, e2), ed(R, e2, E_DT), Int32(3), 0, 0, tr ? 1 : W, tr ? W : 1, 0, 0, 0)
     end
     t8 = rt * ct >= TILEA; tr = t8 ? 8 : 4; ntn = Int32(ct ÷ 4); ntm = Int32((rt + tr - 1) ÷ tr); ntk = Int32(1); while ntk * 2 * ntm * ntn <= 256; ntk *= Int32(2); end
-    c1 = kloop(R, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk, t8)
-    c2 = nB == 2 ? kloop(R, sm, oA, OPD(oB.mode == 3 ? lp(UInt8, mt(R, m + Int32(1), 0)) : oB.p, oB.dt, oB.mode, oB.e, oB.nk, oB.ms, oB.ks, oB.off, m + Int32(1), oB.nm), rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk, t8) : c1
+    c1 = kl(R, sm, oA, oB, rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk, t8)
+    c2 = nB == 2 ? kl(R, sm, oA, OPD(oB.mode == 3 ? lp(UInt8, mt(R, m + Int32(1), 0)) : oB.p, oB.dt, oB.mode, oB.e, oB.nk, oB.ms, oB.ks, oB.off, m + Int32(1), oB.nm), rt, ct, nr, no, m0, n0, K, tid, ntm, ntn, ntk, t8) : c1
     act = tid < ntm * ntn * ntk; tk = tid ÷ (ntm * ntn); rem = tid % (ntm * ntn); tm = rem ÷ ntn; tn = rem % ntn
     o1 = nd(R, n, N_O1); o2 = nd(R, n, N_O2); e3 = nd(R, n, N_I3); f1 = ndf(R, n, 0); f2 = ndf(R, n, 1)
     epi == EP_LSE && bar()
