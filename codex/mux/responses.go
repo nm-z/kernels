@@ -117,7 +117,7 @@ func completeResponse(w http.ResponseWriter, pr *prepared, rb *respBuilder, usag
 		return
 	}
 	status := "completed"
-	ex := map[string]any{"usage": usage}
+	ex := map[string]any{"usage": usageOrNull(usage)}
 	if incomplete {
 		status = "incomplete"
 		ex["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
@@ -126,4 +126,13 @@ func completeResponse(w http.ResponseWriter, pr *prepared, rb *respBuilder, usag
 		ex[k] = v
 	}
 	writeJSON(w, http.StatusOK, rb.responseObj(status, ex))
+}
+
+// usageOrNull is the usage object of a Responses reply: the provider's token counts when it
+// reported any, else null. Codex reads `usage` as numbers, so an empty object breaks the stream.
+func usageOrNull(usage map[string]any) any {
+	if len(usage) == 0 {
+		return nil
+	}
+	return usage
 }

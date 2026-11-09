@@ -564,12 +564,12 @@ func (b *respBuilder) stats(s *liveStats) {
 }
 
 func (b *respBuilder) completed(usage map[string]any) {
-	b.emit("response.completed", map[string]any{"response": b.responseObj("completed", map[string]any{"usage": usage})})
+	b.emit("response.completed", map[string]any{"response": b.responseObj("completed", map[string]any{"usage": usageOrNull(usage)})})
 }
 
 func (b *respBuilder) incomplete(usage map[string]any, reason string) {
 	b.emit("response.incomplete", map[string]any{"response": b.responseObj("incomplete", map[string]any{
-		"usage": usage, "incomplete_details": map[string]any{"reason": reason}})})
+		"usage": usageOrNull(usage), "incomplete_details": map[string]any{"reason": reason}})})
 }
 
 func (b *respBuilder) failedEvent(code, message string) {
