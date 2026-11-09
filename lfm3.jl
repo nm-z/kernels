@@ -267,7 +267,7 @@ const SMW = 11520   # a block's shared memory, in words
 const TILEA = 256 * 32   # a tile's accumulators (smem: a 132 stride a slice row; line tables from 8448)
 const NP_F0, NP_NT, NP_NC, NP_RT, NP_CT, NP_T0, NP_ON, NP_FL, NP_WAR = 0, 1, 2, 3, 4, 5, 6, 7, 8   # (WAR: the last reader of reused memory)
 const PH_NT, PH_NFLAG, PH_STAT, PH_ORDER, PH_S0, PH_S1, PH_SECT, PH_T0S, PH_T1S, PH_VUSE, PH_HUSE, PH_SLOT = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
-const NSEG, NHOLE = 64, 512
+const NSEG, NHOLE, BURST = 64, 512, 64
 @inline nd(R::RQ, n, f) = ldn(R.node, Int64(n - 1) * NF + f)
 @inline ndf(R::RQ, n, i) = ldn(R.nodef, Int64(n - 1) * 4 + i)
 @inline ed(R::RQ, e, f) = ldn(R.edge, Int64(e - 1) * EF + f)
@@ -325,7 +325,7 @@ end
     for e in 1:ne
         ed(R, e, E_CACHE) != 0 || continue; persist && pl!(R, PE(R, e, PL_LAST), typemax(Int32))
         reach = ed(R, e, E_REACH); bytes = ebytes(R, e)
-        reach > 0 || continue; ring = max(Int64(16), pow2ge(persist ? Int64(reach) + 64 : Int64(P)))   # (a transient request holds every position)
+        reach > 0 || continue; ring = max(Int64(16), pow2ge(persist ? Int64(reach) + BURST : Int64(P)))   # (a transient request holds every position)
         pl!(R, PE(R, e, PL_MOD), ring - 1); pl!(R, PE(R, e, PL_CA), 0); pl!(R, PE(R, e, PL_CB), cb); cb += ring * bytes
     end
     for e in 1:ne
@@ -1158,7 +1158,7 @@ function load(dir; train = false, ncard = ndev(), hostgb = 6.0, reserve = 3.5e9,
     ca = 0; cb = 0
     for e in 1:ne
         G.edge[EF*(e-1)+E_CACHE+1] != 0 || continue; w = G.edge[EF*(e-1)+E_W+1] * (G.edge[EF*(e-1)+E_DT+1] == BF ? 2 : 4); reach = G.edge[EF*(e-1)+E_REACH+1]
-        reach > 0 ? (cb += nextpow(2, reach + 64) * w) : (ca += w)
+        reach > 0 ? (cb += nextpow(2, reach + BURST) * w) : (ca += w)
     end
     slotsz = ca * cap + cb; S = Sys(G, g, dir, Card[], train, aH, aHd, nH, cntH, cntHd, Tuple{String,Ptr{UInt8},Int}[], 0, slotsz, nslot, cap, UInt32(0), Int64[], 0, Dict{Tuple{Int,Int},Any}())
     Ebf = tensor(g, "model.embed_tokens.weight"); Ehost = Ptr{UInt8}(0); Ehd = UInt64(0)

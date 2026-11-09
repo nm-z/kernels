@@ -8,9 +8,12 @@ include(joinpath(@__DIR__, "..", "codex", "julia", "Mux.jl")); using .Mux
 struct Job; slot::Int; toks::Vector{Int}; p0::Int; out::Channel{Vector{Float32}}; end
 mutable struct Lane; slot::Int; pos::Int; tok::Int; out::Channel{Int}; done::Bool; gone::Base.Event; end   # a chat decoding: the token at pos, the tokens out; done: the chat is over, gone: the batcher dropped it
 const SAMP = Ref(2); const INBOX = Channel{Any}(Inf)                                 # the jobs (a prompt's rows) and the lanes (a chat that starts decoding) waiting for the card
-function prefill!(S::Sys, jobs, maxrows)                        # the jobs waiting run as the segments of one request (the weights are read once for all of them)
+const CHUNK = Ref(1); const ROWS = Ref(typemax(Int))                                                      # the rows one request has been seen not to hold (none yet: every job waiting goes together)
+# the rows a slot can take in one request: what its rings hold past what a row reads back (lfm3.jl sizes a ring to the next power of two of reach + BURST)
+chunk(S::Sys) = minimum(nextpow(2, r + BURST) - r for r in (S.G.edge[EF*(e-1)+E_REACH+1] for e in 1:S.G.ne) if r > 0)
+function prefill!(S::Sys, jobs)                                 # the jobs waiting run as the segments of one request (the weights are read once for all of them)
     take = Job[]; nrow = 0
-    while !isempty(jobs) && (isempty(take) || nrow + length(jobs[1].toks) <= maxrows); j = popfirst!(jobs); push!(take, j); nrow += length(j.toks); end
+    while !isempty(jobs) && length(take) < NSEG && (isempty(take) || nrow + length(jobs[1].toks) < ROWS[]); j = popfirst!(jobs); push!(take, j); nrow += length(j.toks); end
     sort!(take; by = j -> j.slot); NS = length(take); rows = Matrix{Int32}(undef, 4, nrow); segs = Matrix{Int32}(undef, 2, NS); lr = Int32[]; c = 0
     for (s, j) in enumerate(take)
         n = length(j.toks); segs[:, s] = Int32[j.slot, j.p0 + n]
@@ -21,13 +24,15 @@ function prefill!(S::Sys, jobs, maxrows)                        # the jobs waiti
         request!(S, rows, segs, lr, ones(Float32, NS), 1); L = fetch(S, S.G.names[:lg], NS)
         for (s, j) in enumerate(take); Base.put!(j.out, L[:, s]); end   # (lfm3.jl's own put! and fetch shadow Base's)
     catch e
-        for j in take; close(j.out, e); end
+        if length(take) > 1 && e isa ErrorException && occursin(r"status [12],", e.msg)   # the plan did not fit (nothing ran): fewer rows a request from now on, these jobs again
+            ROWS[] = nrow; prepend!(jobs, take)
+        else; for j in take; close(j.out, e); end; end
     end
 end
 function decode!(S::Sys, lanes, cap)                            # up to 32 steps of every chat decoding, the tokens handed out as they come; a prompt, a chat that ends or one that starts stops the chain
     for l in lanes; cap - 1 - l.pos < 1 && (l.done = true; close(l.out); notify(l.gone)); end
     filter!(l -> !l.done, lanes); isempty(lanes) && return
-    K = min(32, minimum(cap - 1 - l.pos for l in lanes))
+    K = min(KMAX, minimum(cap - 1 - l.pos for l in lanes))      # (as many steps as the chain's buffers hold: an arrival aborts what has not started)
     ch = chain!(S, [l.slot for l in lanes], [l.pos for l in lanes], [l.tok for l in lanes], K; seed = rand(UInt32), samp = SAMP[]); k = 1; aborted = false
     while k <= K
         if chainready(ch, k)
@@ -48,7 +53,7 @@ function batcher(S::Sys, cap)                                   # the one task t
             isempty(jobs) && isempty(lanes) && sink(take!(INBOX))
             while isready(INBOX); sink(take!(INBOX)); end
             for l in lanes; l.done && (close(l.out); notify(l.gone)); end; filter!(l -> !l.done, lanes)
-            if !isempty(jobs); prefill!(S, jobs, 128)
+            if !isempty(jobs); prefill!(S, jobs)
             elseif !isempty(lanes); sleep(0.002); isready(INBOX) || decode!(S, lanes, cap)   # (a prompt's next rows may be on their way: a moment's grace)
             end
         catch e
@@ -77,9 +82,9 @@ function run!(slot::Int, r::Mux.Run, held::Vector{Int}, cap::Int)
     beat = Threads.@spawn while !fin[]; Mux.stats!(r); idle(); sleep(0.25); end             # (stats at least every 500 ms, a prefill request is longer)
     p0 = 0; while p0 < min(P - 1, length(held)) && held[p0+1] == ids[p0+1]; p0 += 1; end   # the cache's prefix; the last token always runs
     length(held) - p0 > 100 && (p0 = 0); resize!(held, p0); l = Float32[]
-    for a in p0+1:64:P                                       # (64 rows a request: the rings)
+    for a in p0+1:CHUNK[]:P                                  # (a request's rows of one slot: what the rings hold)
         Mux.cancelled(r) && break
-        b = min(P, a + 63); tb = time(); l = slotrun(slot, ids[a:b], a - 1); busy += time() - tb; append!(held, ids[a:b]); Mux.prefill!(r, b)
+        b = min(P, a + CHUNK[] - 1); tb = time(); l = slotrun(slot, ids[a:b], a - 1); busy += time() - tb; append!(held, ids[a:b]); Mux.prefill!(r, b)
     end
     gen = 0; stopped = false; t1 = time(); lane = nothing
     if !isempty(l) && r.max_new > 0 && !Mux.cancelled(r)
@@ -100,7 +105,7 @@ function run!(slot::Int, r::Mux.Run, held::Vector{Int}, cap::Int)
     lane === nothing || wait(lane.gone)                      # (the card is done with the slot before another chat takes it)
 end
 function main(dir; cap = 4096, nslot = 4)
-    S = load(dir; nslot, cap); helds = [Int[] for _ in 1:nslot]; free = Set(0:nslot-1); lk = ReentrantLock(); cv = Threads.Condition(lk)
+    S = load(dir; nslot, cap); CHUNK[] = chunk(S); helds =[Int[] for _ in 1:nslot]; free = Set(0:nslot-1); lk = ReentrantLock(); cv = Threads.Condition(lk)
     Threads.@spawn batcher(S, cap)
     println("registering with mux: ", nslot, " slots of ", cap, " positions"); flush(stdout)
     Mux.serve(positions = cap, max_new = 2048, slots = nslot) do r

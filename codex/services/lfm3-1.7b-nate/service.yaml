@@ -1,8 +1,8 @@
 kind: engine
 display: LFM3-1.7B-nate-epoch1-archy-m60-megakernel
-gguf: /home/nate/models/lfm3-1.7b-nate/tokenizer.gguf
+gguf: /home/nate/models/lfm3-1.7b-nate/tokenizer-think.gguf   # (tokenizer.gguf with the generation prompt opening <think> unless enable_thinking is false)
 ctx: 4096
-efforts: [none]
+efforts: [high, none]   # (the default is the middle: none. With high the generation prompt opens <think>; this finetune never closes it, so the whole reply arrives as reasoning)
 vision: false
 device: archy Tesla M60 die 3 (lfm3.jl megakernel)
 command: [/usr/local/bin/julia, --check-bounds=no, --project=env/cuda, -t, "8", lfm3-serve/serve.jl, --model, /dev/shm/lfm3/nate, --cap, "4096", --slots, "8"]
