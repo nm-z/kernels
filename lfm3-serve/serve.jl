@@ -29,8 +29,15 @@ end
 function slotrun(slot, toks, p0)                             # rows p0.. of a slot's chat; the last row's logits
     j = Job(slot, toks, p0, Channel{Vector{Float32}}(1)); Base.put!(JOBS, j); take!(j.out)
 end
+function topk(l, k)                                          # the k largest, best first, in one pass (a threshold of the kept: almost every logit is skipped at once)
+    v = fill(-Inf32, k); ix = zeros(Int, k); m = -Inf32; mi = 1
+    @inbounds for i in eachindex(l)
+        x = l[i]; x > m && (v[mi] = x; ix[mi] = i; mi = argmin(v); m = v[mi])
+    end
+    ix[sortperm(v; rev = true)]
+end
 function pick(l, rng)
-    ix = partialsortperm(l, 1:TOPK; rev = true); p = exp.((l[ix] .- l[ix[1]]) ./ TEMP); c = cumsum(p); k = something(findfirst(>=(TOPP * c[end]), c), TOPK)
+    ix = topk(l, TOPK); p = exp.((l[ix] .- l[ix[1]]) ./ TEMP); c = cumsum(p); k = something(findfirst(>=(TOPP * c[end]), c), TOPK)
     ix[findfirst(>=(rand(rng) * c[k]), c[1:k])] - 1
 end
 function run!(slot::Int, r::Mux.Run, held::Vector{Int}, cap::Int)

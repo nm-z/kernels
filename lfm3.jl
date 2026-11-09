@@ -487,9 +487,14 @@ const RAW0 = ((UInt64(0), UInt64(0), UInt64(0), UInt64(0)), (UInt64(0), UInt64(0
 end
 @inline function kput!(sm, so, dt, d, r, st)                  # the registers into the slice in smem
     Base.Cartesian.@nexprs 2 q -> begin
-        a = r[q][1]; b = r[q][2]; c = r[q][3]; e = r[q][4]
-        v = dt == BF ? (bfp(a, 0), bfp(a, 1), bfp(a, 2), bfp(a, 3), bfp(b, 0), bfp(b, 1), bfp(b, 2), bfp(b, 3)) : (f32p(a, 0), f32p(a, 1), f32p(b, 0), f32p(b, 1), f32p(c, 0), f32p(c, 1), f32p(e, 0), f32p(e, 1))
-        d[2q] >= 0 && Base.Cartesian.@nexprs 8 i -> (sm[so + d[2q] + (i - 1) * st + 1] = v[i])
+        a = r[q][1]; b = r[q][2]; c = r[q][3]; e = r[q][4]; o = so + d[2q] + 1
+        if d[2q] >= 0
+            if dt == BF
+                sm[o] = bfp(a, 0); sm[o + st] = bfp(a, 1); sm[o + 2st] = bfp(a, 2); sm[o + 3st] = bfp(a, 3); sm[o + 4st] = bfp(b, 0); sm[o + 5st] = bfp(b, 1); sm[o + 6st] = bfp(b, 2); sm[o + 7st] = bfp(b, 3)
+            else
+                sm[o] = f32p(a, 0); sm[o + st] = f32p(a, 1); sm[o + 2st] = f32p(b, 0); sm[o + 3st] = f32p(b, 1); sm[o + 4st] = f32p(c, 0); sm[o + 5st] = f32p(c, 1); sm[o + 6st] = f32p(e, 0); sm[o + 7st] = f32p(e, 1)
+            end
+        end
     end
 end
 @inline function ldtile!(R::RQ, sm, so, o::OPD, nrow, mmax, m0, k0, K, tid, sa)   # a transposed operand's slice: its lines are k's
