@@ -22,6 +22,7 @@ model's own temperature, top-k and top-p, writes it into the next launch's row a
 A prompt arriving, a chat starting or a chat ending sets the chain's abort word: the launches not yet started do nothing, and the batcher runs again with the new set.
 Die 2 has a failing band of VRAM above 5.37 GiB: `fence-die2.service` (`~/.local/bin/fence_hold`, the block list of `flash-sass`'s `kern/fences`) holds it, before mux, so nothing is ever given those blocks.
 
-Power: a die holds 125-128 W (`nvidia-smi` reading) under any saturating load, not its 150 W limit: the driver's SW power cap stays on and the clock sits at 1151-1177 MHz, at the 150 W default limit and at the 162 W maximum alike.
+Power: die 2 (hot, 80 C) holds 125-128 W (`nvidia-smi` reading) under every load tried: the driver's SW power cap stays on, at the 150 W default limit and at the 162 W maximum alike.
+Die 3 (55 C) is not held there: the 8x4 FMA loop alone reads 129 W, with special-function work between the products 133 W, and with DRAM stores as well 145 W mean (150-152 W peaks). 140-150 W is reachable on die 3 by a load that keeps the FMA, special-function and memory units all switching.
 Measured on die 2: cuBLAS SGEMM 127.9 W mean (153.5 W only at the peaks); a pure FMA loop with an 8x4, 8x8 or 4x4 register tile (69%, 83%, 55% of the FMA peak) 121-126 W, the same with full mantissas or BF16-like operands and with 131 GB/s of loads in flight; an LDS-bound 2x2 tile (29%) 125 W.
 Serving 64 decoding chats reads 110 W mean (134 W peak), their prefill 106 W: about 85% of the ceiling, and what is left is the time the SMs wait (barriers, a slice's loads, the nodes' dependencies).
