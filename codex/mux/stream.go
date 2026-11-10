@@ -188,6 +188,14 @@ func (b *respBuilder) servedBy(model string) {
 		map[string]any{"headers": map[string]any{"openai-model": model}})})
 }
 
+// answeredBy is the model named as serving, or the one asked for when none was named.
+func (b *respBuilder) answeredBy() string {
+	if b.served != "" {
+		return b.served
+	}
+	return b.model
+}
+
 func (b *respBuilder) start() {
 	b.emit("response.created", map[string]any{"response": b.responseObj("in_progress", nil)})
 	b.emit("response.in_progress", map[string]any{"response": b.responseObj("in_progress", nil)})

@@ -102,6 +102,7 @@ Refused: unknown service, wrong peer, `positions < ctx`.
 |---|---|---|
 | `register` | `slots`, `vision`, `auto` (true for a route that picks among providers), optional provider `remaining`, `reset_time`, `tokens_served_today` | first |
 | `route` | `id`, `trying` (the route(s) being attempted now, e.g. `["vertex/gemini-3-pro"]`), `failed` (ones given up on) | an auto shim: every time its choice changes |
+| `model` | `id`, `model` (the model answering this run as its provider names it; an auto shim sends `ROUTE/MODEL`) | when the shim knows it, and again if it changes |
 | `ttft` | `id`, `ms` | when the first token of output arrives |
 | `delta` | `id`, `channel` (`reasoning` or `content`), `text` | as it streams |
 | `tool_call` | `id`, `call_id`, `name`, `arguments` (JSON text) | each call |

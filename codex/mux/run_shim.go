@@ -166,6 +166,7 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 	s.hub.Publish("run.start", start)
 
 	var trying, failed []string
+	model := "" // the model the shim says answers this run
 	sawRoute, sawTTFT := false, false
 	var ttft *float64
 	cancelSent := false
@@ -183,6 +184,9 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 		}
 		if len(trying) > 0 {
 			f["route"] = trying
+		}
+		if model != "" {
+			f["model"] = model
 		}
 		if d != nil {
 			if d.InputTokens != nil {
@@ -232,6 +236,11 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 					rb.shimStats("route", conn.auto, trying, failed, nil, svc.cfg.Ctx)
 					if conn.auto && len(trying) > 0 {
 						rb.servedBy(trying[len(trying)-1])
+					}
+				case "model":
+					if m.Model != "" && m.Model != model {
+						model = m.Model
+						rb.servedBy(model)
 					}
 				case "ttft":
 					if sawTTFT {

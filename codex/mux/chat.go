@@ -473,7 +473,8 @@ func (c *chatSink) write(typ string, data []byte) {
 			Arguments string `json:"arguments"`
 		} `json:"item"`
 		Response struct {
-			Usage             responsesUsage `json:"usage"`
+			Headers           map[string]string `json:"headers"`
+			Usage             responsesUsage    `json:"usage"`
 			IncompleteDetails *struct {
 				Reason string `json:"reason"`
 			} `json:"incomplete_details"`
@@ -486,6 +487,12 @@ func (c *chatSink) write(typ string, data []byte) {
 	switch typ {
 	case "response.created":
 		c.chunk(map[string]any{"role": "assistant", "content": ""}, nil, nil, nil)
+	case "response.in_progress":
+		// the model named as serving (an auto shim's route, a shim's own model) is the chunks' model from here on
+		json.Unmarshal(data, &ev)
+		if m := ev.Response.Headers["openai-model"]; m != "" {
+			c.model = m
+		}
 	case "response.reasoning_text.delta":
 		json.Unmarshal(data, &ev)
 		c.chunk(map[string]any{"reasoning_content": ev.Delta}, nil, nil, nil)
@@ -577,7 +584,7 @@ func chatCompletionObj(rb *respBuilder, usage map[string]any, incomplete bool) m
 	b, _ := json.Marshal(usage)
 	json.Unmarshal(b, &u)
 	obj := map[string]any{
-		"id": newID("chatcmpl-"), "object": "chat.completion", "created": rb.created, "model": rb.model,
+		"id": newID("chatcmpl-"), "object": "chat.completion", "created": rb.created, "model": rb.answeredBy(),
 		"choices": []any{map[string]any{"index": 0, "message": msg, "finish_reason": chatFinish(len(calls) > 0, incomplete)}},
 		"usage":   u.chat(),
 	}

@@ -64,6 +64,7 @@ type msg struct {
 	// shim
 	Trying            []string        `json:"trying"`
 	Failed            []string        `json:"failed"`
+	Model             string          `json:"model"` // the model answering this run, as its provider names it
 	MS                *float64        `json:"ms"`
 	Channel           string          `json:"channel"`
 	Text              string          `json:"text"`
