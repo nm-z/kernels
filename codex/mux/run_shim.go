@@ -166,7 +166,9 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 	s.hub.Publish("run.start", start)
 
 	var trying, failed []string
-	model := "" // the model the shim says answers this run
+	model := ""     // the model the shim says answers this run
+	answering := "" // what the client is told answers: an auto shim's route, or that model
+	var shown []string
 	sawRoute, sawTTFT := false, false
 	var ttft *float64
 	cancelSent := false
@@ -232,15 +234,29 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 				case "route":
 					sawRoute = true
 					trying, failed = m.Trying, m.Failed
+					// what a client is shown of a route given up on: its name and, when the shim says, why
+					shown = make([]string, len(failed))
+					for i, name := range failed {
+						shown[i] = name
+						if i < len(m.Why) && m.Why[i] != "" {
+							shown[i] = name + ": " + m.Why[i]
+						}
+					}
 					s.hub.Publish("run.route", map[string]any{"service": svc.name, "run": string(id), "trying": nonNil(trying), "failed": nonNil(failed)})
-					rb.shimStats("route", conn.auto, trying, failed, nil, svc.cfg.Ctx)
+					rb.shimStats("route", conn.auto, trying, shown, nil, svc.cfg.Ctx)
 					if conn.auto && len(trying) > 0 {
-						rb.servedBy(trying[len(trying)-1])
+						answering = trying[len(trying)-1]
+						if sawTTFT {
+							rb.servedBy(answering)
+						}
 					}
 				case "model":
 					if m.Model != "" && m.Model != model {
 						model = m.Model
-						rb.servedBy(model)
+						answering = model
+						if sawTTFT {
+							rb.servedBy(answering)
+						}
 					}
 				case "ttft":
 					if sawTTFT {
@@ -254,7 +270,11 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 					ttft = &v
 					res.ttftMS = ttft
 					s.hub.Publish("run.ttft", map[string]any{"service": svc.name, "run": string(id), "ms": v})
-					rb.shimStats("output", conn.auto, trying, failed, ttft, svc.cfg.Ctx)
+					rb.shimStats("output", conn.auto, trying, shown, ttft, svc.cfg.Ctx)
+					// a client is told who answers once output begins: a route that was tried and failed is never named
+					if answering != "" {
+						rb.servedBy(answering)
+					}
 				case "delta":
 					if why := checkOutput("delta"); why != "" {
 						return violation(why)
