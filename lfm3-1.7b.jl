@@ -172,7 +172,7 @@ const V4F = NTuple{4,VecElement{Float32}}
 end
 # P floats of x as one scalar load: invariant, so with a uniform address it is a load into SGPRs. It can't move above the
 # barrier that orders it after x was written, because the base comes through fresh, an opaque copy each phase.
-for P in (1, 2, 3, 4, 8, 16)
+for P in (1, 2, 3, 4, 8, 16, 32)
     ir = """
         define <$P x i32> @xv(ptr addrspace(1) %p) #0 {
             %v = load <$P x i32>, ptr addrspace(1) %p, align 4, !invariant.load !0
@@ -1897,8 +1897,8 @@ end
 # is the input rows plus a few head rows, and it's bigger than VRAM has room for).
 # ---------------------------------------------------------------------------------------------
 using LinearAlgebra
-const T_NORM, T_NORMB, T_NORMW, T_PACK, T_GEMV, T_AXPBY, T_CONV1, T_CONV2, T_CONVB1, T_CONVB2, T_CONVW, T_SILU, T_SILUB, T_ROT, T_ROTB, T_TR, T_SOFT, T_SOFTB, T_GATE, T_GATEB, T_GEMM, T_UPD, T_GEMVT, T_STORE, T_LOAD = Int32.(1:25)
-const NPMAX = 1568                                         # positions a window (a multiple of 32)
+const T_NORM, T_NORMB, T_NORMW, T_PACK, T_GEMV, T_AXPBY, T_CONV1, T_CONV2, T_CONVB1, T_CONVB2, T_CONVW, T_SILU, T_SILUB, T_ROT, T_ROTB, T_TR, T_SOFT, T_SOFTB, T_GATE, T_GATEB, T_GEMM, T_UPD, T_GEMVT, T_STORE, T_LOAD, T_LSM = Int32.(1:26)
+const NPMAX = 1568                                         # positions a window (a multiple of every tile)
 struct TR
 	op::Int32; nwg::Int32; N::Int32
 	i1::Int32; i2::Int32; i3::Int32; i4::Int32; i5::Int32; i6::Int32
@@ -1911,209 +1911,232 @@ const LP0 = reinterpret(LP{Float32}, Ptr{Float32}(C_NULL))
 TR(op, nwg, N; i1 = 0, i2 = 0, i3 = 0, i4 = 0, i5 = 0, i6 = 0, f1 = 1.0f0, f2 = 0.0f0, a = LP0, b = LP0, c = LP0, d = LP0, e = LP0, W = reinterpret(LP{UInt8}, LP0), Wt = reinterpret(LP{UInt8}, LP0), s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0, s6 = 0, s7 = 0) =
 	TR(op, Int32(nwg), Int32(N), Int32(i1), Int32(i2), Int32(i3), Int32(i4), Int32(i5), Int32(i6), Float32(f1), Float32(f2), a, b, c, d, e, W, Wt, s1, s2, s3, s4, s5, s6, s7)
 @inline tnw(T::TR) = WVS * T.nwg
-# (x[n][bb][d] is x[n S + bb D + d]; a wavefront takes 32 positions of a block bb)
-@inline function t_norm!(T::TR)                            # c = b x rsqrt(mean x² + eps) per (n, bb), d[n][bb] its rsqrt
-	lane = lanei(); NW = tnw(T); D = T.i1; S = T.i2; nb = T.i3; n = ((T.N + Int32(31)) >> Int32(5)) * nb; g = waveid()
-	while g < n
-	G = g ÷ nb; bb = g - G * nb; r = G * LANES + lane; o = Int64(r) * S + bb * D
-	s = 0.0f0
-	for q in Int32(0):D-Int32(1); v = ld(T.a, o + q); s = fma(v, v, s); end
-rs = rsq(s / Float32(D) + NEPS)
-for q in Int32(0):D-Int32(1); st!(T.c, ld(T.b, q) * rs * ld(T.a, o + q), o + q); end
-st!(T.d, rs, Int64(r) * nb + bb)
-g += NW
+# (x[n][bb][d] is x[n S + bb D + d]). An item is a position (or a weight) and a lane an element of it: as many items as the window has rows,
+# so every wavefront the card has takes work
+@inline function t_norm!(T::TR)
+    lane = lanei(); NW = tnw(T); D = T.i1; S = T.i2; nb = T.i3; n = T.N * nb; g = waveid()
+    while g < n
+        r = g ÷ nb; bb = g - r * nb; o = Int64(r) * S + bb * D; s = 0.0f0
+        q = lane; while q < D; v = ld(T.a, o + q); s = fma(v, v, s); q += LANES; end
+        rs = rsq(KI.sub_group_reduce(+, s) / Float32(D) + NEPS)
+        q = lane; while q < D; st!(T.c, ld(T.b, q) * rs * ld(T.a, o + q), o + q); q += LANES; end
+        if lane == Int32(0); st!(T.d, rs, Int64(r) * nb + bb); end
+        g += NW
     end
 end
-@inline function t_normb!(T::TR)                           # its adjoint: e (+) from a = the output's gradient, b = x, c = the weights, d = rsqrt
-	lane = lanei(); NW = tnw(T); D = T.i1; S = T.i2; nb = T.i3; add = T.i4 != Int32(0); n = ((T.N + Int32(31)) >> Int32(5)) * nb; g = waveid()
-	while g < n
-	G = g ÷ nb; bb = g - G * nb; r = G * LANES + lane; o = Int64(r) * S + bb * D; rs = ld(T.d, Int64(r) * nb + bb)
-	s = 0.0f0
-	for q in Int32(0):D-Int32(1); s = fma(ld(T.a, o + q) * ld(T.c, q), ld(T.b, o + q), s); end
-k = s * rs * rs * rs / Float32(D)
-for q in Int32(0):D-Int32(1)
-	v = ld(T.a, o + q) * ld(T.c, q) * rs - k * ld(T.b, o + q)
-	st!(T.e, add ? ld(T.e, o + q) + v : v, o + q)
-end
-g += NW
-end
-end
-@inline function t_normw!(T::TR)                           # c[q] = the gradient of the weight q: a lane a weight
-	lane = lanei(); NW = tnw(T); D = T.i1; S = T.i2; nb = T.i3; n = (D + Int32(31)) >> Int32(5); g = waveid()
-	while g < n
-	q = g * LANES + lane; acc = 0.0f0
-	for r in Int32(0):T.N-Int32(1), bb in Int32(0):nb-Int32(1)
-	o = Int64(r) * S + bb * D + q
-	acc = fma(ld(T.a, o) * ld(T.b, o), ld(T.d, Int64(r) * nb + bb), acc)
-end
-st!(T.c, acc, q)
-g += NW
-end
-end
-@inline function t_pack!(T::TR)                            # c, BF16 pairs for the GEMV: [block of 16][k / 2][p], from a[n S + k]
-	lane = lanei(); NW = tnw(T); K = T.i1; S = T.i2; n = (T.N + Int32(31)) >> Int32(5); g = waveid()
-	while g < n
-	r = g * LANES + lane; b = r >> Int32(4); p = r & Int32(15)
-	for k in Int32(0):K-Int32(1)
-	stb!(T.c, bf(ld(T.a, Int64(r) * S + k)), (Int64(b) * (K >> Int32(1)) * 16 + Int64(k >> Int32(1)) * 16 + p) * 4 + (k & Int32(1)) * 2)
-end
-g += NW
+@inline function t_normb!(T::TR)
+    lane = lanei(); NW = tnw(T); D = T.i1; S = T.i2; nb = T.i3; add = T.i4 != Int32(0); n = T.N * nb; g = waveid()
+    while g < n
+        r = g ÷ nb; bb = g - r * nb; o = Int64(r) * S + bb * D; rs = ld(T.d, Int64(r) * nb + bb); s = 0.0f0
+        q = lane; while q < D; s = fma(ld(T.a, o + q) * ld(T.c, q), ld(T.b, o + q), s); q += LANES; end
+        k = KI.sub_group_reduce(+, s) * rs * rs * rs / Float32(D)
+        q = lane
+        while q < D
+            v = ld(T.a, o + q) * ld(T.c, q) * rs - k * ld(T.b, o + q)
+            st!(T.e, add ? ld(T.e, o + q) + v : v, o + q); q += LANES
+        end
+        g += NW
     end
 end
-@inline function t_gemv!(T::TR)                            # d[n S + r] = W x, c = x packed; W with i1 groups of 32 rows, K = i3
-	lane = lanei(); NW = tnw(T); ng = T.i1; K = T.i3; nc = K >> Int32(3); S = T.i4; lo = (lane % UInt32) << 4; n = ((T.N + Int32(15)) >> Int32(4)) * ng; g = waveid(); xp = fresh(T.c)
-	while g < n
-	b = g ÷ ng; G = g - b * ng
-	acc = gemv(T.W + (Int64(G) * nc) * CHUNK, lo, Int64(CHUNK), nc, xp + Int64(b) * (K >> Int32(1)) * 64, Val(16))
-	r = G * LANES + lane
-	for p in 1:16
-	st!(T.d, acc[p], (Int64(b) * 16 + (p - 1)) * S + r)
+@inline function t_normw!(T::TR)
+    lane = lanei(); NW = tnw(T); D = T.i1; S = T.i2; nb = T.i3; m = T.N * nb; g = waveid()
+    while g < D
+        acc = 0.0f0; f = lane
+        while f < m
+            r = f ÷ nb; bb = f - r * nb; o = Int64(r) * S + bb * D + g
+            acc = fma(ld(T.a, o) * ld(T.b, o), ld(T.d, Int64(f)), acc); f += LANES
+        end
+        acc = KI.sub_group_reduce(+, acc)
+        if lane == Int32(0); st!(T.c, acc, g); end
+        g += NW
+    end
 end
-g += NW
+@inline function t_pack!(T::TR)
+    lane = lanei(); NW = tnw(T); K = T.i1; S = T.i2; g = waveid()
+    while g < T.N
+        tp = T.i5; b = g ÷ tp; p = g - b * tp; k = lane
+        while k < K
+            stb!(T.c, bf(ld(T.a, Int64(g) * S + k)), (Int64(b) * (K >> Int32(1)) * tp + Int64(k >> Int32(1)) * tp + p) * 4 + (k & Int32(1)) * 2); k += LANES
+        end
+        g += NW
     end
-    end
-    @inline function t_axpby!(T::TR)                           # c = f1 a + f2 b over N rows of D (stride S, a's stride i3, in i4 rows of ...)
-	    lane = lanei(); NW = tnw(T); D = T.i1; S = T.i2; n = (T.N + Int32(31)) >> Int32(5); g = waveid(); hasb = T.f2 != 0.0f0; f1 = T.f1; f2 = T.f2
-	    if S == D                                          # contiguous: a lane an element, 4 at a time (coalesced: the momentum is read over PCIe)
-	        m = Int64(T.N) * D; i = Int64(g) * LANES * 4 + lane * 4; step = Int64(NW) * LANES * 4
-	        while i + 3 < m
-	            Base.Cartesian.@nexprs 4 k -> begin
-	                v = f1 == 0.0f0 ? 0.0f0 : f1 * ld(T.a, i + (k - 1))
-	                st!(T.c, hasb ? v + f2 * ld(T.b, i + (k - 1)) : v, i + (k - 1))
-	            end
-	            i += step
-	        end
-	        while i < m                                    # (the tail)
-	            v = f1 == 0.0f0 ? 0.0f0 : f1 * ld(T.a, i)
-	            st!(T.c, hasb ? v + f2 * ld(T.b, i) : v, i); i += Int64(1)
-	        end
-	        return
-	    end
-	    while g < n
-	    r = g * LANES + lane; o = Int64(r) * S
-	    for q in Int32(0):(r < T.N ? D : Int32(0))-Int32(1)
-	    v = f1 == 0.0f0 ? 0.0f0 : f1 * ld(T.a, o + q)
-	    st!(T.c, hasb ? v + f2 * ld(T.b, o + q) : v, o + q)
-    end
-    g += NW
 end
+@inline function t_axpby!(T::TR)
+    lane = lanei(); NW = tnw(T); D = T.i1; S = T.i2; g = waveid(); hasb = T.f2 != 0.0f0; f1 = T.f1; f2 = T.f2
+    if S == D
+        m = Int64(T.N) * D; i = Int64(g) * LANES * 4 + lane * 4; step = Int64(NW) * LANES * 4
+        while i + 3 < m
+            Base.Cartesian.@nexprs 4 k -> begin
+                v = f1 == 0.0f0 ? 0.0f0 : f1 * ld(T.a, i + (k - 1))
+                st!(T.c, hasb ? v + f2 * ld(T.b, i + (k - 1)) : v, i + (k - 1))
+            end
+            i += step
+        end
+        while i < m
+            v = f1 == 0.0f0 ? 0.0f0 : f1 * ld(T.a, i)
+            st!(T.c, hasb ? v + f2 * ld(T.b, i) : v, i); i += Int64(1)
+        end
+        return
     end
-    # the conv: a = B C x [n][3 NE], b = h = B x, d = the taps [q][7], c = y, e = the conv's output
-    @inline function t_conv1!(T::TR)
-	    lane = lanei(); NW = tnw(T); n = (T.N + Int32(31)) >> Int32(5); g = waveid()
-	    while g < n
-	    r = g * LANES + lane; o = Int64(r) * 3NE
-	    for q in Int32(0):Int32(NE - 1); st!(T.b, ld(T.a, o + q) * ld(T.a, o + q + 2NE), Int64(r) * NE + q); end
-    g += NW
+    while g < T.N
+        o = Int64(g) * S; q = lane
+        while q < D
+            v = f1 == 0.0f0 ? 0.0f0 : f1 * ld(T.a, o + q)
+            st!(T.c, hasb ? v + f2 * ld(T.b, o + q) : v, o + q); q += LANES
+        end
+        g += NW
+    end
 end
+@inline function t_conv1!(T::TR)
+    lane = lanei(); NW = tnw(T); g = waveid()
+    while g < T.N
+        o = Int64(g) * 3NE; q = lane
+        while q < Int32(NE); st!(T.b, ld(T.a, o + q) * ld(T.a, o + q + 2NE), Int64(g) * NE + q); q += LANES; end
+        g += NW
+    end
 end
 @inline function t_conv2!(T::TR)
-	lane = lanei(); NW = tnw(T); n = (T.N + Int32(31)) >> Int32(5); g = waveid()
-	while g < n
-	r = g * LANES + lane
-	for q in Int32(0):Int32(NE - 1)
-	s = 0.0f0
-	for t in Int32(0):Int32(6)
-	m = r + t - Int32(6)
-	s = fma(ld(T.d, Int64(q) * 7 + t), m >= Int32(0) ? ld(T.b, Int64(m) * NE + q) : 0.0f0, s)
-end
-st!(T.e, s, Int64(r) * NE + q); st!(T.c, ld(T.a, Int64(r) * 3NE + q + NE) * s, Int64(r) * NE + q)
-    end
-    g += NW
-end
-    end
-    @inline function t_convb1!(T::TR)                          # a = gy, b = B C x, c = the conv's output, d = gc, e = the gradient of B C x (its C)
-	    lane = lanei(); NW = tnw(T); n = (T.N + Int32(31)) >> Int32(5); g = waveid()
-	    while g < n
-	    r = g * LANES + lane
-	    for q in Int32(0):Int32(NE - 1)
-	    gy = ld(T.a, Int64(r) * NE + q)
-	    st!(T.d, gy * ld(T.b, Int64(r) * 3NE + q + NE), Int64(r) * NE + q)
-	    st!(T.e, gy * ld(T.c, Int64(r) * NE + q), Int64(r) * 3NE + q + NE)
-    end
-    g += NW
-    end
-    end
-    @inline function t_convb2!(T::TR)                          # a = gc, b = B C x, d = the taps, e = the gradient of B C x (its B and x)
-	    lane = lanei(); NW = tnw(T); n = (T.N + Int32(31)) >> Int32(5); g = waveid(); N = T.N
-	    while g < n
-	    r = g * LANES + lane
-	    for q in Int32(0):Int32(NE - 1)
-	    s = 0.0f0
-	    for t in Int32(0):Int32(6)
-	    m = r + Int32(6) - t
-	    s = fma(ld(T.d, Int64(q) * 7 + t), m < N ? ld(T.a, Int64(m) * NE + q) : 0.0f0, s)
-    end
-    o = Int64(r) * 3NE + q
-    st!(T.e, s * ld(T.b, o + 2NE), o); st!(T.e, s * ld(T.b, o), o + 2NE)
-    end
-    g += NW
+    lane = lanei(); NW = tnw(T); g = waveid()
+    while g < T.N
+        q = lane
+        while q < Int32(NE)
+            s = 0.0f0
+            for t in Int32(0):Int32(6)
+                m = g + t - Int32(6)
+                s = fma(ld(T.d, Int64(q) * 7 + t), m >= Int32(0) ? ld(T.b, Int64(m) * NE + q) : 0.0f0, s)
+            end
+            st!(T.e, s, Int64(g) * NE + q); st!(T.c, ld(T.a, Int64(g) * 3NE + q + NE) * s, Int64(g) * NE + q); q += LANES
+        end
+        g += NW
     end
 end
-@inline function t_convw!(T::TR)                           # c[q][t] = the tap's gradient: a = gc, b = h
-	lane = lanei(); NW = tnw(T); n = Int32(NE) >> Int32(5); g = waveid()
-	while g < n
-	q = g * LANES + lane
-	for t in Int32(0):Int32(6)
-	s = 0.0f0
-	for r in Int32(6)-t:T.N-Int32(1)
-	s = fma(ld(T.a, Int64(r) * NE + q), ld(T.b, Int64(r + t - Int32(6)) * NE + q), s)
-end
-st!(T.c, s, Int64(q) * 7 + t)
-    end
-    g += NW
-    end
-    end
-    @inline function t_silu!(T::TR)                            # c = silu(a) b, rows of NFF
-	    lane = lanei(); NW = tnw(T); n = (T.N + Int32(31)) >> Int32(5); g = waveid()
-	    while g < n
-	    r = g * LANES + lane; o = Int64(r) * NFF
-	    for q in Int32(0):Int32(NFF - 1); x = ld(T.a, o + q); st!(T.c, x * sigm(x) * ld(T.b, o + q), o + q); end
-    g += NW
+@inline function t_convb1!(T::TR)
+    lane = lanei(); NW = tnw(T); g = waveid()
+    while g < T.N
+        q = lane
+        while q < Int32(NE)
+            gy = ld(T.a, Int64(g) * NE + q)
+            st!(T.d, gy * ld(T.b, Int64(g) * 3NE + q + NE), Int64(g) * NE + q)
+            st!(T.e, gy * ld(T.c, Int64(g) * NE + q), Int64(g) * 3NE + q + NE); q += LANES
+        end
+        g += NW
     end
 end
-@inline function t_silub!(T::TR)                           # a = gs, b, c = what the forward's a, b were; d, e their gradients
-	lane = lanei(); NW = tnw(T); n = (T.N + Int32(31)) >> Int32(5); g = waveid()
-	while g < n
-	r = g * LANES + lane; o = Int64(r) * NFF
-	for q in Int32(0):Int32(NFF - 1)
-	gs = ld(T.a, o + q); x = ld(T.b, o + q); s = sigm(x)
-	st!(T.d, gs * ld(T.c, o + q) * (s + x * s * (1.0f0 - s)), o + q); st!(T.e, gs * x * s, o + q)
+@inline function t_convb2!(T::TR)
+    lane = lanei(); NW = tnw(T); g = waveid(); N = T.N
+    while g < N
+        q = lane
+        while q < Int32(NE)
+            s = 0.0f0
+            for t in Int32(0):Int32(6)
+                m = g + Int32(6) - t
+                s = fma(ld(T.d, Int64(q) * 7 + t), m < N ? ld(T.a, Int64(m) * NE + q) : 0.0f0, s)
+            end
+            o = Int64(g) * 3NE + q
+            st!(T.e, s * ld(T.b, o + 2NE), o); st!(T.e, s * ld(T.b, o), o + 2NE); q += LANES
+        end
+        g += NW
+    end
 end
-g += NW
+@inline function t_convw!(T::TR)                           # an item a tap of a weight, a lane a position
+    lane = lanei(); NW = tnw(T); n = Int32(7NE); g = waveid()
+    while g < n
+        q = g ÷ Int32(7); t = g - q * Int32(7); s = 0.0f0; r = Int32(6) - t + lane
+        while r < T.N; s = fma(ld(T.a, Int64(r) * NE + q), ld(T.b, Int64(r + t - Int32(6)) * NE + q), s); r += LANES; end
+        s = KI.sub_group_reduce(+, s)
+        if lane == Int32(0); st!(T.c, s, Int64(g)); end
+        g += NW
+    end
 end
+@inline function t_silu!(T::TR)
+    lane = lanei(); NW = tnw(T); g = waveid()
+    while g < T.N
+        o = Int64(g) * NFF; q = lane
+        while q < Int32(NFF); x = ld(T.a, o + q); st!(T.c, x * sigm(x) * ld(T.b, o + q), o + q); q += LANES; end
+        g += NW
+    end
 end
-# rotary: b = (cos, sin) [n][table][64 angles]; a, c rows [n S + j HD + q], i2 = heads, i3 = the table
+@inline function t_silub!(T::TR)
+    lane = lanei(); NW = tnw(T); g = waveid()
+    while g < T.N
+        o = Int64(g) * NFF; q = lane
+        while q < Int32(NFF)
+            gs = ld(T.a, o + q); x = ld(T.b, o + q); s = sigm(x)
+            st!(T.d, gs * ld(T.c, o + q) * (s + x * s * (1.0f0 - s)), o + q); st!(T.e, gs * x * s, o + q); q += LANES
+        end
+        g += NW
+    end
+end
 @inline function t_rot!(T::TR)
-	lane = lanei(); NW = tnw(T); S = T.i1; nh = T.i2; tt = T.i3; n = (T.N + Int32(31)) >> Int32(5); g = waveid()
-	while g < n
-	r = g * LANES + lane
-	for j in Int32(0):nh-Int32(1), q in Int32(0):Int32(HD - 1)
-	o = Int64(r) * S + j * Int32(HD); e = ((Int64(r) * 2 + tt) * 64 + (q & Int32(63))) * 2; cs = ld(T.b, e); sn = ld(T.b, e + 1)
-	st!(T.c, q < Int32(64) ? ld(T.a, o + q) * cs - ld(T.a, o + q + 64) * sn : ld(T.a, o + q) * cs + ld(T.a, o + q - 64) * sn, o + q)
+    lane = lanei(); NW = tnw(T); S = T.i1; nh = T.i2; tt = T.i3; g = waveid()
+    while g < T.N
+        f = lane
+        while f < nh * Int32(HD)
+            q = f & Int32(HD - 1); o = Int64(g) * S + (f - q); e = ((Int64(g) * 2 + tt) * 64 + (q & Int32(63))) * 2; cs = ld(T.b, e); sn = ld(T.b, e + 1)
+            st!(T.c, q < Int32(64) ? ld(T.a, o + q) * cs - ld(T.a, o + q + 64) * sn : ld(T.a, o + q) * cs + ld(T.a, o + q - 64) * sn, o + q); f += LANES
+        end
+        g += NW
+    end
 end
-g += NW
+@inline function t_rotb!(T::TR)
+    lane = lanei(); NW = tnw(T); S = T.i1; nh = T.i2; tt = T.i3; g = waveid()
+    while g < T.N
+        f = lane
+        while f < nh * Int32(HD)
+            q = f & Int32(HD - 1); o = Int64(g) * S + (f - q); e = ((Int64(g) * 2 + tt) * 64 + (q & Int32(63))) * 2; cs = ld(T.b, e); sn = ld(T.b, e + 1)
+            st!(T.c, q < Int32(64) ? ld(T.a, o + q) * cs + ld(T.a, o + q + 64) * sn : ld(T.a, o + q) * cs - ld(T.a, o + q - 64) * sn, o + q); f += LANES
+        end
+        g += NW
+    end
 end
-	  end
-	  @inline function t_rotb!(T::TR)
-		  lane = lanei(); NW = tnw(T); S = T.i1; nh = T.i2; tt = T.i3; n = (T.N + Int32(31)) >> Int32(5); g = waveid()
-		  while g < n
-		  r = g * LANES + lane
-		  for j in Int32(0):nh-Int32(1), q in Int32(0):Int32(HD - 1)
-		  o = Int64(r) * S + j * Int32(HD); e = ((Int64(r) * 2 + tt) * 64 + (q & Int32(63))) * 2; cs = ld(T.b, e); sn = ld(T.b, e + 1)
-		  st!(T.c, q < Int32(64) ? ld(T.a, o + q) * cs + ld(T.a, o + q + 64) * sn : ld(T.a, o + q) * cs - ld(T.a, o + q - 64) * sn, o + q)
-	  end
-	  g += NW
-	  end
-	  end
-	  @inline function t_tr!(T::TR)                              # c[e][n] = a[n S + e] (a lane an e), i1 = e's, N = n's, s1 = c's row stride
-		  lane = lanei(); NW = tnw(T); E = T.i1; S = T.i2; n = (E + Int32(31)) >> Int32(5); g = waveid()
-		  while g < n
-		  e = g * LANES + lane
-		  for r in Int32(0):T.N-Int32(1); st!(T.c, ld(T.a, Int64(r) * S + e), Int64(e) * T.s1 + r); end
-	  g += NW
-	  end
-	  end
+@inline function t_tr!(T::TR)                              # an item an e, a lane a position
+    lane = lanei(); NW = tnw(T); E = T.i1; S = T.i2; g = waveid()
+    while g < E
+        r = lane
+        while r < T.N; st!(T.c, ld(T.a, Int64(r) * S + g), Int64(g) * T.s1 + r); r += LANES; end
+        g += NW
+    end
+end
+@inline function t_gate!(T::TR)
+    lane = lanei(); NW = tnw(T); S = T.i1; g = waveid()
+    while g < T.N
+        o = Int64(g) * NE
+        for j in Int32(0):Int32(NH - 1)
+            s = sigm(ld(T.b, Int64(g) * S + j)); q = lane
+            while q < Int32(HD); e = o + j * Int32(HD) + q; st!(T.c, ld(T.a, e) * s, e); q += LANES; end
+        end
+        g += NW
+    end
+end
+@inline function t_gateb!(T::TR)
+    lane = lanei(); NW = tnw(T); S = T.i1; g = waveid()
+    while g < T.N
+        o = Int64(g) * NE
+        for j in Int32(0):Int32(NH - 1)
+            s = sigm(ld(T.c, Int64(g) * S + j)); acc = 0.0f0; q = lane
+            while q < Int32(HD)
+                e = o + j * Int32(HD) + q; gy = ld(T.a, e)
+                st!(T.d, gy * s, e); acc = fma(gy, ld(T.b, e), acc); q += LANES
+            end
+            acc = KI.sub_group_reduce(+, acc)
+            if lane == Int32(0); st!(T.e, acc * s * (1.0f0 - s), Int64(g) * S + j); end
+        end
+        g += NW
+    end
+end
+# d[n S + r] = W x, c = x packed; W with i1 groups of 32 rows, K = i3. An item: a row group on P positions (i5: the tile tune! timed)
+@inline function gemv_items!(T::TR, ::Val{P}) where {P}
+    lane = lanei(); NW = tnw(T); ng = T.i1; K = T.i3; nc = K >> Int32(3); S = T.i4; lo = (lane % UInt32) << 4
+    nb = (T.N + Int32(P - 1)) ÷ Int32(P); n = nb * ng; g = waveid(); xp = fresh(T.c)
+    while g < n
+        G = g ÷ nb; b = g - G * nb
+        acc = gemv(T.W + (Int64(G) * nc) * CHUNK, lo, Int64(CHUNK), nc, xp + Int64(b) * (K >> Int32(1)) * 4P, Val(P))
+        r = G * LANES + lane
+        for p in 1:P; st!(T.d, acc[p], (Int64(b) * P + (p - 1)) * S + r); end
+        g += NW
+    end
+end
+@inline t_gemv!(T::TR) = T.i5 == Int32(TILES[2]) ? gemv_items!(T, Val(Int(TILES[2]))) : gemv_items!(T, Val(Int(TILES[1])))
 using Random
 # scores [j][n][m], j of 16 heads: softmax over what n sees (i1 = the window, 0: every earlier position); in place
 @inline function t_soft!(T::TR)
@@ -2138,33 +2161,6 @@ end
         for m in lane:LANES:N-Int32(1); s = fma(ld(T.a, o + m), ld(T.b, o + m), s); end
         s = KI.sub_group_reduce(+, s)
         for m in lane:LANES:N-Int32(1); p = ld(T.b, o + m); st!(T.a, p * (ld(T.a, o + m) - s), o + m); end
-        g += NW
-    end
-end
-# the gate: c = a x sigmoid(b[n][head]) over rows of NH HD, i1 = b's row stride
-@inline function t_gate!(T::TR)
-    lane = lanei(); NW = tnw(T); S = T.i1; n = (T.N + Int32(31)) >> Int32(5); g = waveid()
-    while g < n
-        r = g * LANES + lane; o = Int64(r) * NE
-        for j in Int32(0):Int32(NH - 1)
-            s = sigm(ld(T.b, Int64(r) * S + j))
-            for q in Int32(0):Int32(HD - 1); e = o + j * Int32(HD) + q; st!(T.c, ld(T.a, e) * s, e); end
-        end
-        g += NW
-    end
-end
-@inline function t_gateb!(T::TR)                           # a = the gated output's gradient, b = the mix, c = the gate's logits: d = the mix's gradient, e = the logits'
-    lane = lanei(); NW = tnw(T); S = T.i1; n = (T.N + Int32(31)) >> Int32(5); g = waveid()
-    while g < n
-        r = g * LANES + lane; o = Int64(r) * NE
-        for j in Int32(0):Int32(NH - 1)
-            s = sigm(ld(T.c, Int64(r) * S + j)); acc = 0.0f0
-            for q in Int32(0):Int32(HD - 1)
-                e = o + j * Int32(HD) + q; gy = ld(T.a, e)
-                st!(T.d, gy * s, e); acc = fma(gy, ld(T.b, e), acc)
-            end
-            st!(T.e, acc * s * (1.0f0 - s), Int64(r) * S + j)
-        end
         g += NW
     end
 end
@@ -2206,28 +2202,58 @@ end
 end
 # gx = W' gy with W as the forward's GEMV reads it (no transpose is kept): c = gy packed as the forward packs x (its K = W's padded
 # rows), d[n S + k] the result; i1 = W's row groups, i3 = W's K (the result's width), i4 = S. An item: a chunk's 8 columns of 16
-# positions over every row group; a lane a row of the group, the 32 rows' products added across the lanes at the end
+# positions over every row group. A pair of lanes has a pair of rows: each takes 4 of the 8 columns of both rows, a pair of weights
+# on the pair of gy in one instruction (not exactly rounded: against autograd the post norms' gradients have cosine 0.9974 where exact
+# multiply-adds, a third slower here, have 0.9987; no other tensor moves); the lanes' sums are added at the end
 @inline function t_gemvt!(T::TR)
     lane = lanei(); NW = tnw(T); ng = T.i1; K = T.i3; nc = K >> Int32(3); S = T.i4; R = ng * LANES
-    nb = (T.N + Int32(15)) >> Int32(4); n = nb * nc; g = waveid(); lo = (lane % UInt32) << 4; sh = (lane & Int32(1)) << Int32(4)
+    nb = (T.N + Int32(15)) >> Int32(4); n = nb * nc; g = waveid(); le = ((lane & Int32(-2)) % UInt32) << 4; hi = (lane & Int32(1)) != Int32(0)
     xp = reinterpret(LP{UInt8}, fresh(T.c))
     while g < n
-        b = g ÷ nc; c = g - b * nc
-        Base.Cartesian.@nexprs 128 i -> (a_i = 0.0f0)
-        xb = xp + Int64(b) * (R >> Int32(1)) * 64
-        for G in Int32(0):ng-Int32(1)
-            w = ld128c(T.W + (Int64(G) * nc + c) * CHUNK, lo); r = G * LANES + lane
-            Base.Cartesian.@nexprs 8 e -> (w_e = reinterpret(Float32, isodd(e) ? (w[(e + 1) >> 1] << 16) : (w[e >> 1] & 0xffff0000)))
-            q = xb + Int64(r >> Int32(1)) * 64
-            y1 = ld128c(q, UInt32(0)); y2 = ld128c(q, UInt32(16)); y3 = ld128c(q, UInt32(32)); y4 = ld128c(q, UInt32(48))
-            Base.Cartesian.@nexprs 4 p -> (v_p = y1[p]; v_{p + 4} = y2[p]; v_{p + 8} = y3[p]; v_{p + 12} = y4[p])
-            Base.Cartesian.@nexprs 16 p -> (y_p = reinterpret(Float32, ((v_p >> sh) & 0x0000ffff) << 16))
-            Base.Cartesian.@nexprs 16 p -> Base.Cartesian.@nexprs 8 e -> (a_{(p - 1) * 8 + e} = fma(y_p, w_e, a_{(p - 1) * 8 + e}))
+        tp = T.i5; c = g ÷ nb; b = g - c * nb
+        Base.Cartesian.@nexprs 64 i -> (a_i = 0.0f0)
+        xb = xp + Int64(b ÷ (tp >> Int32(4))) * (R >> Int32(1)) * 4tp + (b % (tp >> Int32(4))) * 64
+        G = Int32(0)
+        while G < ng
+            m = min(Int32(4), ng - G)
+            Base.Cartesian.@nexprs 4 j -> (A_j = j <= m ? ld128c(T.W + (Int64(G + (j - 1)) * nc + c) * CHUNK, le) : (UInt32(0), UInt32(0), UInt32(0), UInt32(0)))
+            Base.Cartesian.@nexprs 4 j -> (B_j = j <= m ? ld128c(T.W + (Int64(G + (j - 1)) * nc + c) * CHUNK, le + UInt32(16)) : (UInt32(0), UInt32(0), UInt32(0), UInt32(0)))
+            Base.Cartesian.@nexprs 4 j -> if j <= m
+                u1 = hi ? A_j[3] : A_j[1]; u2 = hi ? A_j[4] : A_j[2]; v1 = hi ? B_j[3] : B_j[1]; v2 = hi ? B_j[4] : B_j[2]
+                w_1 = (u1 & 0x0000ffff) | (v1 << 16); w_2 = (u1 >> 16) | (v1 & 0xffff0000); w_3 = (u2 & 0x0000ffff) | (v2 << 16); w_4 = (u2 >> 16) | (v2 & 0xffff0000)
+                q = xb + Int64(((G + Int32(j - 1)) * LANES + lane) >> Int32(1)) * 4tp
+                y1 = ld128c(q, UInt32(0)); y2 = ld128c(q, UInt32(16)); y3 = ld128c(q, UInt32(32)); y4 = ld128c(q, UInt32(48))
+                Base.Cartesian.@nexprs 4 p -> (y_p = y1[p]; y_{p + 4} = y2[p]; y_{p + 8} = y3[p]; y_{p + 12} = y4[p])
+                Base.Cartesian.@nexprs 16 p -> Base.Cartesian.@nexprs 4 e -> (a_{(p - 1) * 4 + e} = dot2(w_e, y_p, a_{(p - 1) * 4 + e}))
+            end
+            G += m
         end
-        Base.Cartesian.@nexprs 128 i -> (a_i = KI.sub_group_reduce(+, a_i))
-        if lane == Int32(0)
-            Base.Cartesian.@nexprs 16 p -> Base.Cartesian.@nexprs 8 e -> st!(T.d, a_{(p - 1) * 8 + e}, (Int64(b) * 16 + (p - 1)) * S + c * Int32(8) + (e - 1))
+        Base.Cartesian.@nexprs 16 p -> Base.Cartesian.@nexprs 4 e -> begin
+            lo_ = KI.sub_group_reduce(+, hi ? 0.0f0 : a_{(p - 1) * 4 + e}); hi_ = KI.sub_group_reduce(+, hi ? a_{(p - 1) * 4 + e} : 0.0f0)
+            if lane == Int32(0)
+                st!(T.d, lo_, (Int64(b) * 16 + (p - 1)) * S + c * Int32(8) + (e - 1)); st!(T.d, hi_, (Int64(b) * 16 + (p - 1)) * S + c * Int32(8) + (e + 3))
+            end
         end
+        g += NW
+    end
+end
+# the head's loss: a = the logits [i][V] of N targets (b[i], as floats), in place the loss's gradient f1 (softmax - onehot); d[3i..] = the largest
+# logit, the sum of exp(logit - it), the target's logit. An item a target, a lane every 32nd logit
+@inline function t_lsm!(T::TR)
+    lane = lanei(); NW = tnw(T); V = T.i1; g = waveid()
+    while g < T.N
+        o = Int64(g) * V; mx = -Inf32; tg = unsafe_trunc(Int32, ld(T.b, Int64(g)))
+        v = lane; while v < V; mx = max(mx, ld(T.a, o + v)); v += LANES; end
+        mx = KI.sub_group_reduce(max, mx); s = 0.0f0
+        v = lane; while v < V; s += exp2f((ld(T.a, o + v) - mx) * LOG2E); v += LANES; end
+        s = KI.sub_group_reduce(+, s); k = T.f1 / s
+        v = lane
+        while v < V
+            x = ld(T.a, o + v)
+            if v == tg; st!(T.d, x, Int64(g) * 3 + 2); end
+            st!(T.a, exp2f((x - mx) * LOG2E) * k - (v == tg ? T.f1 : 0.0f0), o + v); v += LANES
+        end
+        if lane == Int32(0); st!(T.d, mx, Int64(g) * 3); st!(T.d, s, Int64(g) * 3 + 1); end
         g += NW
     end
 end
@@ -2274,6 +2300,7 @@ end
     elseif op == T_GEMVT; t_gemvt!(T)
     elseif op == T_STORE; t_store!(T)
     elseif op == T_LOAD; t_load!(T)
+    elseif op == T_LSM; t_lsm!(T)
     end
 end
 KernelAbstractions.compiler_options(obj::KernelAbstractions.Kernel{ROCBackend,<:Any,<:Any,typeof(gpu_k_tr!)}) = (; maxthreads = Int(WGS))
@@ -2318,7 +2345,7 @@ function tgap()
 end
 function trun!(op, N; nwg = NWGMAX[], kw...)
     tgap(); t0 = time()
-    KTR[](TR(op, nwg, N; kw...); ndrange = nwg * Int(WGS))
+    KTR[](TR(op, nwg, N; i5 = TILE[], kw...); ndrange = nwg * Int(WGS))
     AMDGPU.synchronize()                                  # (a gap after every op, for the desktop's gfx ring)
     c = get(TPROF, op, (0, 0.0)); TPROF[op] = (c[1] + 1, c[2] + time() - t0)
     TDBG[] && (println("op ", op, " N ", N, " ", kw); flush(stdout))
@@ -2340,8 +2367,6 @@ function snrm2(n, x::Ptr{Float32})
     r = Ref{Float32}(0); AMDGPU.rocBLAS.rocblas_snrm2(AMDGPU.rocBLAS.handle(), Cint(n), x, Cint(1), r); r[]
 end
 sscal!(n, a, x::Ptr{Float32}) = AMDGPU.rocBLAS.rocblas_sscal(AMDGPU.rocBLAS.handle(), Cint(n), Ref(Float32(a)), x, Cint(1))
-# dW[r][k] (+)= Σ_n gy[n][r] x[n][k]
-dw!(D::Ptr{Float32}, R, K, gy::Ptr{Float32}, ldg, x::Ptr{Float32}, ldx, N; beta = 0) = sgemm!(false, true, K, R, N, 1, x, ldx, gy, ldg, beta, D, K)
 
 # ---- the trained weights ----
 struct TW                                                  # a matrix: W as the GEMVs read it, the FP32 master and momentum (GTT)
@@ -2364,7 +2389,7 @@ vnames(l) = ["operator_norm", "post_operator_norm", "ffn_norm", "post_ffn_norm",
 struct TS                                                  # the training state
     M::Model; g::ST; L::Vector{TLayer}; om::ROCVector{Float32}   # om: the embedding norm's momentum
     E::Matrix{Float32}; ME::Matrix{Float32}; OE::Matrix{Float32}  # the embedding (NE x NV: a column a row of it), its momentum, the step
-    mh::Ptr{Float32}; moh::Ptr{Float32}; nf::Int              # the masters' host pointer, the momenta's, their floats
+    mh::Ptr{Float32}; moh::Ptr{Float32}; nf::Int; Ed::Ptr{Float32}; MEd::Ptr{Float32}              # the masters' host pointer, the momenta's, their floats; the embedding and its momentum as the card reads them
 end
 function load_train(dir)
     M, g = load_engine(dir; caches = false)
@@ -2385,9 +2410,9 @@ function load_train(dir)
         push!(L, TLayer(tw, D.V[1:6], [AMDGPU.zeros(Float32, length(v)) for v in D.V[1:6]], [n == "" ? "" : "model.layers.$l.$n.weight" for n in vnames(l)]))
     end
     @printf("masters loaded (%.0f s)\n", time() - t0)
-    E = Matrix{Float32}(undef, NE, NV); src = tensor(g, "model.embed_tokens.weight")
+    Eh, Ed = pinned(4NE * NV); MEh, MEd = pinned(4NE * NV); E = unsafe_wrap(Array, Eh, (NE, NV)); ME = fill!(unsafe_wrap(Array, MEh, (NE, NV)), 0.0f0); src = tensor(g, "model.embed_tokens.weight")
     Threads.@threads for i in 1:NE*NV; E[i] = bf32(src[i]); end
-    TS(M, g, L, AMDGPU.zeros(Float32, NE), E, zeros(Float32, NE, NV), Matrix{Float32}(undef, NE, NV), mh, moh, nf)
+    TS(M, g, L, AMDGPU.zeros(Float32, NE), E, ME, Matrix{Float32}(undef, NE, NV), mh, moh, nf, Ed, MEd)
 end
 # ---- the buffers of a window: rows of positions, NPMAX of them ----
 struct TB
@@ -2403,7 +2428,7 @@ struct TB
     gBCx::ROCVector{Float32}; gc::ROCVector{Float32}
     gq::ROCVector{Float32}; gk::ROCVector{Float32}; gv::ROCVector{Float32}; ggt::ROCVector{Float32}; gqr::ROCVector{Float32}; gkr::ROCVector{Float32}; gP::ROCVector{Float32}; gA::ROCVector{Float32}
     gu1::ROCVector{Float32}; gu3::ROCVector{Float32}; gs::ROCVector{Float32}
-    dW::ROCVector{Float32}; X::ROCVector{Float32}; X2::ROCVector{Float32}; NA::ROCVector{Float32}; NB::ROCVector{Float32}; vg::ROCVector{Float32}
+    X::ROCVector{Float32}; X2::ROCVector{Float32}; NA::ROCVector{Float32}; NB::ROCVector{Float32}; vg::ROCVector{Float32}
     Xg::ROCVector{Float32}; X2g::ROCVector{Float32}       # the embedding's chunks
     act::ROCVector{UInt16}; rsa::ROCVector{Float32}       # every layer's intermediates (BF16) and its norms' rsqrt (FP32), kept from the forward for the backward
 end
@@ -2431,7 +2456,7 @@ function TB()
        z(3NP * NE), z(NP * NE),
        z(NP * NE), z(NP * NKV * HD), z(NP * NKV * HD), z(NP * 32), z(NP * NE), z(NP * NKV * HD), z(NH * NP * NP), z(NP * NE),
        z(NP * NFF), z(NP * NFF), z(NP * NFF),
-       z(NFF * NE), z(NFF * NE), z(NFF * NE), z(NE * NE), z(NE * NE), z(7NE),
+       z(NFF * NE), z(NFF * NE), z(NE * NE), z(NE * NE), z(7NE),
        z(ECH * NE), z(ECH * NE),
        AMDGPU.zeros(UInt16, NL * ACTW * NP), z(NL * RSW * NP))
 end
@@ -2515,19 +2540,16 @@ function lrestore!(S::TS, B::TB, l, N)
         lv(:BCx, B.BCx, 3NE); for (name, buf) in ((:h, B.h), (:cv, B.cv), (:y, B.y)); lv(name, buf, NE); end
     end
 end
-# the gradient of a matrix into its momentum: mo = f2 mo + (1 / acc) dW; of a vector likewise
-function macc!(B::TB, tw::TW, f2, acc)
-    axpby!(dp(B.dW), dp(tw.mo), dp(tw.mo), tw.rows, tw.K, 1 / acc, f2)
-end
+# the gradient of a vector into its momentum: m = f2 m + (1 / acc) g
 vacc!(B::TB, m::ROCVector{Float32}, f2, acc) = axpby!(dp(B.vg), dp(m), dp(m), length(m), 1, 1 / acc, f2)
 # gx = W' gy: gy rows of R at stride ldg (W's padded rows), the result rows of K at stride K
 function matmulT!(B::TB, gy, tw::TW, gx, N)
     trun!(T_PACK, N; i1 = tw.W.rows, i2 = tw.W.rows, a = gy, c = dp(B.xp))
     trun!(T_GEMVT, N; i1 = tw.W.rows ÷ 32, i3 = tw.K, i4 = tw.K, c = dp(B.xp), d = gx, W = wp(tw.W))
 end
-# a matrix's gradient dW = gy' x into its momentum and gx (+)= W' gy
+# a matrix's gradient dW = Σ_n gy[n] x[n]' straight into its momentum (mo = f2 mo + (1 / acc) dW, one product over the GTT) and gx (+)= W' gy
 function mback!(B::TB, tw::TW, gy, ldg, x, ldx, gx, N, f2, acc; add = false)
-    dw!(fp(B.dW), tw.rows, tw.K, gy, ldg, x, ldx, N); macc!(B, tw, f2, acc)
+    sgemm!(false, true, tw.K, tw.rows, N, 1 / acc, x, ldx, gy, ldg, f2, tw.mo, tw.K)
     if add
         matmulT!(B, dp(gy), tw, dp(B.gt2), N); axpby!(gx, dp(B.gt2), gx, N, tw.K, 1, 1)
     else
@@ -2589,30 +2611,28 @@ function wbwd!(S::TS, B::TB, N, f2, acc)
     normb!(dp(B.gy), hrow(B, NL), S.M.onrm, B.rs1, dp(B.gx), N, 0); normw!(dp(B.gy), hrow(B, NL), B.rs1, B.vg, N); vacc!(B, S.om, f2, acc)
     for l in NL-1:-1:0; lbwd!(S, B, l, N, f2, acc); end
 end
-# ---- the head, on the host: the loss over the positions pos (targets tgt) and the gradient of the final state ----
+# ---- the head: the loss over the positions pos (targets tgt) and the gradient of the final state. The embedding and its momentum are host
+# memory the card reads (GTT), as are the logits: three products and the softmax on the card ----
 struct Head
-    L::Matrix{Float32}; Xr::Matrix{Float32}; dX::Matrix{Float32}; xf::Matrix{Float32}; gxf::Matrix{Float32}
+    Lh::Ptr{Float32}; Ld::Ptr{Float32}; Xh::Ptr{Float32}; Xd::Ptr{Float32}; Dh::Ptr{Float32}; Dd::Ptr{Float32}
+    tg::ROCVector{Float32}; ls::ROCVector{Float32}; xf::Matrix{Float32}; gxf::Matrix{Float32}
 end
-Head() = Head(Matrix{Float32}(undef, NV, NPMAX), Matrix{Float32}(undef, NE, NPMAX), Matrix{Float32}(undef, NE, NPMAX), Matrix{Float32}(undef, NE, NPMAX), zeros(Float32, NE, NPMAX))
+Head() = Head(pinned(4NV * NPMAX)..., pinned(4NE * NPMAX)..., pinned(4NE * NPMAX)..., AMDGPU.zeros(Float32, NPMAX), AMDGPU.zeros(Float32, 3NPMAX), Matrix{Float32}(undef, NE, NPMAX), zeros(Float32, NE, NPMAX))
 # the loss (the mean over the positions) and its gradient into gxf; the embedding's momentum ME = f2 ME + (1 / acc) dE when grad
 function head!(S::TS, Hd::Head, N, pos, tgt, f2, acc; grad = true)
-    R = length(pos); L = view(Hd.L, :, 1:R); Xr = view(Hd.Xr, :, 1:R); dX = view(Hd.dX, :, 1:R)
+    R = length(pos); Xr = unsafe_wrap(Array, Hd.Xh, (NE, R))
     for (i, p) in enumerate(pos); Xr[:, i] = view(Hd.xf, :, p + 1); end
-    mul!(L, transpose(S.E), Xr)
-    loss = zeros(Float64, Threads.maxthreadid())
-    Threads.@threads for i in 1:R
-        c = view(L, :, i); mx = maximum(c); s = 0.0
-        for v in 1:NV; s += exp(Float64(c[v] - mx)); end
-        lse = mx + Float32(log(s)); loss[Threads.threadid()] += lse - c[tgt[i]+1]
-        for v in 1:NV; c[v] = exp(c[v] - lse) / R; end
-        c[tgt[i]+1] -= 1.0f0 / R
-    end
-    grad || return sum(loss) / R
-    mul!(dX, S.E, L)
+    copyto!(Hd.tg, 1, Float32.(tgt), 1, R)
+    sgemm!(true, false, NV, R, NE, 1, S.Ed, NE, Hd.Xd, NE, 0, Hd.Ld, NV)
+    trun!(T_LSM, R; i1 = NV, f1 = 1 / R, a = dp(Hd.Ld), b = dp(Hd.tg), d = dp(Hd.ls))
+    ls = Array(Hd.ls); loss = sum(Float64(ls[3i-2]) + log(Float64(ls[3i-1])) - ls[3i] for i in 1:R) / R
+    grad || return loss
+    sgemm!(false, false, NE, R, NV, 1, S.Ed, NE, Hd.Ld, NV, 0, Hd.Dd, NE)
+    sgemm!(false, true, NE, NV, R, 1 / acc, Hd.Xd, NE, Hd.Ld, NV, f2, S.MEd, NE)
+    AMDGPU.synchronize(); dX = unsafe_wrap(Array, Hd.Dh, (NE, R))
     fill!(view(Hd.gxf, :, 1:N), 0.0f0)
     for (i, p) in enumerate(pos); Hd.gxf[:, p+1] = view(dX, :, i); end
-    mul!(S.ME, Xr, transpose(L), Float32(1 / acc), Float32(f2))
-    sum(loss) / R
+    loss
 end
 # ---- the optimizer: Muon for the matrices (the momentum orthogonalized by 5 Newton-Schulz steps), momentum for the vectors ----
 const NSA, NSB, NSC = 3.4445f0, -4.7750f0, 2.0315f0
@@ -2812,6 +2832,25 @@ function gradcheck(S::TS, B::TB, Hd::Head, D::Data, prefix, N)
     println("wrote $prefix.*.f32"); flush(stdout)
 end
 # ---- training ----
+# the workgroups an op runs on and the positions a pass of the products takes (TILES: what the kernel is compiled for): what a layer's widest
+# forward product over a full window runs fastest with, timed here once the card's clock is up (the least of 3 runs of 16 products).
+# Twice the workgroups are taken only while that is 5% faster
+const TILES = (Int32(16), Int32(32)); const TILE = Ref(TILES[1])
+function tune!(S::TS, B::TB)
+    w1 = S.L[1].M[end-2]
+    run(nwg, tp) = (NWGMAX[] = nwg; TILE[] = tp; t0 = time(); for _ in 1:16
+        trun!(T_PACK, NPMAX; i1 = NE, i2 = NE, a = dp(B.fn), c = dp(B.xp)); trun!(T_GEMV, NPMAX; i1 = NFF ÷ 32, i3 = NE, i4 = NFF, c = dp(B.xp), d = dp(B.u1), W = wp(w1.W))
+    end; time() - t0)
+    t(nwg) = minimum((minimum(run(nwg, tp) for _ in 1:3), tp) for tp in TILES)
+    nwg = NWGMAX[]; for tp in TILES, _ in 1:4; run(nwg, tp); end
+    best, tp = t(nwg)
+    while true
+        best, tp = t(nwg); b2, tp2 = t(2nwg); b2 < 0.95 * best || break   # (the pair timed back to back: the clock drifts)
+        nwg *= 2; best = b2; tp = tp2
+    end
+    NWGMAX[] = nwg; TILE[] = tp; fill!(B.u1, 0.0f0)
+    @printf("%d workgroups, %d positions a pass of a product (%.1f ms the widest over a full window)\n", nwg, tp, 1e3 * best / 16); flush(stdout)
+end
 function train(args)
     arg(k, d) = (i = findfirst(==(k), args); i === nothing ? d : args[i+1])
     dir = arg("--model", ""); data = arg("--train", ""); out = arg("--out", ""); epochs = parse(Int, arg("--epochs", "2"))
@@ -2826,6 +2865,7 @@ function train(args)
     t0 = time(); KTR[] = k_tr!(ROCBackend(), Int(WGS))
     trun!(T_AXPBY, 1; i1 = 1, i2 = 1, a = dp(B.vg), b = dp(B.vg), c = dp(B.vg), f1 = 0, f2 = 0); AMDGPU.synchronize()
     @printf("training kernel compiled (%.0f s)\n", time() - t0); flush(stdout)
+    tune!(S, B)
     TDBG[] = "--debug" in args
     i = findfirst(==("--check"), args)
     i === nothing || return gradcheck(S, B, Hd, D, args[i+1], parse(Int, args[i+2]))

@@ -3,7 +3,8 @@
 // reply after the assistant's text is an example; every example is offsets into its transcript's array, nothing is copied.
 //   tokens.bin   Int32, the transcripts' arrays one after another
 //   trans.bin    (first token u64, tokens u32, date yyyymmdd u32, held out u32, 0) a transcript
-//   examples.bin (transcript, context start, reply start, reply end) u32, offsets in the transcript; the reply's <|im_end|> is in it
+//   examples.bin (transcript, context start, start, end) u32, offsets in the transcript: a typed stretch of a reply (a paste in the
+//                reply splits it: the paste is context); the reply's <|im_end|> is in its last stretch
 //   names.txt    a transcript's source path, a line
 use rayon::prelude::*;
 use serde_json::Value;
@@ -40,12 +41,19 @@ fn ctext(c: Option<&Value>) -> Option<String> {
         _ => None,
     }
 }
-// what the harness adds to a typed message goes; a paste is marked, because the user didn't write it
+const PASTE: [char; 2] = ['\u{e000}', '\u{e001}']; // around a paste in a turn's text: read as context, never a target (the user didn't write it)
+// what the harness adds to a typed message goes; a paste stays, between the marks
 fn clean(m: &str) -> String {
-    let mut s = m.to_string();
-    while let Some(a) = s.find("<pasted_content") {
-        let e = s[a..].find("</pasted_content").and_then(|i| s[a + i..].find('>').map(|j| a + i + j + 1)).unwrap_or(s.len());
-        s.replace_range(a..e, "[pasted]");
+    let m = m.replace(PASTE, "");
+    let mut it = m.split("<pasted_content");
+    let mut s = it.next().unwrap().to_string();
+    for p in it {
+        let p = p.split_once('>').map_or("", |x| x.1); // past the opening tag
+        let (body, rest) = p.split_once("</pasted_content").map_or((p, ""), |(b, r)| (b, r.split_once('>').map_or("", |x| x.1)));
+        s.push(PASTE[0]);
+        s.push_str(body.trim());
+        s.push(PASTE[1]);
+        s.push_str(rest);
     }
     for t in ["<widget_context_hint", "<system-reminder>", "<ide_selection>", "<ide_opened_file>"] {
         if let Some(a) = s.find(t) {
@@ -107,7 +115,7 @@ fn parse(f: &str) -> Option<Trans> {
                         continue;
                     }
                     let c = clean(t);
-                    let ok = human && !first && !t.starts_with('<') && matches!(turns.last(), Some(Turn { role: Role::Assistant, .. }));
+                    let ok = human && !first && matches!(turns.last(), Some(Turn { role: Role::Assistant, .. }));
                     first = false;
                     add(&mut turns, Role::User, c, ok);
                 }
@@ -134,7 +142,7 @@ fn parse(f: &str) -> Option<Trans> {
                 }
                 let k = l.get("origin").and_then(|o| o.get("kind")).and_then(Value::as_str);
                 let c = clean(t);
-                let ok = k == Some("human") && !first && !t.starts_with('<') && matches!(turns.last(), Some(Turn { role: Role::Assistant, .. }));
+                let ok = k == Some("human") && !first && matches!(turns.last(), Some(Turn { role: Role::Assistant, .. }));
                 first = false;
                 add(&mut turns, Role::User, c, ok);
             }
@@ -184,6 +192,7 @@ fn main() {
     let enc = |s: &str| -> Vec<i32> { tok.encode_fast(s, false).unwrap().get_ids().iter().map(|&x| x as i32).collect() };
     let (us, asn) = (enc("user\n"), enc("assistant\n"));
     let nl = enc("\n");
+    let nrep = std::sync::atomic::AtomicU64::new(0);
     let rendered: Vec<(Vec<i32>, Vec<(u32, u32, u32)>)> = ts
         .par_iter()
         .map(|t| {
@@ -195,15 +204,29 @@ fn main() {
                 starts.push(s as u32);
                 v.push(IM_START);
                 v.extend_from_slice(if u.role == Role::User { &us } else { &asn });
-                let rs = v.len();
-                v.extend(enc(&u.text));
+                // the typed stretches of the turn (the last one has its <|im_end|>): a paste between them is tokens, not a target
+                let mut typed: Vec<(usize, usize)> = vec![];
+                for (k, piece) in u.text.split(PASTE).enumerate() {
+                    let a = v.len();
+                    v.extend(enc(piece));
+                    if k % 2 == 0 && v.len() > a {
+                        typed.push((a, v.len()));
+                    }
+                }
+                match typed.last_mut() {
+                    Some(l) if l.1 == v.len() => l.1 += 1,
+                    _ => typed.push((v.len(), v.len() + 1)),
+                }
                 v.push(IM_END);
-                let re = v.len();
-                if u.target && re - rs <= MAX_REPLY && re - rs >= 2 {
-                    // the context starts at the first turn inside the limit, or mid-turn when one turn is longer than it
-                    let lo = rs.saturating_sub(ctx) as u32;
-                    let cs = starts.iter().copied().find(|&q| q >= lo && (q as usize) < s).unwrap_or(lo);
-                    ex.push((cs, rs as u32, re as u32));
+                let n: usize = typed.iter().map(|t| t.1 - t.0).sum();
+                if u.target && n <= MAX_REPLY && n >= 2 {
+                    for &(rs, re) in &typed {
+                        // the context starts at the first turn inside the limit, or mid-turn when what's before the stretch is longer than it
+                        let lo = rs.saturating_sub(ctx) as u32;
+                        let cs = starts.iter().copied().skip_while(|&q| q < lo).next().filter(|&q| (q as usize) < s).unwrap_or(lo);
+                        ex.push((cs, rs as u32, re as u32));
+                    }
+                    nrep.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 v.extend_from_slice(&nl);
             }
@@ -243,7 +266,7 @@ fn main() {
     }
     rl.sort();
     println!("transcripts read {}, with targets {}, written {}", files.len(), ts.len(), nw);
-    println!("targets before removing copies {nt0}; examples {nex}, held out {nho}");
+    println!("targets before removing copies {nt0}; replies {}, their typed stretches (examples) {nex}, held out {nho}", nrep.into_inner());
     println!("tokens in arrays {off}; reply tokens {rtok}, context tokens as if each were separate {ctok}");
     println!("reply median {}, p90 {}, max {}", rl[rl.len() / 2], rl[rl.len() * 9 / 10], rl[rl.len() - 1]);
 }
