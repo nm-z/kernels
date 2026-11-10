@@ -246,7 +246,7 @@ func (c *svcConn) readLoop(br *bufio.Reader) error {
 
 func (c *svcConn) dispatch(m *msg) {
 	switch m.Op {
-	case "prefill", "tokens", "stats", "done", "error", "route", "ttft", "delta", "tool_call", "vectors":
+	case "prefill", "tokens", "stats", "done", "error", "route", "model", "ttft", "delta", "tool_call", "vectors":
 		c.mu.Lock()
 		r := c.runs[m.ID]
 		c.mu.Unlock()
