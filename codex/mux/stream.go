@@ -64,6 +64,7 @@ const (
 // reasoning from the answer, holds tool-call XML back from the text and parses it into calls.
 type respBuilder struct {
 	id      string
+	served  string // the model named to the client by servedBy
 	model   string
 	created int64
 	m       Model
@@ -173,6 +174,18 @@ func (b *respBuilder) responseObj(status string, extra map[string]any) map[strin
 		r[k] = v
 	}
 	return r
+}
+
+// servedBy tells the client which model answers when it is not the one it asked for (an auto
+// shim's route): an in-progress event whose response carries the name as the `openai-model`
+// header, the place a Responses client reads the serving model from. Once a name.
+func (b *respBuilder) servedBy(model string) {
+	if model == "" || model == b.served {
+		return
+	}
+	b.served = model
+	b.emit("response.in_progress", map[string]any{"response": b.responseObj("in_progress",
+		map[string]any{"headers": map[string]any{"openai-model": model}})})
 }
 
 func (b *respBuilder) start() {
