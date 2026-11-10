@@ -1,10 +1,11 @@
 // lfm3-data TOKENIZER.json OUTDIR CTX < list of .jsonl[.zst] paths: what lfm3-1.7b.jl --train reads, for a model that says what the user
-// would say next. Each transcript's user and assistant text becomes one token array, rendered as the chat template does; a typed
-// reply after the assistant's text is an example; every example is offsets into its transcript's array, nothing is copied.
+// would say next. Each transcript's user and assistant text becomes one token array, rendered as the chat template does; a message
+// the user sent is an example, whole (what he pasted into it is his message too); every example is offsets into its transcript's
+// array, nothing is copied. Transcripts: Claude Code's and Codex's session files, and chat exports a line a message as Claude Code
+// writes one ({"type", "timestamp", "message": {"role", "content"}}).
 //   tokens.bin   Int32, the transcripts' arrays one after another
 //   trans.bin    (first token u64, tokens u32, date yyyymmdd u32, held out u32, 0) a transcript
-//   examples.bin (transcript, context start, start, end) u32, offsets in the transcript: a typed stretch of a reply (a paste in the
-//                reply splits it: the paste is context); the reply's <|im_end|> is in its last stretch
+//   examples.bin (transcript, context start, message start, message end) u32, offsets in the transcript; the message's <|im_end|> is in it
 //   names.txt    a transcript's source path, a line
 use rayon::prelude::*;
 use serde_json::Value;
@@ -17,23 +18,32 @@ use tokenizers::Tokenizer;
 const BOS: i32 = 124894;
 const IM_START: i32 = 124899;
 const IM_END: i32 = 124900;
-const MAX_REPLY: usize = 512; // tokens; past this it's a paste, not a reply
+// Codex sessions a person typed into (the others are scripts' and agents')
+const TYPED: [&str; 5] = ["Codex Desktop", "codex-tui", "codex_cli_rs", "codex_chatgpt_ios_remote", "codex_work_desktop"];
 
 #[derive(Clone, PartialEq)]
 enum Role { User, Assistant }
-struct Turn { role: Role, text: String, target: bool }
+// marked: the record says who sent it (Claude Code's origin); a file that marks any record marks every message the user sent
+struct Turn { role: Role, text: String, target: bool, marked: bool }
 struct Trans { name: String, date: u32, turns: Vec<Turn> }
 
-fn ctext(c: Option<&Value>) -> Option<String> {
+// a message's text; tool: its blocks that aren't text end it (a tool result isn't a message) or are passed over (an export's thinking, tool calls)
+fn ctext(c: Option<&Value>, lenient: bool) -> Option<String> {
     match c {
         Some(Value::String(s)) => Some(s.clone()),
         Some(Value::Array(a)) => {
             let mut o = String::new();
             for b in a {
                 match b.get("type").and_then(Value::as_str) {
-                    Some("text") | Some("input_text") | Some("output_text") => o.push_str(b.get("text").and_then(Value::as_str).unwrap_or("")),
+                    Some("text") | Some("input_text") | Some("output_text") => {
+                        if !o.is_empty() && lenient {
+                            o.push_str("\n\n");
+                        }
+                        o.push_str(b.get("text").and_then(Value::as_str).unwrap_or(""))
+                    }
                     Some("image") | Some("input_image") => {}
-                    _ => return None, // a tool result: not typed
+                    _ if lenient => {}
+                    _ => return None,
                 }
             }
             Some(o)
@@ -41,28 +51,28 @@ fn ctext(c: Option<&Value>) -> Option<String> {
         _ => None,
     }
 }
-const PASTE: [char; 2] = ['\u{e000}', '\u{e001}']; // around a paste in a turn's text: read as context, never a target (the user didn't write it)
-// what the harness adds to a typed message goes; a paste stays, between the marks
+// what the harness adds to a message goes: the tags around a paste (the paste stays), what it appends
 fn clean(m: &str) -> String {
-    let m = m.replace(PASTE, "");
     let mut it = m.split("<pasted_content");
     let mut s = it.next().unwrap().to_string();
     for p in it {
         let p = p.split_once('>').map_or("", |x| x.1); // past the opening tag
         let (body, rest) = p.split_once("</pasted_content").map_or((p, ""), |(b, r)| (b, r.split_once('>').map_or("", |x| x.1)));
-        s.push(PASTE[0]);
         s.push_str(body.trim());
-        s.push(PASTE[1]);
         s.push_str(rest);
     }
     for t in ["<widget_context_hint", "<system-reminder>", "<ide_selection>", "<ide_opened_file>"] {
-        if let Some(a) = s.find(t) {
-            s.truncate(a);
+        if let Some((a, _)) = s.split_once(t) {
+            s = a.to_string();
         }
     }
     s.replace("<|", "< |").trim().to_string()
 }
-fn add(tr: &mut Vec<Turn>, role: Role, text: String, target: bool) {
+// what the harness sends in the user's place
+fn injected(t: &str) -> bool {
+    t.starts_with("# AGENTS.md") || t.starts_with("From ") || t.starts_with("This session is being continued") || t.starts_with("[Request interrupted") || (t.starts_with('<') && !t.starts_with("<pasted_content"))
+}
+fn add(tr: &mut Vec<Turn>, role: Role, text: String, target: bool, marked: bool) {
     if text.is_empty() {
         return;
     }
@@ -75,7 +85,7 @@ fn add(tr: &mut Vec<Turn>, role: Role, text: String, target: bool) {
             }
         }
     }
-    tr.push(Turn { role, text, target });
+    tr.push(Turn { role, text, target, marked });
 }
 fn date(l: &Value) -> Option<u32> {
     let t = l.get("timestamp").and_then(Value::as_str)?;
@@ -83,12 +93,13 @@ fn date(l: &Value) -> Option<u32> {
 }
 fn parse(f: &str) -> Option<Trans> {
     let cx = f.contains("/.codex/") || f.contains("/codex-sessions/");
+    let export = f.contains("/exports/");
     if f.contains("/subagents/") {
         return None;
     }
     let h = std::fs::File::open(f).ok()?;
     let r: Box<dyn BufRead> = if f.ends_with(".zst") { Box::new(BufReader::with_capacity(1 << 20, zstd::Decoder::new(h).ok()?)) } else { Box::new(BufReader::with_capacity(1 << 20, h)) };
-    let (mut turns, mut d, mut first, mut human) = (Vec::new(), 0u32, true, true);
+    let (mut turns, mut d, mut human, mut marks) = (Vec::new(), 0u32, !cx, false);
     for line in r.split(b'\n') {
         let Ok(line) = line else { break };
         let Ok(l) = serde_json::from_slice::<Value>(&line) else { continue };
@@ -100,24 +111,20 @@ fn parse(f: &str) -> Option<Trans> {
             let Some(p) = l.get("payload") else { continue };
             if ty == "session_meta" {
                 let o = p.get("originator").and_then(Value::as_str).unwrap_or("");
-                human = !matches!(p.get("source"), Some(Value::Object(_))) && (o == "Codex Desktop" || o == "codex-tui");
+                human = !matches!(p.get("source"), Some(Value::Object(_))) && TYPED.contains(&o);
                 continue;
             }
             if ty != "response_item" || p.get("type").and_then(Value::as_str) != Some("message") {
                 continue;
             }
-            let Some(t) = ctext(p.get("content")) else { continue };
+            let Some(t) = ctext(p.get("content"), false) else { continue };
             match p.get("role").and_then(Value::as_str) {
-                Some("assistant") => add(&mut turns, Role::Assistant, t.replace("<|", "< |").trim().to_string(), false),
+                Some("assistant") => add(&mut turns, Role::Assistant, t.replace("<|", "< |").trim().to_string(), false, true),
                 Some("user") => {
                     let t = t.trim();
-                    if t.starts_with("# AGENTS.md") || t.starts_with("From ") || (t.starts_with('<') && !t.starts_with("<pasted_content")) {
-                        continue;
+                    if !injected(t) {
+                        add(&mut turns, Role::User, clean(t), human, true);
                     }
-                    let c = clean(t);
-                    let ok = human && !first && matches!(turns.last(), Some(Turn { role: Role::Assistant, .. }));
-                    first = false;
-                    add(&mut turns, Role::User, c, ok);
                 }
                 _ => {}
             }
@@ -133,19 +140,22 @@ fn parse(f: &str) -> Option<Trans> {
                         o.push_str(b.get("text").and_then(Value::as_str).unwrap_or(""));
                     }
                 }
-                add(&mut turns, Role::Assistant, o.replace("<|", "< |").trim().to_string(), false);
+                add(&mut turns, Role::Assistant, o.replace("<|", "< |").trim().to_string(), false, true);
             } else if ty == "user" {
-                let Some(t) = ctext(content) else { continue };
+                let Some(t) = ctext(content, export) else { continue };
                 let t = t.trim();
-                if t.starts_with("From ") || t.starts_with("This session is being continued") || (t.starts_with('<') && !t.starts_with("<pasted_content")) {
+                if injected(t) {
                     continue;
                 }
                 let k = l.get("origin").and_then(|o| o.get("kind")).and_then(Value::as_str);
-                let c = clean(t);
-                let ok = k == Some("human") && !first && matches!(turns.last(), Some(Turn { role: Role::Assistant, .. }));
-                first = false;
-                add(&mut turns, Role::User, c, ok);
+                marks |= k.is_some();
+                add(&mut turns, Role::User, clean(t), k.is_none() || k == Some("human"), k.is_some());
             }
+        }
+    }
+    if marks {
+        for t in turns.iter_mut() {
+            t.target &= t.marked;
         }
     }
     turns.iter().any(|t| t.target).then(|| Trans { name: f.to_string(), date: d, turns })
@@ -167,7 +177,7 @@ fn main() {
     let mut ts: Vec<Trans> = files.par_iter().filter_map(|f| parse(f)).collect();
     let nt0: usize = ts.iter().map(|t| t.turns.iter().filter(|u| u.target).count()).sum();
     // a resumed or forked session repeats a prefix of another: its copies aren't targets. The longest transcripts go first, so the
-    // original's replies stay; a transcript left with no target goes.
+    // original's messages stay; a transcript left with no target goes.
     ts.sort_by(|x, y| y.turns.len().cmp(&x.turns.len()).then(x.name.cmp(&y.name)));
     let mut seen = HashSet::new();
     for t in ts.iter_mut() {
@@ -192,7 +202,6 @@ fn main() {
     let enc = |s: &str| -> Vec<i32> { tok.encode_fast(s, false).unwrap().get_ids().iter().map(|&x| x as i32).collect() };
     let (us, asn) = (enc("user\n"), enc("assistant\n"));
     let nl = enc("\n");
-    let nrep = std::sync::atomic::AtomicU64::new(0);
     let rendered: Vec<(Vec<i32>, Vec<(u32, u32, u32)>)> = ts
         .par_iter()
         .map(|t| {
@@ -204,29 +213,15 @@ fn main() {
                 starts.push(s as u32);
                 v.push(IM_START);
                 v.extend_from_slice(if u.role == Role::User { &us } else { &asn });
-                // the typed stretches of the turn (the last one has its <|im_end|>): a paste between them is tokens, not a target
-                let mut typed: Vec<(usize, usize)> = vec![];
-                for (k, piece) in u.text.split(PASTE).enumerate() {
-                    let a = v.len();
-                    v.extend(enc(piece));
-                    if k % 2 == 0 && v.len() > a {
-                        typed.push((a, v.len()));
-                    }
-                }
-                match typed.last_mut() {
-                    Some(l) if l.1 == v.len() => l.1 += 1,
-                    _ => typed.push((v.len(), v.len() + 1)),
-                }
+                let rs = v.len();
+                v.extend(enc(&u.text));
                 v.push(IM_END);
-                let n: usize = typed.iter().map(|t| t.1 - t.0).sum();
-                if u.target && n <= MAX_REPLY && n >= 2 {
-                    for &(rs, re) in &typed {
-                        // the context starts at the first turn inside the limit, or mid-turn when what's before the stretch is longer than it
-                        let lo = rs.saturating_sub(ctx) as u32;
-                        let cs = starts.iter().copied().skip_while(|&q| q < lo).next().filter(|&q| (q as usize) < s).unwrap_or(lo);
-                        ex.push((cs, rs as u32, re as u32));
-                    }
-                    nrep.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let re = v.len();
+                if u.target && re - rs >= 2 {
+                    // the context starts at the first turn inside the limit, or mid-turn when one turn is longer than it
+                    let lo = rs.saturating_sub(ctx) as u32;
+                    let cs = starts.iter().copied().skip_while(|&q| q < lo).next().filter(|&q| (q as usize) < s).unwrap_or(lo);
+                    ex.push((cs, rs as u32, re as u32));
                 }
                 v.extend_from_slice(&nl);
             }
@@ -266,7 +261,7 @@ fn main() {
     }
     rl.sort();
     println!("transcripts read {}, with targets {}, written {}", files.len(), ts.len(), nw);
-    println!("targets before removing copies {nt0}; replies {}, their typed stretches (examples) {nex}, held out {nho}", nrep.into_inner());
-    println!("tokens in arrays {off}; reply tokens {rtok}, context tokens as if each were separate {ctok}");
-    println!("reply median {}, p90 {}, max {}", rl[rl.len() / 2], rl[rl.len() * 9 / 10], rl[rl.len() - 1]);
+    println!("targets before removing copies {nt0}; examples {nex}, held out {nho}");
+    println!("tokens in arrays {off}; message tokens {rtok}, context tokens as if each were separate {ctok}");
+    println!("message median {}, p90 {}, p99 {}, max {}", rl[rl.len() / 2], rl[rl.len() * 9 / 10], rl[rl.len() * 99 / 100], rl[rl.len() - 1]);
 }

@@ -2237,7 +2237,7 @@ end
         g += NW
     end
 end
-# the head's loss: a = the logits [i][V] of N targets (b[i], as floats), in place the loss's gradient f1 (softmax - onehot); d[3i..] = the largest
+# the head's loss: a = the logits [i][V] of N targets (b[i], as floats), in place the loss's gradient c[i] (softmax - onehot); d[3i..] = the largest
 # logit, the sum of exp(logit - it), the target's logit. An item a target, a lane every 32nd logit
 @inline function t_lsm!(T::TR)
     lane = lanei(); NW = tnw(T); V = T.i1; g = waveid()
@@ -2246,12 +2246,12 @@ end
         v = lane; while v < V; mx = max(mx, ld(T.a, o + v)); v += LANES; end
         mx = KI.sub_group_reduce(max, mx); s = 0.0f0
         v = lane; while v < V; s += exp2f((ld(T.a, o + v) - mx) * LOG2E); v += LANES; end
-        s = KI.sub_group_reduce(+, s); k = T.f1 / s
+        s = KI.sub_group_reduce(+, s); wt = ld(T.c, Int64(g)); k = wt / s
         v = lane
         while v < V
             x = ld(T.a, o + v)
             if v == tg; st!(T.d, x, Int64(g) * 3 + 2); end
-            st!(T.a, exp2f((x - mx) * LOG2E) * k - (v == tg ? T.f1 : 0.0f0), o + v); v += LANES
+            st!(T.a, exp2f((x - mx) * LOG2E) * k - (v == tg ? wt : 0.0f0), o + v); v += LANES
         end
         if lane == Int32(0); st!(T.d, mx, Int64(g) * 3); st!(T.d, s, Int64(g) * 3 + 1); end
         g += NW
@@ -2612,25 +2612,37 @@ function wbwd!(S::TS, B::TB, N, f2, acc)
     for l in NL-1:-1:0; lbwd!(S, B, l, N, f2, acc); end
 end
 # ---- the head: the loss over the positions pos (targets tgt) and the gradient of the final state. The embedding and its momentum are host
-# memory the card reads (GTT), as are the logits: three products and the softmax on the card ----
+# memory the card reads (GTT); the logits are in VRAM, HC positions at a time (what tune! times fastest a position: a dispatch stays
+# short, and the desktop gets the card between two): three products and the softmax on the card ----
+const HCS = (64, 128, 256, 512); const HC = Ref(HCS[1])
 struct Head
-    Lh::Ptr{Float32}; Ld::Ptr{Float32}; Xh::Ptr{Float32}; Xd::Ptr{Float32}; Dh::Ptr{Float32}; Dd::Ptr{Float32}
-    tg::ROCVector{Float32}; ls::ROCVector{Float32}; xf::Matrix{Float32}; gxf::Matrix{Float32}
+    Lg::ROCVector{Float32}; Xh::Ptr{Float32}; Xd::Ptr{Float32}; Dh::Ptr{Float32}; Dd::Ptr{Float32}
+    tg::ROCVector{Float32}; wt::ROCVector{Float32}; ls::ROCVector{Float32}; xf::Matrix{Float32}; gxf::Matrix{Float32}
 end
-Head() = Head(pinned(4NV * NPMAX)..., pinned(4NE * NPMAX)..., pinned(4NE * NPMAX)..., AMDGPU.zeros(Float32, NPMAX), AMDGPU.zeros(Float32, 3NPMAX), Matrix{Float32}(undef, NE, NPMAX), zeros(Float32, NE, NPMAX))
-# the loss (the mean over the positions) and its gradient into gxf; the embedding's momentum ME = f2 ME + (1 / acc) dE when grad
-function head!(S::TS, Hd::Head, N, pos, tgt, f2, acc; grad = true)
-    R = length(pos); Xr = unsafe_wrap(Array, Hd.Xh, (NE, R))
+Head() = Head(AMDGPU.zeros(Float32, NV * HCS[end]), pinned(4NE * NPMAX)..., pinned(4NE * NPMAX)..., AMDGPU.zeros(Float32, NPMAX), AMDGPU.zeros(Float32, NPMAX), AMDGPU.zeros(Float32, 3NPMAX), Matrix{Float32}(undef, NE, NPMAX), zeros(Float32, NE, NPMAX))
+# R positions of Xr: their logits, the loss's parts (ls) and, when grad, dX and the embedding's momentum ME = f2 ME + (1 / acc) dE
+function headrun!(S::TS, Hd::Head, R, f2, acc, grad)
+    for c0 in 0:HC[]:R-1
+        c = min(HC[], R - c0); x = Hd.Xd + 4NE * c0
+        sgemm!(true, false, NV, c, NE, 1, S.Ed, NE, x, NE, 0, fp(Hd.Lg), NV)
+        trun!(T_LSM, c; i1 = NV, a = dp(Hd.Lg), b = dp(Hd.tg, c0), c = dp(Hd.wt, c0), d = dp(Hd.ls, 3c0))
+        grad || continue
+        sgemm!(false, false, NE, c, NV, 1, S.Ed, NE, fp(Hd.Lg), NV, 0, Hd.Dd + 4NE * c0, NE)
+        sgemm!(false, true, NE, NV, c, 1 / acc, x, NE, fp(Hd.Lg), NV, c0 == 0 ? f2 : 1, S.MEd, NE)
+    end
+    AMDGPU.synchronize()
+end
+# the loss (the mean over the positions) and its gradient into gxf. The last na positions are the window's other text: their mean
+# (AUXL) joins the loss with the weight AUX
+const AUX = Ref(0.0); const AUXL = Ref(0.0); const ARNG = Random.MersenneTwister(1)
+function head!(S::TS, Hd::Head, N, pos, tgt, f2, acc; grad = true, na = 0)
+    R = length(pos); Rm = R - na; Xr = unsafe_wrap(Array, Hd.Xh, (NE, R))
     for (i, p) in enumerate(pos); Xr[:, i] = view(Hd.xf, :, p + 1); end
-    copyto!(Hd.tg, 1, Float32.(tgt), 1, R)
-    sgemm!(true, false, NV, R, NE, 1, S.Ed, NE, Hd.Xd, NE, 0, Hd.Ld, NV)
-    trun!(T_LSM, R; i1 = NV, f1 = 1 / R, a = dp(Hd.Ld), b = dp(Hd.tg), d = dp(Hd.ls))
-    ls = Array(Hd.ls); loss = sum(Float64(ls[3i-2]) + log(Float64(ls[3i-1])) - ls[3i] for i in 1:R) / R
+    copyto!(Hd.tg, 1, Float32.(tgt), 1, R); copyto!(Hd.wt, 1, Float32[i <= Rm ? 1 / Rm : AUX[] / na for i in 1:R], 1, R)
+    headrun!(S, Hd, R, f2, acc, grad)
+    ls = Array(Hd.ls); l(i) = Float64(ls[3i-2]) + log(Float64(ls[3i-1])) - ls[3i]; loss = sum(l, 1:Rm) / Rm; AUXL[] = na > 0 ? sum(l, Rm+1:R) / na : NaN
     grad || return loss
-    sgemm!(false, false, NE, R, NV, 1, S.Ed, NE, Hd.Ld, NV, 0, Hd.Dd, NE)
-    sgemm!(false, true, NE, NV, R, 1 / acc, Hd.Xd, NE, Hd.Ld, NV, f2, S.MEd, NE)
-    AMDGPU.synchronize(); dX = unsafe_wrap(Array, Hd.Dh, (NE, R))
-    fill!(view(Hd.gxf, :, 1:N), 0.0f0)
+    dX = unsafe_wrap(Array, Hd.Dh, (NE, R)); fill!(view(Hd.gxf, :, 1:N), 0.0f0)
     for (i, p) in enumerate(pos); Hd.gxf[:, p+1] = view(dX, :, i); end
     loss
 end
@@ -2700,19 +2712,23 @@ function Data(dir)
     Data(tok, [(t[6i+1], t[6i+2], t[6i+3], t[6i+4], t[6i+5]) for i in 0:length(t)÷6-1], [(e[4i+1], e[4i+2], e[4i+3], e[4i+4]) for i in 0:length(e)÷4-1])
 end
 tfirst(D::Data, t) = Int(D.tr[t+1][1]) | Int(D.tr[t+1][2]) << 32
-# the windows: a reply's context starts it; the replies that end within NPMAX join it. (transcript, first token, N, the loss positions, their targets)
+# the windows: a message's context starts it; the messages that end within NPMAX join it. (transcript, first token, N, the loss positions, their targets)
+# A message longer than the window holds is two windows: its start after the context, and its end (what is between is neither's)
 function windows(D::Data, held::Bool)
     W = Tuple{Int,Int,Int,Vector{Int},Vector{Int}}[]; i = 1; ne = length(D.ex)
     while i <= ne
         t, w0, _, _ = D.ex[i]; last = i
         while last + 1 <= ne && D.ex[last+1][1] == t && D.ex[last+1][4] <= w0 + NPMAX; last += 1; end
         if (D.tr[t+1][5] != 0) == held
-            N = Int(D.ex[last][4] - w0); pos = Int[]; tgt = Int[]; f = tfirst(D, Int(t))
-            for j in i:last
-                _, _, rs, re = D.ex[j]
-                for p in Int(rs)-1:Int(re)-2; push!(pos, p - Int(w0)); push!(tgt, D.tok[f+p+2]); end
+            f = tfirst(D, Int(t)); a = Int(w0); e = Int(D.ex[last][4])
+            for (lo, hi) in (e - a <= NPMAX ? ((a, e),) : ((a, a + NPMAX), (max(a + NPMAX, e - NPMAX), e)))
+                pos = Int[]; tgt = Int[]
+                for j in i:last
+                    _, _, rs, re = D.ex[j]
+                    for p in max(Int(rs) - 1, lo):min(Int(re), hi)-2; push!(pos, p - lo); push!(tgt, D.tok[f+p+2]); end
+                end
+                isempty(pos) || push!(W, (Int(t), f + lo, hi - lo, pos, tgt))
             end
-            push!(W, (Int(t), f + Int(w0), N, pos, tgt))
         end
         i = last + 1
     end
@@ -2724,8 +2740,12 @@ function window!(S::TS, B::TB, Hd::Head, D::Data, w, f2, acc; grad = true)
     for p in 0:N-1; Hd.xf[:, p+1] = view(S.E, :, D.tok[f0+p+1] + 1); end
     copyto!(B.H, 1, Hd.xf, 1, N * NE)
     wfwd!(S, B, N; keep = grad)
-    AMDGPU.synchronize(); copyto!(Hd.xf, 1, B.xn, 1, N * NE)
-    loss = head!(S, Hd, N, pos, tgt, f2, acc; grad)
+    AMDGPU.synchronize(); copyto!(Hd.xf, 1, B.xn, 1, N * NE); na = 0
+    if grad && AUX[] > 0                                   # the window's other text: as many of its positions as there are loss positions, at random
+        o = Random.shuffle!(ARNG, setdiff(0:N-2, pos)); na = min(length(o), length(pos))
+        pos = vcat(pos, o[1:na]); tgt = vcat(tgt, Int[D.tok[f0+p+2] for p in o[1:na]])
+    end
+    loss = head!(S, Hd, N, pos, tgt, f2, acc; grad, na)
     grad || return loss
     copyto!(B.gy, 1, Hd.gxf, 1, N * NE)
     wbwd!(S, B, N, f2, acc)
@@ -2740,7 +2760,7 @@ function heldout(S::TS, B::TB, Hd::Head, D::Data, W)
     for w in W
         tot += window!(S, B, Hd, D, w, 1, 1; grad = false) * length(w[4]); n += length(w[4])
     end
-    @printf("held out: %.4f over %d reply tokens in %d windows (%.0f s)\n", tot / n, n, length(W), time() - t0); flush(stdout)
+    @printf("held out: %.4f over %d message tokens in %d windows (%.0f s)\n", tot / n, n, length(W), time() - t0); flush(stdout)
     tot / n
 end
 # ---- BF16 safetensors of the trained weights, with the model's other files ----
@@ -2836,7 +2856,7 @@ end
 # forward product over a full window runs fastest with, timed here once the card's clock is up (the least of 3 runs of 16 products).
 # Twice the workgroups are taken only while that is 5% faster
 const TILES = (Int32(16), Int32(32)); const TILE = Ref(TILES[1])
-function tune!(S::TS, B::TB)
+function tune!(S::TS, B::TB, Hd::Head)
     w1 = S.L[1].M[end-2]
     run(nwg, tp) = (NWGMAX[] = nwg; TILE[] = tp; t0 = time(); for _ in 1:16
         trun!(T_PACK, NPMAX; i1 = NE, i2 = NE, a = dp(B.fn), c = dp(B.xp)); trun!(T_GEMV, NPMAX; i1 = NFF ÷ 32, i3 = NE, i4 = NFF, c = dp(B.xp), d = dp(B.u1), W = wp(w1.W))
@@ -2849,15 +2869,18 @@ function tune!(S::TS, B::TB)
         nwg *= 2; best = b2; tp = tp2
     end
     NWGMAX[] = nwg; TILE[] = tp; fill!(B.u1, 0.0f0)
-    @printf("%d workgroups, %d positions a pass of a product (%.1f ms the widest over a full window)\n", nwg, tp, 1e3 * best / 16); flush(stdout)
+    R = HCS[end]; fill!(unsafe_wrap(Array, Hd.Xh, (NE, R)), 0.0f0)   # (nothing moves: x and the weights of the loss are 0, and so is the momentum when training starts)
+    th, HC[] = minimum((minimum((HC[] = c; t0 = time(); headrun!(S, Hd, R, 1, 1, true); time() - t0) for _ in 1:2), c) for c in HCS)
+    @printf("%d workgroups, %d positions a pass of a product (%.1f ms the widest over a full window); the head %d positions at a time (%.2f ms a position)\n", nwg, tp, 1e3 * best / 16, HC[], 1e3 * th / R); flush(stdout)
 end
 function train(args)
     arg(k, d) = (i = findfirst(==(k), args); i === nothing ? d : args[i+1])
     dir = arg("--model", ""); data = arg("--train", ""); out = arg("--out", ""); epochs = parse(Int, arg("--epochs", "2"))
     lr = parse(Float64, arg("--lr", "0.002")); lrv = parse(Float64, arg("--lrv", "0.0002")); lre = parse(Float64, arg("--lre", "0.002")); beta = parse(Float64, arg("--beta", "0.95"))
     acc = parse(Int, arg("--acc", "8")); nwin = parse(Int, arg("--windows", "0")); seed = parse(Int, arg("--seed", "1"))
+    evals = parse(Int, arg("--evals", "8")); warm = parse(Float64, arg("--warm", "0.02")); AUX[] = parse(Float64, arg("--aux", "0"))
     out == "" || mkpath(out)
-    (dir == "" || data == "") && error("usage: julia --project=env/amd -t 12 lfm3-1.7b.jl --train DATADIR --model DIR --out OUTDIR [--epochs E --lr L --lrv L --lrv L --beta B --acc A --windows W --check PREFIX N --resume]")
+    (dir == "" || data == "") && error("usage: julia --project=env/amd -t 12 lfm3-1.7b.jl --train DATADIR --model DIR --out OUTDIR [--epochs E --lr L --lrv L --lre L --beta B --acc A --evals N --warm F --aux W --windows W --check PREFIX N --resume]")
     BLAS.set_num_threads(Sys.CPU_THREADS)
     AMDGPU.stream!(AMDGPU.HIPStream(:low))                 # (the card also runs the desktop: its gfx ring goes first)
     fence_start()
@@ -2865,19 +2888,24 @@ function train(args)
     t0 = time(); KTR[] = k_tr!(ROCBackend(), Int(WGS))
     trun!(T_AXPBY, 1; i1 = 1, i2 = 1, a = dp(B.vg), b = dp(B.vg), c = dp(B.vg), f1 = 0, f2 = 0); AMDGPU.synchronize()
     @printf("training kernel compiled (%.0f s)\n", time() - t0); flush(stdout)
-    tune!(S, B)
+    tune!(S, B, Hd)
     TDBG[] = "--debug" in args
     i = findfirst(==("--check"), args)
     i === nothing || return gradcheck(S, B, Hd, D, args[i+1], parse(Int, args[i+2]))
     Wt = windows(D, false); Wh = windows(D, true)
     nwin > 0 && (Wt = Wt[1:min(nwin, end)]; Wh = Wh[1:min(cld(nwin, 3), end)])
     "--repeat" in args && (Wt = fill(Wt[1], length(Wt)); Wh = Wh[1:1])   # (the same window every time: what a step does to its loss)
-    @printf("%d training windows, %d held out; %d windows a step\n", length(Wt), length(Wh), acc); flush(stdout)
+    # the held-out loss is read `evals` times an epoch on windows spread over the held-out transcripts: as many as cost a tenth of the
+    # training between two readings (a forward is a fifth of a training window). The weights are written when it is the lowest so far
+    spe = cld(length(Wt), acc); nstep = epochs * spe; every = cld(spe, evals); kw = max(1, round(Int, warm * nstep))
+    We = Wh[unique(round.(Int, range(1, length(Wh); length = min(length(Wh), max(1, length(Wt) ÷ 2evals)))))]
+    rate(k) = k < kw ? k / kw : (nstep - k + 1) / (nstep - kw + 1)   # the step's share of the rates: up over the first steps, then down to nothing at the last
+    @printf("%d training windows, %d held out (%d read %d times an epoch); %d windows a step, %d steps\n", length(Wt), length(Wh), length(We), evals, acc, nstep); flush(stdout)
     ck = joinpath(out, "checkpoint.bin"); ep0 = 1; i0 = 0
     if "--resume" in args && isfile(ck)
         ep0, i0, best = ckpt_read(S, ck)
     else
-        best = heldout(S, B, Hd, D, Wh)
+        best = heldout(S, B, Hd, D, We)
     end
     rng = Random.MersenneTwister(seed)
     for _ in 1:ep0-1; Random.shuffle(rng, 1:length(Wt)); end
@@ -2888,19 +2916,20 @@ function train(args)
             w = Wt[wi]; fst = (i - 1) % acc == 0
             t1 = time(); loss = window!(S, B, Hd, D, w, fst ? beta : 1.0, acc)
             tot += loss * length(w[4]); n += length(w[4])
-            @printf("epoch %d window %d/%d: N %d, %d reply tokens, loss %.4f (%.1f s)\n", ep, i, length(order), w[3], length(w[4]), loss, time() - t1); flush(stdout)
+            @printf("epoch %d window %d/%d: N %d, %d message tokens, loss %.4f%s (%.1f s)\n", ep, i, length(order), w[3], length(w[4]), loss, AUX[] > 0 ? @sprintf(", other text %.4f", AUXL[]) : "", time() - t1); flush(stdout)
             "--prof" in args && (println(join(("$k $(v[1]) $(round(v[2]; digits = 2)) s" for (k, v) in sort(collect(TPROF); by = x -> -x[2][2])), ", ")); empty!(TPROF); flush(stdout))
-            (i % acc == 0 || i == length(order)) && step!(S, B, lr, lrv, lre)
-            i % (acc * 32) == 0 && ckpt_write(S, ck, ep, i, best)
+            (i % acc == 0 || i == length(order)) || continue
+            k = (ep - 1) * spe + cld(i, acc); r = rate(k); step!(S, B, r * lr, r * lrv, r * lre)
+            (cld(i, acc) % every == 0 || i == length(order)) || continue
+            @printf("epoch %d step %d/%d (rates x %.3f): train loss %.4f over %d message tokens (%.0f min)\n", ep, k, nstep, r, tot / n, n, (time() - t0) / 60)
+            h = heldout(S, B, Hd, D, We)
+            if h < best
+                best = h; out == "" || export_bf16(S, dir, out)
+            else
+                println("not the best ($best): no export")
+            end
+            out == "" || ckpt_write(S, ck, ep, i, best); flush(stdout)
         end
-        @printf("epoch %d: train loss %.4f over %d reply tokens (%.0f min)\n", ep, tot / n, n, (time() - t0) / 60)
-        h = heldout(S, B, Hd, D, Wh)
-        if h < best
-            best = h; export_bf16(S, dir, out)
-        else
-            println("not the best ($best): no export")
-        end
-        ckpt_write(S, ck, ep, length(order), best); flush(stdout)
     end
 end
 
