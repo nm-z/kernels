@@ -230,6 +230,9 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 					trying, failed = m.Trying, m.Failed
 					s.hub.Publish("run.route", map[string]any{"service": svc.name, "run": string(id), "trying": nonNil(trying), "failed": nonNil(failed)})
 					rb.shimStats("route", conn.auto, trying, failed, nil, svc.cfg.Ctx)
+					if conn.auto && len(trying) > 0 {
+						rb.servedBy(trying[len(trying)-1])
+					}
 				case "ttft":
 					if sawTTFT {
 						continue
