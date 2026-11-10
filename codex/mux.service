@@ -2,6 +2,8 @@
 Description=mux: serves AI on this host and supervises every service
 
 [Service]
+Type=notify
+NotifyAccess=main
 ExecStart=%h/.local/bin/mux serve -f %h/.config/mux/mux.yaml
 Restart=always
 RestartSec=2

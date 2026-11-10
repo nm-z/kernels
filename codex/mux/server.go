@@ -217,6 +217,7 @@ func (s *Server) Start() error {
 		}(e)
 	}
 	s.hub.Publish("mux.start", map[string]any{"listen": hl.Addr().String(), "services": len(s.order)})
+	sdNotify("READY=1") // (the listeners are bound: a client that waited on the restart can connect now)
 	s.logf("mux: listening on %s, services on %s (%s), %d services", hl.Addr(), sock, map[bool]string{true: "systemd scopes", false: "plain process groups"}[s.systemd], len(s.order))
 	if s.compatLn != nil {
 		s.logf("mux: llama.cpp face for %s on %s", s.cfg.CompatService, s.compatLn.Addr())
@@ -263,4 +264,22 @@ func (s *Server) SetServiceUp(name string, up bool) error {
 	}
 	e.SetDesired(up)
 	return nil
+}
+
+// sdNotify sends a state line to systemd (a Type=notify unit: READY=1 once mux listens, so `systemctl restart mux`
+// returns when clients can connect); outside systemd it does nothing.
+func sdNotify(state string) {
+	addr := os.Getenv("NOTIFY_SOCKET")
+	if addr == "" {
+		return
+	}
+	if addr[0] == '@' {
+		addr = "\x00" + addr[1:]
+	}
+	c, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: addr, Net: "unixgram"})
+	if err != nil {
+		return
+	}
+	defer c.Close()
+	c.Write([]byte(state))
 }

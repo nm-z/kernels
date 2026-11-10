@@ -126,11 +126,11 @@ the user moved it off, which an auto shim reports to its router as a failed atte
 
 | embed → mux | fields |
 |---|---|
-| `register` | `dims`, `max_batch`, `device` |
+| `register` | `dims`, `max_batch`, `device`, `slots` (runs at once, default 1: a service that orders its own work, such as single texts ahead of batches, takes several) |
 | `vectors` | `id`, `vectors` (one per input, in order) |
 | `error` | `id`, `message` |
 
-mux → embed: `run` with `id`, `texts`.
+mux → embed: `run` with `id`, `texts`. Runs past the first may arrive before it ends (up to `slots`); answer each by its `id`.
 
 ### job: finite work (training, embedding a large set, a backfill)
 
@@ -139,6 +139,16 @@ mux → embed: `run` with `id`, `texts`.
 | `register` | `title` | first |
 | `progress` | `pct` (0–100), `detail` (what it is on) | at least every 10 s and on every change of `pct` |
 | `finished` | `ok`, `message` | last; the process then exits (the service becomes `done`) |
+
+### any service: events
+
+| service → mux | fields | when |
+|---|---|---|
+| `event` | `event` (its name), `data` (any JSON) | a change observers should see (a die paused for heat, clocks raised) |
+
+mux records it and streams it as `service.event` (`service`, `event`, `data`) on `GET /v1/events` and `mux events`:
+something waiting on a service subscribes to these (and to `service.state`, which says when it is up) instead of
+reading its log.
 
 ## Clients ↔ mux (HTTP)
 
