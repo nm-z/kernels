@@ -42,7 +42,7 @@ kind: engine                       # engine | shim | embed | job
 display: Qwen3.8-27B               # optional: the name web chat shows (see the llama.cpp face)
 gguf: /data/models/qwen3.8-27b-q5/Qwen3.8-27B.Q5_K_M.gguf   # engine: tokenizer + chat template
 ctx: 262144                        # engine, shim: context window broadcast to clients
-efforts: [none, low, medium, high, xhigh]
+efforts: [none, low, medium, high, xhigh]   # engine default; a shim takes every effort a client sends
 vision: false
 device: sentry 4x Radeon Pro V340 (gfx900)
 command: [/usr/bin/julia, -t, "24", qwen3.8-27b.jl, --model, /data/models/qwen3.8-27b-q5/Qwen3.8-27B.Q5_K_M.gguf]
