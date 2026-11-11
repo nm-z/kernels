@@ -62,7 +62,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, badRequest("invalid_json", "", "the body is not a JSON object"))
 		return
 	}
-	svc := s.resolveModel(probe.Model)
+	svc, want := s.resolveRoute(probe.Model)
 	if svc == nil && probe.Model == "" {
 		writeAPIError(w, badRequest("missing_model", "model", "model is required (this host has no compat_service to default to)"))
 		return
@@ -80,7 +80,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, aerr)
 		return
 	}
+	pr.want = want
 	s.dispatch(w, r, svc, pr)
+}
+
+// resolveRoute finds the service a request names and, for SERVICE/MODEL, the model of that
+// service's provider the run is to be answered with.
+func (s *Server) resolveRoute(name string) (*Service, string) {
+	if svc := s.resolveModel(name); svc != nil {
+		return svc, ""
+	}
+	if cut := strings.IndexByte(name, '/'); cut > 0 {
+		if svc := s.svcs[name[:cut]]; svc != nil && svc.kind == KindShim {
+			return svc, name[cut+1:]
+		}
+	}
+	return nil, ""
 }
 
 // compatService is the service /props and /v1/models describe: the compat service, else the first

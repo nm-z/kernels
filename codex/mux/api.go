@@ -46,6 +46,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		} else {
 			m["ctx"] = in.Ctx
 			m["efforts"] = in.Efforts
+			m["models"] = in.Models
 		}
 		data = append(data, m)
 	}

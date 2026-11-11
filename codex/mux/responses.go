@@ -28,7 +28,10 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, badRequest("invalid_json", "", "the body is not a JSON object"))
 		return
 	}
-	svc := s.svcs[probe.Model]
+	svc, want := s.svcs[probe.Model], ""
+	if svc == nil {
+		svc, want = s.resolveRoute(probe.Model)
+	}
 	if svc == nil || svc.kind == KindJob {
 		writeAPIError(w, s.modelNotFound(probe.Model))
 		return
@@ -42,6 +45,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, aerr)
 		return
 	}
+	pr.want = want
 	s.dispatch(w, r, svc, pr)
 }
 

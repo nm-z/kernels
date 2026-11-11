@@ -155,7 +155,11 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 	if q.pr.effort != "" {
 		effort = q.pr.effort
 	}
-	if err := conn.send(map[string]any{"op": "run", "id": id, "messages": q.msgs, "tools": tools, "effort": effort, "images": images}); err != nil {
+	var want any
+	if q.pr.want != "" {
+		want = q.pr.want
+	}
+	if err := conn.send(map[string]any{"op": "run", "id": id, "messages": q.msgs, "tools": tools, "effort": effort, "model": want, "images": images}); err != nil {
 		res.err = &apiError{Status: http.StatusServiceUnavailable, Type: "server_error", Code: "service_unavailable", Message: fmt.Sprintf("model %s: cannot reach the shim: %v", svc.name, err)}
 		return res
 	}

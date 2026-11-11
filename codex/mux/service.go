@@ -103,6 +103,7 @@ type Service struct {
 	last         *LastRun
 	progress     *Progress
 	capacity     CapacityFacts
+	models       []string  // a shim: the models its provider offers, as last reported
 	lastProgress time.Time // a job's last progress (or its registration)
 	jobRes       *jobResult
 	device       string // an embed service reports its own
@@ -150,6 +151,7 @@ type ServiceInfo struct {
 	Auto      bool      `json:"auto,omitempty"`
 	Vision    bool      `json:"vision"`
 	Efforts   []string  `json:"efforts,omitempty"`
+	Models    []string  `json:"models,omitempty"`
 }
 
 func (e *Service) Info() ServiceInfo {
@@ -162,7 +164,7 @@ func (e *Service) infoLocked() ServiceInfo {
 	in := ServiceInfo{
 		Name: e.name, Kind: e.kind, State: e.state, Reason: e.reason, Device: e.cfg.Device, Ctx: e.cfg.Ctx,
 		Since: e.since.Format(time.RFC3339), Last: e.last, Progress: e.progress, Log: e.logPath, Up: e.desired,
-		Active: e.active, Queued: e.queued, Vision: e.cfg.Vision, Efforts: e.cfg.Efforts,
+		Active: e.active, Queued: e.queued, Vision: e.cfg.Vision, Efforts: e.cfg.Efforts, Models: e.models,
 	}
 	if e.device != "" && in.Device == "" {
 		in.Device = e.device
@@ -275,6 +277,14 @@ func (e *Service) CapacitySnapshot() (string, CapacityFacts, time.Time, int) {
 		slots = e.conn.slots
 	}
 	return e.state, e.capacity, e.since, slots
+}
+
+// reportModels keeps the models a shim read from its provider. They outlive the shim's socket: a provider
+// that is down still offers them.
+func (e *Service) reportModels(models []string) {
+	e.mu.Lock()
+	e.models = models
+	e.mu.Unlock()
 }
 
 func (e *Service) reportCapacity(c *svcConn, m *msg) {

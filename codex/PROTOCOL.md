@@ -107,6 +107,7 @@ Refused: unknown service, wrong peer, `positions < ctx`.
 | `delta` | `id`, `channel` (`reasoning` or `content`), `text` | as it streams |
 | `tool_call` | `id`, `call_id`, `name`, `arguments` (JSON text) | each call |
 | `capacity` | `remaining`, `reset_time`, `tokens_served_today` (provider-reported; each unavailable value is an empty string) | after registration and whenever provider facts change |
+| `models` | `models` (every model the provider offers this account, as the provider names each; read from the provider, never written by hand) | after registration and whenever the list read changes |
 | `done` | `id`, `input_tokens`, `output_tokens`, `total_tokens` (integer counts when reported by the provider) | last |
 | `error` | `id`, `message` | |
 
@@ -115,7 +116,9 @@ empty string when a provider does not expose one. Mux preserves these values wit
 aggregating them. It clears a shim's cached capacity when that shim disconnects or stops. A shim
 sends no periodic keep-alive for capacity.
 
-mux → shim: `run` with `id`, `messages` (chat form, system first), `tools`, `effort`, `images`.
+mux → shim: `run` with `id`, `messages` (chat form, system first), `tools`, `effort`, `images`, `model`
+(the one of the shim's `models` a request for `SERVICE/MODEL` named; null when the request named
+the service alone).
 
 ### embed: an embedding server
 
@@ -142,8 +145,8 @@ mux → embed: `run` with `id`, `texts`.
 | `POST /v1/responses` | the OpenAI Responses API, streamed (SSE); engine and shim services |
 | `POST /v1/chat/completions`, `GET /props` | the llama.cpp-compatible face for web chat, below |
 | `POST /v1/embeddings` | the OpenAI embeddings API; embed services |
-| `GET /v1/models` | `{"data":[{"id","kind","ctx","efforts","vision","state"}]}` |
-| `GET /v1/services` | every service: `name, kind, state, device, pid, ctx, slots, since, last, progress, log, reason` |
+| `GET /v1/models` | `{"data":[{"id","kind","ctx","efforts","models","vision","state"}]}` |
+| `GET /v1/services` | every service: `name, kind, state, device, pid, ctx, slots, since, last, progress, log, reason, models` |
 | `GET /v1/capacity` | each shim's `source, state, remaining, reset_time, tokens_served_today`; absent provider facts are empty strings |
 | `POST /v1/services/NAME/up`, `.../down` | change the desired state (rewrites mux.yaml) |
 | `GET /v1/events?since=TS` | SSE: the recorded events since `TS`, then live ones (state changes, runs, stats, routes, job progress) |
