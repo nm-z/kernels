@@ -370,6 +370,7 @@ type chatChunk struct {
 	Object  string        `json:"object"`
 	Created int64         `json:"created"`
 	Model   string        `json:"model"`
+	Options string        `json:"options,omitempty"` // the options the serving model answers with (not an OpenAI field)
 	Choices []chatChoice  `json:"choices"`
 	Usage   *chatUsageOut `json:"usage,omitempty"`
 	Timings *chatTimings  `json:"timings,omitempty"`
@@ -443,6 +444,7 @@ func (e *engineStatsEv) live() *chatTimings {
 type chatSink struct {
 	*sseSink
 	id, model string
+	options   string // the options the serving model answers with, when its shim named them
 	created   int64
 	calls     int            // tool calls sent so far
 	stats     *engineStatsEv // the latest engine stats event: the last one before the end has the final numbers
@@ -454,7 +456,7 @@ func newChatSink(w http.ResponseWriter, model string) *chatSink {
 }
 
 func (c *chatSink) chunk(delta map[string]any, finish *string, usage *chatUsageOut, timings *chatTimings) {
-	b, err := json.Marshal(chatChunk{ID: c.id, Object: "chat.completion.chunk", Created: c.created, Model: c.model,
+	b, err := json.Marshal(chatChunk{ID: c.id, Object: "chat.completion.chunk", Created: c.created, Model: c.model, Options: c.options,
 		Choices: []chatChoice{{Index: 0, Delta: delta, FinishReason: finish}}, Usage: usage, Timings: timings})
 	if err == nil {
 		c.put("data: %s\n\n", b)
@@ -507,6 +509,9 @@ func (c *chatSink) write(typ string, data []byte) {
 		json.Unmarshal(data, &ev)
 		if m := ev.Response.Headers["openai-model"]; m != "" {
 			c.model = m
+		}
+		if o := ev.Response.Headers["x-mux-options"]; o != "" {
+			c.options = o
 		}
 	case "response.reasoning_text.delta":
 		json.Unmarshal(data, &ev)

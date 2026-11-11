@@ -101,8 +101,8 @@ Refused: unknown service, wrong peer, `positions < ctx`.
 | shim → mux | fields | when |
 |---|---|---|
 | `register` | `slots`, `vision`, `auto` (true for a route that picks among providers), optional provider `remaining`, `reset_time`, `tokens_served_today` | first |
-| `route` | `id`, `trying` (the route(s) being attempted now, e.g. `["vertex/gemini-3-pro"]`), `failed` (ones given up on), optional `why` (one short reason a failed route, in order) | an auto shim: every time its choice changes |
-| `model` | `id`, `model` (the model answering this run as its provider names it; an auto shim sends `ROUTE/MODEL`) | when the shim knows it, and again if it changes |
+| `route` | `id`, `trying` (the route(s) being attempted now, e.g. `["vertex/gemini-3-pro"]`), `failed` (ones given up on), optional `why` (one short reason a failed route, in order), optional `of` (the most attempts the shim makes for one request) | an auto shim: every time its choice changes |
+| `model` | `id`, `model` (the model answering this run as its provider names it; an auto shim sends `ROUTE/MODEL`), optional `options` (what that model answers with: its reasoning level, its mode) | when the shim knows it, and again if it changes |
 | `ttft` | `id`, `ms` | when the first token of output arrives |
 | `delta` | `id`, `channel` (`reasoning` or `content`), `text` | as it streams |
 | `tool_call` | `id`, `call_id`, `name`, `arguments` (JSON text) | each call |
@@ -168,7 +168,7 @@ data: {"type":"response.ai_mux.stats","phase":"prefill"|"decode","prefill":{"don
 ```
 
 for engines, at least every 500 ms while running (live values, idle % of the run so far) and once with the final measured values; for
-shims, `{"type":"response.ai_mux.stats","phase":"route"|"output","route":{"trying":[…],"failed":[…]},"ttft_ms":N,"ctx":N}`
+shims, `{"type":"response.ai_mux.stats","phase":"route"|"output","route":{"trying":[…],"failed":[…],"of":N},"ttft_ms":N,"ctx":N}`
 on every route change and once at the first token.
 
 `response.ai_mux.stats` is the one wire name that keeps its old spelling (`ai_mux`), for client compatibility (Codex reads it); mux's

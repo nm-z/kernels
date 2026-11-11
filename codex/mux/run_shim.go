@@ -15,12 +15,13 @@ type shimStatsEvent struct {
 	Route *struct {
 		Trying []string `json:"trying"`
 		Failed []string `json:"failed"`
+		Of     int      `json:"of,omitempty"` // the most attempts the shim makes for one request
 	} `json:"route,omitempty"`
 	TTFTMS *float64 `json:"ttft_ms,omitempty"`
 	Ctx    int      `json:"ctx"`
 }
 
-func (b *respBuilder) shimStats(phase string, auto bool, trying, failed []string, ttft *float64, ctx int) {
+func (b *respBuilder) shimStats(phase string, auto bool, trying, failed []string, of int, ttft *float64, ctx int) {
 	if b.sink == nil {
 		return
 	}
@@ -29,7 +30,8 @@ func (b *respBuilder) shimStats(phase string, auto bool, trying, failed []string
 		e.Route = &struct {
 			Trying []string `json:"trying"`
 			Failed []string `json:"failed"`
-		}{Trying: nonNil(trying), Failed: nonNil(failed)}
+			Of     int      `json:"of,omitempty"`
+		}{Trying: nonNil(trying), Failed: nonNil(failed), Of: of}
 	}
 	if data, err := jsonMarshal(e); err == nil {
 		b.sink.write(e.Type, data)
@@ -171,6 +173,8 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 
 	var trying, failed []string
 	model := ""     // the model the shim says answers this run
+	options := ""   // the options that model answers with, as the shim names them
+	of := 0         // the most attempts an auto shim makes for one request
 	answering := "" // what the client is told answers: an auto shim's route, or that model
 	var shown []string
 	sawRoute, sawTTFT := false, false
@@ -238,6 +242,9 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 				case "route":
 					sawRoute = true
 					trying, failed = m.Trying, m.Failed
+					if m.Of > 0 {
+						of = m.Of
+					}
 					// what a client is shown of a route given up on: its name and, when the shim says, why
 					shown = make([]string, len(failed))
 					for i, name := range failed {
@@ -247,19 +254,20 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 						}
 					}
 					s.hub.Publish("run.route", map[string]any{"service": svc.name, "run": string(id), "trying": nonNil(trying), "failed": nonNil(failed)})
-					rb.shimStats("route", conn.auto, trying, shown, nil, svc.cfg.Ctx)
+					rb.shimStats("route", conn.auto, trying, shown, of, nil, svc.cfg.Ctx)
 					if conn.auto && len(trying) > 0 {
 						answering = trying[len(trying)-1]
 						if sawTTFT {
-							rb.servedBy(answering)
+							rb.servedBy(answering, options)
 						}
 					}
 				case "model":
-					if m.Model != "" && m.Model != model {
+					if m.Model != "" && (m.Model != model || m.Options != options) {
 						model = m.Model
+						options = m.Options
 						answering = model
 						if sawTTFT {
-							rb.servedBy(answering)
+							rb.servedBy(answering, options)
 						}
 					}
 				case "ttft":
@@ -274,10 +282,10 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 					ttft = &v
 					res.ttftMS = ttft
 					s.hub.Publish("run.ttft", map[string]any{"service": svc.name, "run": string(id), "ms": v})
-					rb.shimStats("output", conn.auto, trying, shown, ttft, svc.cfg.Ctx)
+					rb.shimStats("output", conn.auto, trying, shown, of, ttft, svc.cfg.Ctx)
 					// a client is told who answers once output begins: a route that was tried and failed is never named
 					if answering != "" {
-						rb.servedBy(answering)
+						rb.servedBy(answering, options)
 					}
 				case "delta":
 					if why := checkOutput("delta"); why != "" {
