@@ -2881,8 +2881,9 @@ function train(args)
     lr = parse(Float64, arg("--lr", "0.002")); lrv = parse(Float64, arg("--lrv", "0.0002")); lre = parse(Float64, arg("--lre", "0.002")); beta = parse(Float64, arg("--beta", "0.95"))
     acc = parse(Int, arg("--acc", "8")); nwin = parse(Int, arg("--windows", "0")); seed = parse(Int, arg("--seed", "1"))
     evals = parse(Int, arg("--evals", "8")); warm = parse(Float64, arg("--warm", "0.02")); AUX[] = parse(Float64, arg("--aux", "0"))
+    ckmin = parse(Float64, arg("--ckpt", "30"))            # minutes between checkpoints: what a crash between two held-out readings can cost
     out == "" || mkpath(out)
-    (dir == "" || data == "") && error("usage: julia --project=env/amd -t 12 lfm3-1.7b.jl --train DATADIR --model DIR --out OUTDIR [--epochs E --lr L --lrv L --lre L --beta B --acc A --evals N --warm F --aux W --windows W --check PREFIX N --resume]")
+    (dir == "" || data == "") && error("usage: julia --project=env/amd -t 12 lfm3-1.7b.jl --train DATADIR --model DIR --out OUTDIR [--epochs E --lr L --lrv L --lre L --beta B --acc A --evals N --ckpt MINUTES --warm F --aux W --windows W --check PREFIX N --resume]")
     BLAS.set_num_threads(Sys.CPU_THREADS)
     AMDGPU.stream!(AMDGPU.HIPStream(:low))                 # (the card also runs the desktop: its gfx ring goes first)
     fence_start()
@@ -2909,7 +2910,7 @@ function train(args)
     else
         best = heldout(S, B, Hd, D, We)
     end
-    rng = Random.MersenneTwister(seed)
+    rng = Random.MersenneTwister(seed); tck = time()
     for _ in 1:ep0-1; Random.shuffle(rng, 1:length(Wt)); end
     for ep in ep0:epochs
         order = Random.shuffle(rng, 1:length(Wt)); t0 = time(); tot = 0.0; n = 0
@@ -2922,7 +2923,10 @@ function train(args)
             "--prof" in args && (println(join(("$k $(v[1]) $(round(v[2]; digits = 2)) s" for (k, v) in sort(collect(TPROF); by = x -> -x[2][2])), ", ")); empty!(TPROF); flush(stdout))
             (i % acc == 0 || i == length(order)) || continue
             k = (ep - 1) * spe + cld(i, acc); r = rate(k); step!(S, B, r * lr, r * lrv, r * lre)
-            (cld(i, acc) % every == 0 || i == length(order)) || continue
+            if !(cld(i, acc) % every == 0 || i == length(order))
+                out != "" && time() - tck > 60ckmin && (ckpt_write(S, ck, ep, i, best); tck = time())
+                continue
+            end
             @printf("epoch %d step %d/%d (rates x %.3f): train loss %.4f over %d message tokens (%.0f min)\n", ep, k, nstep, r, tot / n, n, (time() - t0) / 60)
             h = heldout(S, B, Hd, D, We)
             if h < best
@@ -2930,7 +2934,7 @@ function train(args)
             else
                 println("not the best ($best): no export")
             end
-            out == "" || ckpt_write(S, ck, ep, i, best); flush(stdout)
+            out == "" || (ckpt_write(S, ck, ep, i, best); tck = time()); flush(stdout)
         end
     end
 end
