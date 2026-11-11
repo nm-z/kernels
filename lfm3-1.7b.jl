@@ -2380,6 +2380,8 @@ function pinned(nbytes)                                    # host memory the dev
     rc = Ref{Ptr{Cvoid}}(C_NULL); H = AMDGPU.HIP
     H.hipHostMalloc(rc, nbytes, H.hipHostMallocMapped | H.hipHostMallocNonCoherent)
     d = Ref{Ptr{Cvoid}}(C_NULL); H.hipHostGetDevicePointer(d, rc[], Cuint(0))
+    # locked: the driver only mirrors these pages, and each one the host swaps out stops every queue of the process until all are back
+    ccall(:mlock, Cint, (Ptr{Cvoid}, Csize_t), rc[], nbytes) == 0 || println("pinned: mlock of $(nbytes >> 20) MB failed (errno $(Libc.errno())): the host may swap it")
     Ptr{Float32}(rc[]), Ptr{Float32}(d[])
 end
 mnames(l) = isattn(l) ? ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.gate_proj", "self_attn.o_proj", "feed_forward.w1", "feed_forward.w3", "feed_forward.w2"] :
