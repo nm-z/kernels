@@ -1,0 +1,15 @@
+{
+  "FLASH_MAXT": "8192",
+  "FLASH_ENGINE_MAXT": "8192",
+  "FLASH_TRACE": "0",
+  "FLASH_NBLK": "512",
+  "FLASH_MAXIMG": "1",
+  "FLASH_PLE_DISK": "1",
+  "FLASH_PLE_OFF": "192",
+  "FLASH_CUBIN": "/home/nate/claude/flash-sass-prs/issue-10/kern/die.cubin",
+  "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+  "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,7",
+  "SPLIT_SHARES": "112,97,81,116,97,97",
+  "ATTN_DIE": "1",
+  "ATTN_MAP": "1,1,1,1,4,4,4,4,5,5,5,5"
+}

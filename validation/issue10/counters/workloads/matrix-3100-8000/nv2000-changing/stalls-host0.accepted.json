@@ -1,0 +1,132 @@
+{
+   "metrics" : {
+      "stall_memory_dependency" : {
+         "avg" : {
+            "raw" : "84.410774%",
+            "unit" : "percent",
+            "value" : 84.410774
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "85.616551%",
+            "unit" : "percent",
+            "value" : 85.616551
+         },
+         "min" : {
+            "raw" : "83.301214%",
+            "unit" : "percent",
+            "value" : 83.301214
+         }
+      },
+      "stall_memory_throttle" : {
+         "avg" : {
+            "raw" : "0.000675%",
+            "unit" : "percent",
+            "value" : 0.000675
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "0.000714%",
+            "unit" : "percent",
+            "value" : 0.000714
+         },
+         "min" : {
+            "raw" : "0.000647%",
+            "unit" : "percent",
+            "value" : 0.000647
+         }
+      },
+      "stall_sync" : {
+         "avg" : {
+            "raw" : "3.554965%",
+            "unit" : "percent",
+            "value" : 3.554965
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "4.007376%",
+            "unit" : "percent",
+            "value" : 4.007376
+         },
+         "min" : {
+            "raw" : "2.982400%",
+            "unit" : "percent",
+            "value" : 2.9824
+         }
+      }
+   },
+   "raw_profiler" : {
+      "bytes" : 999,
+      "path" : "/tmp/flash-issue10-after7-9VF51acq/nv2000-changing/stalls-host0.nvprof.csv",
+      "sha256" : "e572cc4191631a9d829ce2273f1066116137d95aedaa5ca62bee1e0048d53ce2"
+   },
+   "raw_workload" : {
+      "bytes" : 276,
+      "path" : "/tmp/flash-issue10-after7-9VF51acq/nv2000-changing/stalls-host0.workload.csv",
+      "sha256" : "d1b7853a9ada03976f2b885b6b292755acd308231204dacd4913c127b1e643c9"
+   },
+   "verified_rows" : [
+      {
+         "iteration" : 0,
+         "selection" : "24c93a354df02efb",
+         "verified_output" : "4c037fdefc723a2b"
+      },
+      {
+         "iteration" : 1,
+         "selection" : "e91fcea804608fc1",
+         "verified_output" : "f690a1c30ebc8342"
+      },
+      {
+         "iteration" : 2,
+         "selection" : "5f524474ea96d5d5",
+         "verified_output" : "47b6bd13b5b8a1df"
+      },
+      {
+         "iteration" : 3,
+         "selection" : "0661eb82ec4cc4b4",
+         "verified_output" : "835a494687ede12f"
+      }
+   ],
+   "workload" : {
+      "budget" : 512,
+      "cache_fnv1a64" : "ebe267f1dc2a3b14",
+      "destination_unique_address_bytes" : 8388608,
+      "gpu_us_max" : 107285.697937012,
+      "gpu_us_mean" : 98962.873458862,
+      "gpu_us_min" : 93310.592651367,
+      "gpu_us_p50" : 95096.641540527,
+      "gpu_us_p90" : 107285.697937012,
+      "gpu_us_p99" : 107285.697937012,
+      "gpu_us_stddev" : 5422.063842598,
+      "hardware_counter_gate" : "not_run",
+      "host_kv" : 0,
+      "iterations" : 4,
+      "logical_keys" : 2048,
+      "measured_hardware_transaction_bytes" : null,
+      "nv" : 2000,
+      "pattern" : "changing",
+      "physical_gathered_slots" : 2048,
+      "physical_k_head_rows" : 4096,
+      "physical_v_head_rows" : 4096,
+      "position_policy" : "fixed visible length; layout varies per launch",
+      "preflight_verified_all" : true,
+      "quantile_method" : "nearest_rank",
+      "seed" : 4242,
+      "selection_changes" : 3,
+      "selection_upload_timed" : false,
+      "selections_fnv1a64" : "bb6dac4bfd7ca46e",
+      "source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+      "source_unique_address_bytes" : 2228224,
+      "tail" : 0,
+      "timing_scope" : "CUDA event interval including persistent kernel framework",
+      "verified_output_signature_changes" : 3,
+      "visible" : 8000,
+      "warmup_launches" : 10
+   }
+}

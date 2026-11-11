@@ -1,0 +1,63 @@
+kern/decode_counter_capture_test.pl .. 
+ok 1 - quoted CSV and trailing field
+ok 2 - reject malformed quote
+ok 3 - thirteen requested hardware metrics
+ok 4 - complete workload metric fixture parsed
+ok 5 - nvprof average not divided by invocation count again
+ok 6 - stall percentage retains its unit
+ok 7 - occupancy is a ratio
+ok 8 - enumeration is not a workload measurement
+ok 9 - permission failure is not empty successful traffic
+ok 10 - reject incomplete kernel profiling warning
+ok 11 - missing metric
+ok 12 - duplicate metric
+ok 13 - wrong invocations
+ok 14 - wrong kernel
+ok 15 - mixed devices
+ok 16 - nonfinite value
+ok 17 - negative value
+ok 18 - unsupported value
+ok 19 - bad average
+ok 20 - wrong header
+ok 21 - wrong row width
+ok 22 - invalid metric sysmem_read_bytes=NaN
+ok 23 - invalid metric dram_read_bytes=Inf
+ok 24 - invalid metric dram_read_bytes=1e999
+ok 25 - invalid metric stall_sync=100.01%
+ok 26 - invalid metric achieved_occupancy=1.01
+ok 27 - invalid metric sysmem_read_bytes=2%
+ok 28 - invalid metric stall_sync=2
+ok 29 - complete workload fixture
+ok 30 - string success
+ok 31 - unverified output
+ok 32 - wrong source
+ok 33 - nonnumeric placement
+ok 34 - wrong placement
+ok 35 - wrong budget
+ok 36 - wrong physical slots
+ok 37 - wrong logical keys
+ok 38 - wrong warmups
+ok 39 - wrong visible length
+ok 40 - unchanging selections
+ok 41 - unchanging output
+ok 42 - fractional changes
+ok 43 - missing cache hash
+ok 44 - placement difference permitted in paired workload
+ok 45 - mismatched selection identity
+ok 46 - complete native output rows
+ok 47 - truncated workload CSV
+ok 48 - duplicate workload iteration
+ok 49 - nonfinite workload timing
+ok 50 - nonpositive workload timing
+ok 51 - acquire free lock
+ok 52 - busy lock blocks before GPU operations
+ok 53 - blocked attempt records lock status
+ok 54 - same inode can be acquired after release
+ok 55 - subprocess exit and both streams preserved
+ok 56 - subprocess timeout is a failure
+ok 57 - current parser validates all eight archived real profiler arms
+1..57
+ok
+All tests successful.
+Files=1, Tests=57,  1 wallclock secs ( 0.01 usr  0.00 sys +  0.08 cusr  0.02 csys =  0.11 CPU)
+Result: PASS

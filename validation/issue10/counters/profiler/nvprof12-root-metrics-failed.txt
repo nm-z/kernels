@@ -1,0 +1,4 @@
+======== Error: CUDA profiling error.
+Available Metrics:
+                            Name   Description
+Device 6 (Tesla M60):

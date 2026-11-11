@@ -1,0 +1,411 @@
+diff --git a/kern/decode_counter_capture.pl b/kern/decode_counter_capture.pl
+index d76b70e..7804798 100644
+--- a/kern/decode_counter_capture.pl
++++ b/kern/decode_counter_capture.pl
+@@ -220,6 +220,20 @@ sub acquire_lock {
+     }
+     return $lock;
+ }
++sub inherited_lock {
++    my ($path, $fd) = @_;
++    die "invalid inherited lock descriptor\n" unless defined($fd) && $fd =~ /\A[0-9]+\z/ && $fd >= 3;
++    # Duplicate the inherited open-file description, not the pathname. An
++    # outer blocking flock can queue a finite campaign once and retain its
++    # lease across individual captures without self-deadlocking.
++    open my $lock, '+<&', $fd or die "open inherited lock descriptor: $!\n";
++    my @held = stat($lock);
++    my @named = lstat($path);
++    die "inherited lock does not identify the shared lock file\n" unless @held && @named &&
++        -f $lock && !-l $path && $held[0] == $named[0] && $held[1] == $named[1];
++    die "BLOCKED: inherited descriptor cannot acquire the shared GPU lock\n" unless flock($lock, LOCK_EX | LOCK_NB);
++    return $lock;
++}
+ sub manifest {
+     my ($path) = @_;
+     my $m = $JSON->decode(read_text($path));
+@@ -254,10 +268,10 @@ sub manifest {
+ }
+ sub main {
+     my @args = @_;
+-    my ($input, $out, $sudo, $wait, $poll, $timeout) = (undef, undef, 0, 120, 30, 180);
++    my ($input, $out, $sudo, $wait, $poll, $timeout, $lock_fd) = (undef, undef, 0, 120, 30, 180, undef);
+     GetOptionsFromArray(\@args, 'manifest=s' => \$input, 'out=s' => \$out,
+         'sudo!' => \$sudo, 'wait-seconds=i' => \$wait, 'poll-seconds=i' => \$poll,
+-        'timeout-seconds=i' => \$timeout) or die "invalid arguments\n";
++        'timeout-seconds=i' => \$timeout, 'lock-fd=i' => \$lock_fd) or die "invalid arguments\n";
+     die "--manifest and new --out required\n" unless defined($input) && defined($out) && !@args;
+     die "invalid time limits\n" unless 0 <= $wait && $wait <= 2700 && 1 <= $poll && $poll <= 60 && 1 <= $timeout && $timeout <= 900;
+     die "output already exists\n" if -e $out || -l $out;
+@@ -279,11 +293,12 @@ sub main {
+         $report->{input_identities} = [map {identity($_)} @files];
+         save("$out/status.json", $report);
+         my $checks = 0;
+-        my $lock = acquire_lock($LOCK, $wait, $poll, sub {
++        my $lock = defined($lock_fd) ? inherited_lock($LOCK, $lock_fd) : acquire_lock($LOCK, $wait, $poll, sub {
+             my $r = run_command(['lslocks', '-o', 'PID,COMMAND,TYPE,MODE,PATH'], 15);
+             save(sprintf('%s/lock-check-%03d.json', $out, ++$checks), $r);
+             print "BUSY: shared GPU lock check $checks\n";
+         });
++        $report->{lock_mode} = defined($lock_fd) ? 'verified_inherited_descriptor' : 'owned_lock';
+         print "ACQUIRED: shared GPU lock; read-only device preflight\n";
+         successful(['hostname'], 10, "$out/hostname.json");
+         successful(['ps', '-eo', 'pid,ppid,etime,comm'], 15, "$out/processes.json");
+diff --git a/kern/decode_counter_capture_test.pl b/kern/decode_counter_capture_test.pl
+index 37b8d41..6f878b9 100644
+--- a/kern/decode_counter_capture_test.pl
++++ b/kern/decode_counter_capture_test.pl
+@@ -123,6 +123,30 @@ is($notes,1,'blocked attempt records lock status');
+ close $lock;
+ $lock=DecodeCounterCapture::acquire_lock("$tmp/lock",0,1,undef);
+ ok($lock,'same inode can be acquired after release');
++my $inherited=DecodeCounterCapture::inherited_lock("$tmp/lock",fileno($lock));
++ok($inherited,'duplicate inherited queue lease without reopening its path');
++close $inherited;
++rejects('closing borrowed descriptor preserves outer lease',sub {
++    DecodeCounterCapture::acquire_lock("$tmp/lock",0,1,undef);
++},qr/^BLOCKED:/);
++open my $other,'+>',"$tmp/unrelated" or die $!;
++rejects('reject unrelated inherited descriptor',sub {
++    DecodeCounterCapture::inherited_lock("$tmp/lock",fileno($other));
++},qr/does not identify/);
++for my $fd (0,1,2,-1,'not-a-descriptor') {
++    rejects("reject invalid inherited descriptor $fd",sub {
++        DecodeCounterCapture::inherited_lock("$tmp/lock",$fd);
++    },qr/invalid inherited/);
++}
++symlink "$tmp/lock","$tmp/link" or die $!;
++rejects('inherited lease rejects a symlink pathname',sub {
++    DecodeCounterCapture::inherited_lock("$tmp/link",fileno($lock));
++},qr/does not identify/);
++rejects('separate open description cannot borrow another lock',sub {
++    open my $separate,'+<',"$tmp/lock" or die $!;
++    DecodeCounterCapture::inherited_lock("$tmp/lock",fileno($separate));
++},qr/^BLOCKED:/);
++close $other;
+ close $lock;
+ my $r=DecodeCounterCapture::run_command([$^X,'-e','print "out"; print STDERR "err"; exit 7'],5);
+ is_deeply([@$r{qw(exit stdout stderr)}],[7,'out','err'],'subprocess exit and both streams preserved');
+diff --git a/kern/decode_counter_matrix.pl b/kern/decode_counter_matrix.pl
+new file mode 100644
+index 0000000..0036c88
+--- /dev/null
++++ b/kern/decode_counter_matrix.pl
+@@ -0,0 +1,183 @@
++#!/usr/bin/env perl
++package DecodeCounterMatrix;
++use strict;
++use warnings;
++use Cwd qw(abs_path);
++use File::Basename qw(basename dirname);
++use File::Path qw(make_path);
++use Getopt::Long qw(GetOptionsFromArray);
++use JSON::PP;
++require(dirname(abs_path(__FILE__)).'/decode_counter_capture.pl');
++
++# CPU replay of the finite component campaign. A PASS authenticates neither
++# arbitrary supplied manifests nor the full-model acceptance protocol.
++our $JSON = JSON::PP->new->canonical->pretty;
++our @NV = (775, 2000);
++our @PATTERNS = qw(clustered even random changing);
++sub load { return $JSON->decode(DecodeCounterCapture::read_text($_[0])); }
++sub same {
++    my ($a, $b, $label) = @_;
++    die "$label differs\n" unless $JSON->encode($a) eq $JSON->encode($b);
++}
++sub raw_identity {
++    my ($record, $path) = @_;
++    die "missing raw artifact identity\n" unless ref($record) eq 'HASH' && defined($record->{path}) &&
++        basename($record->{path}) eq basename($path) && defined($record->{bytes}) &&
++        ($record->{sha256} // '') =~ /\A[0-9a-f]{64}\z/;
++    die "linked raw artifact\n" if -l $path;
++    my $actual = DecodeCounterCapture::identity($path);
++    die "raw artifact identity mismatch: $path\n" unless $actual->{bytes} == $record->{bytes} &&
++        $actual->{sha256} eq $record->{sha256};
++    return $actual;
++}
++sub validate_command {
++    my ($command, $manifest, $group, $host, $prefix) = @_;
++    die "profiler command did not exit successfully\n" unless ref($command) eq 'HASH' &&
++        defined($command->{exit}) && !ref($command->{exit}) && "$command->{exit}" eq '0';
++    my $argv = $command->{argv};
++    die "invalid recorded command arguments\n" unless ref($argv) eq 'ARRAY' && @$argv &&
++        !(grep {!defined($_) || ref($_)} @$argv);
++    for my $setting ('CUDA_DEVICE_ORDER=PCI_BUS_ID', 'CUDA_VISIBLE_DEVICES='.$manifest->{gpu_uuid}, 'DIE_CUBIN='.$manifest->{cubin}) {
++        my ($key) = split /=/, $setting, 2;
++        my @values = grep {index($_, "$key=") == 0} @$argv;
++        die "recorded GPU environment differs\n" unless @values == 1 && $values[0] eq $setting;
++    }
++    my @start = grep {$argv->[$_] eq $manifest->{profiler}} 0 .. $#$argv;
++    die "profiler identity missing from command\n" unless @start == 1;
++    my @suffix = @$argv[$start[0] .. $#$argv];
++    my @expected = ($manifest->{profiler}, '--devices', '0', '--kernels', 'die', '--csv',
++        '--metrics', join(',', @$group), '--log-file', "$prefix.nvprof.csv", $manifest->{binary},
++        map {"$_"} @$manifest{qw(nv tail iterations pattern)}, "$host", "$prefix.workload.csv", "$manifest->{seed}");
++    same(\@suffix, \@expected, 'recorded profiler/workload arguments');
++}
++sub case_replay {
++    my ($dir, $nv, $pattern) = @_;
++    my $result = load("$dir/status.json");
++    die "case is not a completed component capture\n" unless ref($result) eq 'HASH' && ($result->{status} // '') eq 'PASS' &&
++        JSON::PP::is_bool($result->{full_issue_acceptance}) && !$result->{full_issue_acceptance};
++    die "missing acquired campaign lease\n" unless ($result->{lock_mode} // '') eq 'verified_inherited_descriptor';
++    my $m = $result->{manifest};
++    die "wrong counter case\n" unless ref($m) eq 'HASH' && ($m->{schema} // '') eq 'flash.issue10.counter-workload.v1' &&
++        ($m->{nv} // 0) == $nv && ($m->{pattern} // '') eq $pattern && ($m->{tail} // -1) == 0 &&
++        ($m->{iterations} // 0) == 4 && ($m->{seed} // -1) == 4242;
++    die "invalid capture source or GPU identity\n" unless ($m->{expected_source_revision} // '') =~ /\A[0-9a-f]{40}\z/ &&
++        ($m->{gpu_uuid} // '') =~ /\AGPU-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z/;
++    for my $key (qw(started_utc finished_utc)) {
++        die "missing capture timestamp\n" unless ($result->{$key} // '') =~ /\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\z/;
++    }
++    die "capture timestamps reversed\n" if $result->{finished_utc} lt $result->{started_utc};
++    my $manifest_record = raw_identity($result->{manifest_identity}, "$dir.manifest.json");
++    same(load("$dir.manifest.json"), $m, 'archived workload manifest');
++    my %input;
++    die "missing input identities\n" unless ref($result->{input_identities}) eq 'ARRAY' && @{$result->{input_identities}};
++    for my $id (@{$result->{input_identities}}) {
++        die "invalid input identity\n" unless ref($id) eq 'HASH' && defined($id->{path}) &&
++            ($id->{sha256} // '') =~ /\A[0-9a-f]{64}\z/ && defined($id->{bytes}) && $id->{bytes} > 0 && !$input{$id->{path}};
++        $input{$id->{path}} = {bytes=>$id->{bytes}, sha256=>$id->{sha256}};
++    }
++    for my $key (qw(binary cubin profiler)) { die "unidentified $key\n" unless $input{$m->{$key}}; }
++    my $collector = $result->{collector_identity};
++    raw_identity($collector, "$dir/../decode_counter_capture.pl");
++    for my $phase (qw(before after)) {
++        my $gpu = load("$dir/gpu-$phase.json");
++        die "missing successful GPU snapshot\n" unless ($gpu->{exit} // -1) == 0 &&
++            ($gpu->{stdout} // '') =~ /<nvidia_smi_log>/ &&
++            index($gpu->{stdout}, '<uuid>'.$m->{gpu_uuid}.'</uuid>') >= 0;
++    }
++    my $apps = load("$dir/compute-apps.json");
++    die "failed compute-process inventory\n" unless ($apps->{exit} // -1) == 0;
++    for my $line (grep {length} split /\n/, $apps->{stdout}) {
++        my $fields = DecodeCounterCapture::csv_fields($line);
++        $fields->[0] =~ s/^\s+|\s+$//g;
++        die "target GPU had an existing compute process\n" if $fields->[0] eq $m->{gpu_uuid};
++    }
++    my $expected_group_count = scalar @DecodeCounterCapture::GROUPS;
++    my %groups = map {$_->[0] => $_->[1]} @DecodeCounterCapture::GROUPS;
++    die "incomplete metric-group matrix\n" unless ref($result->{pairs}) eq 'ARRAY' && @{$result->{pairs}} == $expected_group_count;
++    my (%seen, @rows, $reference, $reference_rows, $count);
++    for my $pair (@{$result->{pairs}}) {
++        my $name = $pair->{group};
++        die "unexpected or repeated metric group\n" unless exists($groups{$name}) && !$seen{$name}++;
++        die "missing host/VRAM arms\n" unless ref($pair->{arms}) eq 'HASH' && join(',',sort keys %{$pair->{arms}}) eq '0,1';
++        my %arms;
++        for my $host (0,1) {
++            my $stem = "$dir/$name-host$host";
++            my $arm = $pair->{arms}{$host};
++            same(load("$stem.accepted.json"), $arm, 'accepted arm and campaign record');
++            raw_identity($arm->{raw_profiler}, "$stem.nvprof.csv");
++            raw_identity($arm->{raw_workload}, "$stem.workload.csv");
++            my $recorded_prefix = $arm->{raw_profiler}{path}; $recorded_prefix =~ s/\.nvprof\.csv\z//;
++            my $command = load("$stem.command.json");
++            validate_command($command,$m,$groups{$name},$host,$recorded_prefix);
++            my $workload = DecodeCounterCapture::validate_workload($JSON->decode($command->{stdout}),$m,$host);
++            same($workload,$arm->{workload},'raw native output and accepted workload');
++            DecodeCounterCapture::matched_workloads($reference,$workload) if $reference;
++            $reference //= $workload;
++            my $rows = DecodeCounterCapture::workload_rows(DecodeCounterCapture::read_text("$stem.workload.csv"),4);
++            same($rows,$arm->{verified_rows},'raw native rows and accepted rows');
++            same($rows,$reference_rows,'host/VRAM and metric-group output rows') if $reference_rows;
++            $reference_rows //= $rows;
++            my $metrics = DecodeCounterCapture::parse_metrics(DecodeCounterCapture::read_text("$stem.nvprof.csv"),$groups{$name},18);
++            same($metrics,$arm->{metrics},'raw profiler rows and accepted metrics');
++            $arms{$host} = $metrics; $count++;
++        }
++        for my $metric (@{$groups{$name}}) {
++            push @rows, {visible_positions=>4*$nv,pattern=>$pattern,metric=>$metric,unit=>$arms{0}{$metric}{avg}{unit},
++                vram=>{map {$_=>$arms{0}{$metric}{$_}{value}} qw(min max avg)},
++                host=>{map {$_=>$arms{1}{$metric}{$_}{value}} qw(min max avg)}};
++        }
++    }
++    return {case=>basename($dir),nv=>$nv,pattern=>$pattern,profiled_commands=>$count,metric_rows=>2*@rows,
++        started_utc=>$result->{started_utc},finished_utc=>$result->{finished_utc},rows=>\@rows,
++        input_identities=>\%input,collector_sha256=>$collector->{sha256},gpu_uuid=>$m->{gpu_uuid},
++        source_revision=>$m->{expected_source_revision},manifest_sha256=>$manifest_record->{sha256}};
++}
++sub replay {
++    my ($root) = @_;
++    my @wanted = sort map {my $nv=$_; map {"nv$nv-$_"} @PATTERNS} @NV;
++    opendir my $dh, $root or die "open matrix: $!\n";
++    my @dirs = sort grep {/^nv/ && -d "$root/$_"} readdir($dh);
++    closedir $dh;
++    same(\@dirs,\@wanted,'complete eight-case directory matrix');
++    die "campaign queue did not finish successfully\n" unless DecodeCounterCapture::read_text("$root/queue.exit") eq "0\n";
++    my (@cases,$reference);
++    for my $nv (@NV) {
++        for my $pattern (@PATTERNS) {
++            my $r = case_replay("$root/nv$nv-$pattern",$nv,$pattern);
++            my $common={map {$_=>$r->{$_}} qw(input_identities collector_sha256 gpu_uuid source_revision)};
++            same($common,$reference,'cross-case executable/device identity') if $reference;
++            $reference //= $common; push @cases,$r;
++        }
++    }
++    my $commands=0; my $metrics=0; $commands+=$_->{profiled_commands},$metrics+=$_->{metric_rows} for @cases;
++    die "wrong matrix coverage\n" unless $commands==64 && $metrics==208;
++    return {schema=>'flash.issue10.counter-matrix-replay.v1',status=>'PASS',scope=>'CPU replay of archived component counter matrix; no GPU execution',
++        full_issue_acceptance=>JSON::PP::false,cases=>\@cases,profiled_commands=>$commands,metric_rows=>$metrics,
++        analyzer_identities=>[map {DecodeCounterCapture::identity($_)}
++            (__FILE__,dirname(abs_path(__FILE__)).'/decode_counter_capture.pl')],
++        notes=>['Counters include preflight, repeated-row warmups, and finite die framework.',
++        'Only changing mode changes selected rows each iteration; clustered/even/random modes retain fixed rows.',
++        'No checkpoint-derived layout, full-model throughput, or historical slowdown attribution is claimed.',
++        'This replay checks consistency of supplied records; authenticity is anchored to the reviewed Git commit.']};
++}
++sub main {
++    my @args=@_; my ($root,$out);
++    GetOptionsFromArray(\@args,'archive=s'=>\$root,'out=s'=>\$out) or die "invalid options\n";
++    die "--archive and new --out required\n" unless defined($root) && defined($out) && !@args;
++    die "output already exists\n" if -e $out || -l $out;
++    my $r=replay($root);
++    make_path($out);
++    DecodeCounterCapture::save("$out/summary.json",$r);
++    my $csv="visible_positions,pattern,metric,unit,vram_min,vram_max,vram_avg,host_min,host_max,host_avg\n";
++    for my $c (@{$r->{cases}}) {
++        for my $row (@{$c->{rows}}) {
++            $csv.=join(',',@$row{qw(visible_positions pattern metric unit)},
++                @{$row->{vram}}{qw(min max avg)},@{$row->{host}}{qw(min max avg)})."\n";
++        }
++    }
++    DecodeCounterCapture::write_text("$out/metrics.csv",$csv);
++    print "PASS: 8 cases, 64 profiler commands, 208 metric rows; component scope only\n";
++    return 0;
++}
++unless(caller) {exit main(@ARGV);}
++1;
+diff --git a/kern/decode_counter_matrix_test.pl b/kern/decode_counter_matrix_test.pl
+new file mode 100644
+index 0000000..6711b29
+--- /dev/null
++++ b/kern/decode_counter_matrix_test.pl
+@@ -0,0 +1,129 @@
++#!/usr/bin/env perl
++use strict;
++use warnings;
++use FindBin qw($Bin);
++use File::Temp qw(tempdir);
++use File::Path qw(make_path remove_tree);
++use JSON::PP;
++use Storable qw(dclone);
++use Test::More;
++require "$Bin/decode_counter_matrix.pl";
++my $source="$Bin/../validation/issue10/counters/workloads/matrix-3100-8000";
++BAIL_OUT('committed component matrix is missing') unless -d $source;
++my $result=DecodeCounterMatrix::replay($source);
++is($result->{profiled_commands},64,'all 64 real profiler commands replay');
++is($result->{metric_rows},208,'all 208 real metric rows replay');
++is(scalar(@{$result->{cases}}),8,'both contexts and all four layouts present');
++ok(!$result->{full_issue_acceptance},'component PASS never claims full-model acceptance');
++my @host_reads;
++my @vram_reads;
++for my $case (@{$result->{cases}}) {
++    my ($r)=grep {$_->{metric} eq 'sysmem_read_bytes'} @{$case->{rows}};
++    push @host_reads,$r->{host}{avg}; push @vram_reads,$r->{vram}{avg};
++}
++is_deeply(\@host_reads,[(2359296)x8],'reproduces all observed host system-memory read averages');
++is_deeply(\@vram_reads,[(0)x8],'reproduces all observed VRAM system-memory read averages');
++my $tmp=tempdir(CLEANUP=>1);
++my $root="$tmp/matrix";
++system('cp','-a','--reflink=auto','--',$source,$root)==0 or BAIL_OUT('cannot copy test fixture');
++my $case='nv775-clustered';
++my $status="$case/status.json";
++sub rejects {
++    my ($name,$call,$pattern)=@_;
++    my $ok=eval {$call->();1}; my $error=$@;
++    ok(!$ok && $error=~$pattern,$name) or diag($error || 'unexpected success');
++}
++sub bad_json {
++    my ($name,$relative,$edit,$pattern)=@_;
++    my $path="$root/$relative";
++    my $original=DecodeCounterCapture::read_text($path);
++    my $data=JSON::PP->new->decode($original);
++    $edit->($data);
++    DecodeCounterCapture::save($path,$data);
++    rejects($name,sub {DecodeCounterMatrix::replay($root)},$pattern);
++    DecodeCounterCapture::write_text($path,$original);
++}
++sub bad_text {
++    my ($name,$relative,$edit,$pattern)=@_;
++    my $path="$root/$relative";
++    my $original=DecodeCounterCapture::read_text($path);
++    my $changed=$original; $edit->($changed);
++    DecodeCounterCapture::write_text($path,$changed);
++    rejects($name,sub {DecodeCounterMatrix::replay($root)},$pattern);
++    DecodeCounterCapture::write_text($path,$original);
++}
++bad_text('failed queue is not accepted','queue.exit',sub {$_[0]="73\n"},qr/queue did not finish/);
++rename "$root/nv2000-changing","$root/temporarily-missing" or die $!;
++rejects('missing case rejected',sub {DecodeCounterMatrix::replay($root)},qr/eight-case/);
++rename "$root/temporarily-missing","$root/nv2000-changing" or die $!;
++make_path("$root/nv999-extra");
++rejects('extra counter case rejected',sub {DecodeCounterMatrix::replay($root)},qr/eight-case/);
++remove_tree("$root/nv999-extra");
++for my $c (
++    ['failed capture','status','FAIL',qr/completed component/],
++    ['full issue acceptance flag','full_issue_acceptance',JSON::PP::true,qr/completed component/],
++    ['unverified queue lease','lock_mode','owned_lock',qr/campaign lease/],
++    ['bad capture timestamp','started_utc','yesterday',qr/timestamp/],
++    ['reversed capture timestamps','finished_utc','2000-01-01T00:00:00Z',qr/reversed/],
++) {
++    bad_json($c->[0],$status,sub {$_[0]{$c->[1]}=$c->[2]},$c->[3]);
++}
++for my $c (
++    ['wrong context','nv',2000],['wrong layout','pattern','even'],
++    ['wrong tail','tail',1],['wrong iterations','iterations',5],['wrong seed','seed',42]
++) {
++    bad_json($c->[0],$status,sub {$_[0]{manifest}{$c->[1]}=$c->[2]},qr/wrong counter case/);
++}
++bad_json('invalid source revision',$status,sub {$_[0]{manifest}{expected_source_revision}='unknown'},qr/source or GPU/);
++bad_json('invalid GPU UUID',$status,sub {$_[0]{manifest}{gpu_uuid}='6'},qr/source or GPU/);
++bad_json('missing metric group',$status,sub {pop @{$_[0]{pairs}}},qr/metric-group/);
++bad_json('repeated metric group',$status,sub {$_[0]{pairs}[1]=dclone($_[0]{pairs}[0])},qr/repeated metric/);
++bad_json('unknown metric group',$status,sub {$_[0]{pairs}[0]{group}='imagined'},qr/unexpected/);
++bad_json('missing host arm',$status,sub {delete $_[0]{pairs}[0]{arms}{1}},qr/missing host/);
++bad_json('unidentified executable',$status,sub {shift @{$_[0]{input_identities}}},qr/unidentified binary/);
++bad_json('invalid artifact identity',$status,sub {$_[0]{input_identities}[0]{sha256}='not-a-hash'},qr/input identity/);
++bad_json('different raw manifest',"$case.manifest.json",sub {$_[0]{seed}=0},qr/raw artifact identity/);
++bad_json('failed hardware snapshot',"$case/gpu-before.json",sub {$_[0]{exit}=1},qr/GPU snapshot/);
++bad_json('different hardware UUID',"$case/gpu-after.json",sub {$_[0]{stdout}=~s/GPU-431371bd-b482-96b2-4b70-04f83c6d075b/GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/g},qr/GPU snapshot/);
++bad_json('failed process inventory',"$case/compute-apps.json",sub {$_[0]{exit}=1},qr/process inventory/);
++bad_json('occupied target GPU',"$case/compute-apps.json",sub {$_[0]{stdout}.="GPU-431371bd-b482-96b2-4b70-04f83c6d075b, 123, other, 100\n"},qr/existing compute/);
++my $cmd="$case/traffic-host0.command.json";
++bad_json('profile command failure',$cmd,sub {$_[0]{exit}=124},qr/did not exit successfully/);
++bad_json('profile command wrong device',$cmd,sub {for(@{$_[0]{argv}}){s/^CUDA_VISIBLE_DEVICES=.*/CUDA_VISIBLE_DEVICES=other/}},qr/GPU environment/);
++bad_json('conflicting duplicate GPU environment',$cmd,sub {unshift @{$_[0]{argv}},'CUDA_VISIBLE_DEVICES=other'},qr/GPU environment/);
++bad_json('profile command wrong kernel',$cmd,sub {my $a=$_[0]{argv}; for my $i(0..$#$a-1){$a->[$i+1]='wrong' if $a->[$i] eq '--kernels'}},qr/arguments differs/);
++bad_json('profile command missing identity',$cmd,sub {for(@{$_[0]{argv}}){$_='another-profiler' if m{/bin/nvprof$}}},qr/profiler identity/);
++bad_json('raw native stdout differs',$cmd,sub {my $w=JSON::PP->new->decode($_[0]{stdout});$w->{cache_fnv1a64}='a'x16;$_[0]{stdout}=JSON::PP->new->encode($w)},qr/accepted workload differs/);
++bad_json('accepted metric record is not independent truth',"$case/traffic-host0.accepted.json",sub {$_[0]{metrics}{sysmem_read_bytes}{avg}{value}=100},qr/campaign record differs/);
++bad_text('truncated raw profiler rejected',"$case/traffic-host0.nvprof.csv",sub {chop $_[0]},qr/raw artifact identity/);
++bad_text('altered raw workload rejected',"$case/traffic-host0.workload.csv",sub {$_[0]=~s/iteration/Iteration/},qr/raw artifact identity/);
++bad_json('cross-case binary mismatch','nv2000-changing/status.json',sub {$_[0]{input_identities}[0]{sha256}='a'x64},qr/cross-case executable/);
++# A locally coordinated checksum change must still reach the raw parser.
++{
++    my $raw="$root/$case/traffic-host0.nvprof.csv";
++    my $accepted="$root/$case/traffic-host0.accepted.json";
++    my $path="$root/$status";
++    my %old=map {$_=>DecodeCounterCapture::read_text($_)} ($raw,$accepted,$path);
++    my $bad=$old{$raw}; $bad=~s/"sysmem_read_bytes"/"invented_metric"/;
++    DecodeCounterCapture::write_text($raw,$bad);
++    my $id=DecodeCounterCapture::identity($raw);
++    my $a=JSON::PP->new->decode($old{$accepted});
++    my $s=JSON::PP->new->decode($old{$path});
++    for my $record ($a->{raw_profiler},$s->{pairs}[0]{arms}{0}{raw_profiler}) {
++        $record->{sha256}=$id->{sha256};$record->{bytes}=$id->{bytes};
++    }
++    DecodeCounterCapture::save($accepted,$a);DecodeCounterCapture::save($path,$s);
++    rejects('coordinated raw-hash mutation still fails metric schema',sub {DecodeCounterMatrix::replay($root)},qr/unexpected\/duplicate metric/);
++    DecodeCounterCapture::write_text($_,$old{$_}) for keys %old;
++}
++my $out="$tmp/replay";
++is(DecodeCounterMatrix::main('--archive',$root,'--out',$out),0,'CLI regenerates successful summary');
++my @csv=split /\n/,DecodeCounterCapture::read_text("$out/metrics.csv");
++is(scalar(@csv),105,'wide CSV includes all 104 matched metric rows and header');
++rejects('never overwrite prior replay output',sub {DecodeCounterMatrix::main('--archive',$root,'--out',$out)},qr/output already exists/);
++my $bad_exit=DecodeCounterCapture::read_text("$root/queue.exit");
++DecodeCounterCapture::write_text("$root/queue.exit","73\n");
++rejects('bad campaign publishes no PASS output',sub {DecodeCounterMatrix::main('--archive',$root,'--out',"$tmp/rejected")},qr/queue did not finish/);
++ok(!-e "$tmp/rejected",'failed replay leaves no success directory');
++DecodeCounterCapture::write_text("$root/queue.exit",$bad_exit);
++done_testing;

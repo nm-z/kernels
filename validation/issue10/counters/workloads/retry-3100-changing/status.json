@@ -1,0 +1,85 @@
+{
+   "collector_identity" : {
+      "bytes" : 19436,
+      "path" : "/tmp/flash-issue10-counters-E04IkgnX/decode_counter_capture-current.pl",
+      "sha256" : "ee382a4d4c9f504df201b081225d6128128ab21abedbc4f68ab1ea81ac1258d5"
+   },
+   "error" : "BLOCKED: shared GPU lock remained held for 90 seconds\n",
+   "finished_utc" : "2026-10-18T05:51:03Z",
+   "full_issue_acceptance" : false,
+   "input_identities" : [
+      {
+         "bytes" : 104720,
+         "path" : "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench",
+         "sha256" : "126ba2ed56f7623a0ee1eeb5f658d719e057ef3c3f54eb1d5d2746f8776523b8"
+      },
+      {
+         "bytes" : 444968,
+         "path" : "/tmp/flash-resolve-issue16-20261017/kern/die.cubin",
+         "sha256" : "0fa2a17fa41c07aac507f9bc218a777601719a8e2b6eb8b40ec93867d4768027"
+      },
+      {
+         "bytes" : 5664800,
+         "path" : "/home/nate/claude/pr38-profiler/usr/local/cuda-11.4/bin/nvprof",
+         "sha256" : "c3e58ebca670c1511c55e1d1420f8fea67d25fba93a4e0d178bc562473ae819d"
+      },
+      {
+         "bytes" : 10255,
+         "path" : "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench.c",
+         "sha256" : "65f389ca8181a72998127e4124d1214afe9dce5871f79e81f26cb1d580a7c377"
+      },
+      {
+         "bytes" : 29972,
+         "path" : "/tmp/flash-resolve-issue16-20261017/kern/qsa_test.c",
+         "sha256" : "744d418869983c77f4e822b500e09852f60fbf21f9eda756656def53ac463091"
+      },
+      {
+         "bytes" : 5032,
+         "path" : "/tmp/flash-resolve-issue16-20261017/ref/qsa.c",
+         "sha256" : "68a83b9abe0855af32485414af825baa99deba72c7b9746c618125f5b68f3f78"
+      },
+      {
+         "bytes" : 5010,
+         "path" : "/tmp/flash-resolve-issue16-20261017/ref/attn.c",
+         "sha256" : "b2827140a4be2cc38280876b5f505db764ad15b6791144143bb26c309f3c42ef"
+      },
+      {
+         "bytes" : 1641,
+         "path" : "/tmp/flash-resolve-issue16-20261017/ref/fmath.c",
+         "sha256" : "69bbf4dbb4201dd24056f29183d289910ac7067722c3214a79b3de3ffdf8f462"
+      }
+   ],
+   "kernel_scope" : "All preflight, ten warmup, and measured native benchmark die launches; averages are already per invocation",
+   "manifest" : {
+      "binary" : "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench",
+      "cubin" : "/tmp/flash-resolve-issue16-20261017/kern/die.cubin",
+      "expected_source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+      "gpu_uuid" : "GPU-431371bd-b482-96b2-4b70-04f83c6d075b",
+      "iterations" : 4,
+      "nv" : 775,
+      "pattern" : "changing",
+      "profiler" : "/home/nate/claude/pr38-profiler/usr/local/cuda-11.4/bin/nvprof",
+      "schema" : "flash.issue10.counter-workload.v1",
+      "seed" : 4242,
+      "source_files" : [
+         "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench.c",
+         "/tmp/flash-resolve-issue16-20261017/kern/qsa_test.c",
+         "/tmp/flash-resolve-issue16-20261017/ref/qsa.c",
+         "/tmp/flash-resolve-issue16-20261017/ref/attn.c",
+         "/tmp/flash-resolve-issue16-20261017/ref/fmath.c"
+      ],
+      "tail" : 0
+   },
+   "manifest_identity" : {
+      "bytes" : 800,
+      "path" : "/tmp/flash-issue10-counters-E04IkgnX/matrix/nv775-changing.manifest.json",
+      "sha256" : "1499866a47856bc332aa37e6d7475c6b021aaaf4d2d05a54e97d3a68f2e2bef2"
+   },
+   "pairs" : [],
+   "schema" : "flash.issue10.counter-capture.v1",
+   "scope" : "Single-die native gather counter workload, not full-model timing",
+   "source_policy" : "Embedded source revision and current source hashes are recorded, not a build/conversion attestation",
+   "started_utc" : "2026-10-18T05:49:33Z",
+   "status" : "BLOCKED",
+   "timing_policy" : "Discard profiled elapsed rates from authoritative throughput; gather includes mapped transfer and dequantization"
+}

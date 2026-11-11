@@ -1,0 +1,50 @@
+{
+  "host": {
+    "client_delta_us_per_token": 339.5268906250024,
+    "die0_delta_us_per_token": 340.1359999999986,
+    "distinct_attention_work_delta_us": {
+      "attnmerge": 2.176000000000002,
+      "attnpartn": 14.240000000000009,
+      "attnqkq": 1.6079999999999899,
+      "idxqk": 2.0640000000000214,
+      "idxscore": 5.848000000000013,
+      "idxsel": 17.41599999999994,
+      "kvgather": -2.5760000000009313
+    },
+    "pair": 2,
+    "timeline_delta_us_per_token": {
+      "barrier_send": -41.168000000000575,
+      "between_phase": -1.8559999999999945,
+      "between_token": 0.0,
+      "body_excluding_ple_wait": 2.6239999999997963,
+      "dispatch": 0.8719999999999573,
+      "exchange_wait": 379.97599999999875,
+      "ple_wait": -0.28800000000000003,
+      "publication_footer": -0.02400000000000002
+    }
+  },
+  "vram": {
+    "client_delta_us_per_token": 413.8606640625042,
+    "die0_delta_us_per_token": 413.20800000000236,
+    "distinct_attention_work_delta_us": {
+      "attnmerge": 1.8959999999999866,
+      "attnpartn": 17.712000000000216,
+      "attnqkq": 2.3359999999999985,
+      "idxqk": 2.4240000000000066,
+      "idxscore": 5.768000000000001,
+      "idxsel": 19.879999999999995,
+      "kvgather": 24.87999999999988
+    },
+    "pair": 2,
+    "timeline_delta_us_per_token": {
+      "barrier_send": -36.960000000000036,
+      "between_phase": -1.127999999999929,
+      "between_token": 0.09599999999999997,
+      "body_excluding_ple_wait": -8.639999999999418,
+      "dispatch": -1.2799999999999727,
+      "exchange_wait": 461.22400000000016,
+      "ple_wait": -0.06400000000000006,
+      "publication_footer": -0.040000000000000036
+    }
+  }
+}

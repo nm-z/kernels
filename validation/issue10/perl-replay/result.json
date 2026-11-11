@@ -1,0 +1,25 @@
+{
+  "status": "PASS",
+  "scope": "Reanalysis of existing 60 traced and 20 untraced GPU captures; no new inference run",
+  "driver_sha256": "c966f7403c00bae0a2e7dc49c2250692b457fd771c9db15f9dba32adfddb4fd0",
+  "command": [
+    "perl",
+    "/home/nate/claude/flash-sass-prs/decode_forensics-review.pl",
+    "--traced",
+    "/home/nate/claude/flash-sass-prs/paired-depth-trace3/runs",
+    "--untraced",
+    "/home/nate/claude/flash-sass-prs/paired-depth-untraced4/runs",
+    "--out",
+    "/home/nate/claude/flash-sass-prs/decode-forensics-perl-review"
+  ],
+  "exit": 0,
+  "comparison_to_recorded_summaries": {
+    "absolute_tolerance": 1e-08,
+    "max_absolute_error": 7.272404900504625e-12,
+    "files": [
+      "traced-summary.json",
+      "untraced-summary.json",
+      "matched-phase-deltas.json"
+    ]
+  }
+}

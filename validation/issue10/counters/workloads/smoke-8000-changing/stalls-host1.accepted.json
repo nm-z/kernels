@@ -1,0 +1,110 @@
+{
+   "metrics" : {
+      "stall_memory_dependency" : {
+         "avg" : {
+            "raw" : "97.232118%",
+            "unit" : "percent",
+            "value" : 97.232118
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "97.456952%",
+            "unit" : "percent",
+            "value" : 97.456952
+         },
+         "min" : {
+            "raw" : "96.903291%",
+            "unit" : "percent",
+            "value" : 96.903291
+         }
+      },
+      "stall_memory_throttle" : {
+         "avg" : {
+            "raw" : "0.000034%",
+            "unit" : "percent",
+            "value" : 3.4e-05
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "0.000035%",
+            "unit" : "percent",
+            "value" : 3.5e-05
+         },
+         "min" : {
+            "raw" : "0.000033%",
+            "unit" : "percent",
+            "value" : 3.3e-05
+         }
+      },
+      "stall_sync" : {
+         "avg" : {
+            "raw" : "2.429387%",
+            "unit" : "percent",
+            "value" : 2.429387
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "2.755628%",
+            "unit" : "percent",
+            "value" : 2.755628
+         },
+         "min" : {
+            "raw" : "2.219997%",
+            "unit" : "percent",
+            "value" : 2.219997
+         }
+      }
+   },
+   "raw_profiler" : {
+      "bytes" : 981,
+      "path" : "/tmp/flash-issue10-counters-E04IkgnX/capture/stalls-host1.nvprof.csv",
+      "sha256" : "37b1b2fca206ce76073cfa03c1f2798df34bd2a982cad3e5f343866ff7df79ef"
+   },
+   "raw_workload" : {
+      "bytes" : 278,
+      "path" : "/tmp/flash-issue10-counters-E04IkgnX/capture/stalls-host1.workload.csv",
+      "sha256" : "a2de4e1639521481325c49d18d847584766ef6ee47606807c9efc49d4202ddaa"
+   },
+   "workload" : {
+      "budget" : 512,
+      "cache_fnv1a64" : "ebe267f1dc2a3b14",
+      "destination_unique_address_bytes" : 8388608,
+      "gpu_us_max" : 201162.460327148,
+      "gpu_us_mean" : 172811.599731445,
+      "gpu_us_min" : 150353.317260742,
+      "gpu_us_p50" : 163005.340576172,
+      "gpu_us_p90" : 201162.460327148,
+      "gpu_us_p99" : 201162.460327148,
+      "gpu_us_stddev" : 18838.958078129,
+      "hardware_counter_gate" : "not_run",
+      "host_kv" : 1,
+      "iterations" : 4,
+      "logical_keys" : 2048,
+      "measured_hardware_transaction_bytes" : null,
+      "nv" : 2000,
+      "pattern" : "changing",
+      "physical_gathered_slots" : 2048,
+      "physical_k_head_rows" : 4096,
+      "physical_v_head_rows" : 4096,
+      "position_policy" : "fixed visible length; layout varies per launch",
+      "preflight_verified_all" : true,
+      "quantile_method" : "nearest_rank",
+      "seed" : 4242,
+      "selection_changes" : 3,
+      "selection_upload_timed" : false,
+      "selections_fnv1a64" : "bb6dac4bfd7ca46e",
+      "source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+      "source_unique_address_bytes" : 2228224,
+      "tail" : 0,
+      "timing_scope" : "CUDA event interval including persistent kernel framework",
+      "verified_output_signature_changes" : 3,
+      "visible" : 8000,
+      "warmup_launches" : 10
+   }
+}

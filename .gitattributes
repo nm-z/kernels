@@ -1,0 +1,13 @@
+# Preserve raw nvprof stdout byte-for-byte, including its terminal blank lines.
+validation/issue10/counters/profiler/nvprof114-events.txt whitespace=-blank-at-eof
+validation/issue10/counters/profiler/nvprof114-metrics.txt whitespace=-blank-at-eof
+# Preserve the raw prove progress line in the validation transcript.
+validation/issue10/native-validation/tests.log whitespace=-blank-at-eol
+# Raw nvprof CSV contains terminal blank lines; preserve the captured bytes.
+validation/issue10/counters/workloads/**/*.nvprof.csv whitespace=-blank-at-eof
+# Preserve raw process and prove output, including terminal alignment spaces.
+validation/issue10/counters/workloads/latest-lock.log whitespace=-blank-at-eol
+validation/issue10/counters/workloads/native-validation/*-tests.log whitespace=-blank-at-eol
+validation/issue10/counters/workloads/matrix-3100-8000/resident-preflight.txt whitespace=-blank-at-eol
+validation/issue10/counters/workloads/native-validation-matrix/tests.log whitespace=-blank-at-eol
+validation/issue10/counters/workloads/native-validation-matrix/tested-code.patch whitespace=-blank-at-eol

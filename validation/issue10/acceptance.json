@@ -1,0 +1,369 @@
+{
+   "checks" : [
+      {
+         "available" : [
+            "traced.json.gz",
+            "untraced.json.gz",
+            "review/setup"
+         ],
+         "criterion" : 1,
+         "remaining" : [
+            "Traced parent environment is empty",
+            "Historical full driver-counter query exited 2",
+            "The instrumented engine source revision is present only in non-authoritative metadata; the resident core source revision is not embedded and GGUF conversion revision is null",
+            "Original constructor/reload settings cannot be reconstructed completely"
+         ],
+         "requirement" : "Complete source, build, launch, model, token, device and runtime provenance",
+         "status" : "PARTIAL"
+      },
+      {
+         "available" : [
+            "traced-summary.json",
+            "traced.json.gz"
+         ],
+         "capacity_skipped_prompt_depths" : [
+            65000,
+            262000
+         ],
+         "criterion" : 2,
+         "measured_prompt_depths" : [
+            256,
+            2048,
+            2051,
+            2052,
+            3100,
+            8000
+         ],
+         "recorded_engine_capacity" : 8192,
+         "remaining" : [
+            "No matched deeper-context captures",
+            "An 8192-position experiment limit is not a measurement of the host's maximum supported capacity"
+         ],
+         "requirement" : "Matched host/VRAM depth matrix and explicit supported capacity",
+         "status" : "PARTIAL"
+      },
+      {
+         "available" : [
+            "traced.json.gz",
+            "untraced.json.gz",
+            "review/raw-excerpts"
+         ],
+         "criterion" : 3,
+         "measured_intervals_per_request" : 128,
+         "measured_outputs_per_request" : 129,
+         "pairs_per_depth" : 5,
+         "remaining" : [
+            "Complete startup/prefill provenance is not present",
+            "Existing traced and untraced series have different clock conditions and do not establish tracing overhead"
+         ],
+         "requirement" : "Initialization, prefill, first output, steady decode and host overhead with repeated complete runs",
+         "status" : "PARTIAL"
+      },
+      {
+         "available" : [
+            "traced-all-die-phase-totals.json.gz",
+            "review/raw-excerpts",
+            "review/raw-trace-archive.json"
+         ],
+         "criterion" : 4,
+         "remaining" : [
+            "Legacy body interval begins before opcode dispatch",
+            "Schema-2 trace validation uses a separate runtime and has not been run as this depth matrix"
+         ],
+         "requirement" : "Wrap-safe per-token all-die phase timing with precise phase boundaries",
+         "status" : "PARTIAL"
+      },
+      {
+         "available" : [
+            "matched-phase-deltas.json",
+            "traced-all-die-phase-totals.json.gz"
+         ],
+         "criterion" : 5,
+         "remaining" : [
+            "Legacy arithmetic partitions do not prove a cross-die critical path",
+            "Useful compute is not isolated from all dispatch/bookkeeping in the legacy body category"
+         ],
+         "requirement" : "Separate sender compute and receiver waits with overlap-aware wall-time reconciliation",
+         "status" : "PARTIAL"
+      },
+      {
+         "available" : [
+            "counters/profiler/discovery.json",
+            "counters/profiler/nvprof114-metrics.txt",
+            "counters/profiler/nvprof114-events.txt",
+            "counters/workloads/smoke-8000-changing/status.json",
+            "counters/workloads/README.md",
+            "counters/workloads/MATRIX.md",
+            "counters/workloads/matrix-3100-8000",
+            "counters/workloads/matrix-replay/summary.json"
+         ],
+         "criterion" : 6,
+         "remaining" : [
+            "The completed 64-command component matrix does not provide full-model phase attribution",
+            "Full-model timing, host overhead and device critical-path reconciliation remain separate acceptance requirements",
+            "Profiled elapsed rates include profiler replay and are not authoritative throughput"
+         ],
+         "requirement" : "Maxwell-compatible memory traffic, occupancy, eligible-warp and stall counters",
+         "status" : "PARTIAL"
+      },
+      {
+         "available" : [
+            "https://github.com/nm-z/flash-sass/pull/43",
+            "counters/workloads/smoke-8000-changing/status.json",
+            "counters/workloads/README.md",
+            "counters/workloads/MATRIX.md",
+            "counters/workloads/matrix-3100-8000",
+            "counters/workloads/matrix-replay/summary.json"
+         ],
+         "criterion" : 7,
+         "remaining" : [
+            "Clustered, evenly spread and random native modes retain fixed selected rows; only changing mode varies them per iteration",
+            "No accepted checkpoint-derived selected-ID extraction lineage is present",
+            "Counter averages include ten repeated-row warmup launches and the finite die framework"
+         ],
+         "requirement" : "Changing clustered, spread, random and checkpoint-derived selected-block layouts",
+         "status" : "PARTIAL"
+      },
+      {
+         "available" : [
+            "DECODE_INVESTIGATION.md",
+            "matched-phase-deltas.json"
+         ],
+         "criterion" : 8,
+         "remaining" : [
+            "The historical result remains explicitly unreproduced",
+            "The observed replacement increment is small but the full protocol remains incomplete"
+         ],
+         "requirement" : "Explain reproduced phase/host increment or replace unreproduced historical rates with a fully reproducible experiment",
+         "status" : "PARTIAL"
+      }
+   ],
+   "component_counter_validation" : {
+      "binary_source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+      "budget" : 512,
+      "collector_cpu_record" : "counters/workloads/native-validation/result.json",
+      "counter_collector_tests" : 57,
+      "full_issue_acceptance" : false,
+      "host" : "archy",
+      "iterations" : 4,
+      "metric_rows" : 26,
+      "profiled_commands" : 8,
+      "raw_profiler_reported_invocations_per_command" : 18,
+      "record" : "counters/workloads/smoke-8000-changing/status.json",
+      "scope" : "Single-die native gather, not full-model timing",
+      "status" : "PASS",
+      "visible_positions" : 8000
+   },
+   "counter_matrix_validation" : {
+      "cases" : 8,
+      "collector_tests" : 67,
+      "finished_utc" : "2026-10-18T06:13:27Z",
+      "full_issue_acceptance" : false,
+      "lock_acquired_utc" : "2026-10-18T06:10:59Z",
+      "matrix_tests" : 48,
+      "metric_rows" : 208,
+      "paired_metric_rows" : 104,
+      "patterns" : [
+         "clustered",
+         "even",
+         "random",
+         "changing"
+      ],
+      "profiled_commands" : 64,
+      "queue_exit" : 0,
+      "raw" : "counters/workloads/matrix-3100-8000",
+      "record" : "counters/workloads/matrix-replay/summary.json",
+      "scope" : "Single-die native component counters; no full-model acceptance",
+      "status" : "PASS",
+      "total_cpu_tests" : 192,
+      "validation_record" : "counters/workloads/native-validation-matrix/result.json",
+      "visible_positions" : [
+         3100,
+         8000
+      ]
+   },
+   "gpu_work_blocker" : {
+      "exit_code" : 75,
+      "kind" : "FULL_MODEL_READINESS",
+      "last_sample_utc" : "2026-10-18T06:18:39Z",
+      "lock" : "/tmp/flash-sass-engine-validation.lock",
+      "lock_acquired" : true,
+      "lock_acquired_utc" : "2026-10-18T06:18:12Z",
+      "new_gpu_measurements" : true,
+      "note" : "The former issue #7 lock blocker is cleared. The component campaign and readiness probe both acquired the lock. This is a timestamped observation, not attribution of GPU activity to one process or a claim that the same PID remains alive. No full-model inference or resident-service mutation was attempted.",
+      "observed_busy_model_gpus" : [
+         1,
+         2,
+         3,
+         4,
+         5
+      ],
+      "observed_model_gpu_free_mib" : [
+         52,
+         16,
+         77,
+         7,
+         3,
+         65
+      ],
+      "observed_resident_core_pid" : 3575268,
+      "observed_utilization_percent" : 100,
+      "raw" : "counters/workloads/full-model-readiness-20261018",
+      "record" : "counters/workloads/full-model-readiness-20261018/readiness.log",
+      "samples" : 6,
+      "status" : "BLOCKED"
+   },
+   "historical_claim" : {
+      "above_cap_increment_ms_per_token" : 16.917,
+      "matched_historical_manifest_available" : false,
+      "rates_tokens_per_second" : [
+         36,
+         28,
+         19
+      ],
+      "status" : "UNREPRODUCED"
+   },
+   "historical_setup_review" : {
+      "build_records_authoritative" : false,
+      "conversion_revision" : null,
+      "resident_core_source_revision" : null,
+      "build_settings" : {
+         "assembler_version_observed" : "CUDA 11.4.152",
+         "compiler_version_observed" : "GCC 16.2.1",
+         "job3_command" : "make CUDA=/opt/cuda PTXAS11=/opt/cuda-11.4/bin/ptxas die.cubin die_trace.cubin libengine.so",
+         "job4_command" : "make CUDA=/opt/cuda PTXAS11=/opt/cuda-11.4/bin/ptxas die.cubin die.cubin libengine.so",
+         "observed_flags" : "-std=gnu99 -O2 -ffp-contract=off -Wall -fPIC -shared"
+      },
+      "engine_source_revision_observed" : "bac5b88b665ee6973488dd40b363ded3134136f6",
+      "gguf_revision_observed" : "ed59f92082b1e93c0e96d60a8b11aab089b52f09",
+      "job3_launch_environment_recorded" : false,
+      "job4_launch_environment_recorded" : true,
+      "job4_flash_trace" : "0",
+      "job3_runtime_config_record" : "config rev=unknown-dirty kv_host=0 ple_disk=1 maxt=230000 layers=48/48 nblk=512 dies=6 attn_dies=1,4,5 split=112,97,81,116,97,97 attn_map=1,1,1,1,4,4,4,4,5,5,5,5 img_rows=4096 cubin=/home/nate/claude/flash-sass-next/kern/die.cubin cubin_fnv=7e7f74fbd71bd973",
+      "job4_runtime_config_record" : "config rev=unknown-dirty kv_host=0 ple_disk=1 maxt=230000 layers=48/48 nblk=512 dies=6 attn_dies=1,4,5 split=112,97,81,116,97,97 attn_map=1,1,1,1,4,4,4,4,5,5,5,5 img_rows=4096 cubin=/home/nate/claude/flash-sass-next/kern/die.cubin cubin_fnv=7e7f74fbd71bd973",
+      "original_checkpoint_revision_observed" : "de4b8e4d43b917e7706784d8bb445c9af86a3540",
+      "remaining_gaps" : [
+         "Resident core source revision is not embedded in the retained core record",
+         "GGUF conversion revision is null",
+         "Build records are explicitly non-authoritative and cannot bind these settings to the resident executable",
+         "Only the untraced job launch environment is retained; constructor and reload settings remain incomplete",
+         "Archived runtime config says maxt=230000 while the job 4 launch environment records FLASH_MAXT=8192 and FLASH_ENGINE_MAXT=8192; the mismatch is unresolved"
+      ],
+      "scope" : "Recovered references from review/setup job 3 and job 4; these observations do not satisfy criterion 1 provenance",
+      "source_records" : [
+         "review/setup/job3-build.json",
+         "review/setup/job3-job-exit.json",
+         "review/setup/job4-build.json",
+         "review/setup/job4-job-exit.json",
+         "review/setup/job4-launch-environment.json"
+      ]
+   },
+   "current_gpu_access_attempt" : {
+      "attempt_date_local" : "2026-10-20",
+      "gpu_job_submitted" : false,
+      "gpuq_reached" : false,
+      "host_resolved_as" : "192.168.1.218",
+      "note" : "A later retry supersedes the earlier DNS failure: the host now resolves, but SSH authentication fails before gpuq. No queue bypass or GPU access was attempted.",
+      "probe_command" : "ssh -o BatchMode=yes -o ConnectTimeout=3 archy gpuq --help",
+      "ssh_agent_socket_available" : false,
+      "ssh_error" : "Permission denied (publickey,password)",
+      "status" : "BLOCKED"
+   },
+   "issue" : "https://github.com/nm-z/flash-sass/issues/10",
+   "native_validation" : {
+      "record" : "native-validation/result.json",
+      "scope" : "CPU-only compact archive validation",
+      "source_commit" : "7d19d09c6ab734847bf737cfa75448161fb092e9",
+      "status" : "PASS",
+      "test_count" : 77
+   },
+   "planned_full_model_campaign" : {
+      "runner" : "kern/paired_depth_bench.pl",
+      "status" : "PREPARATION_ONLY",
+      "full_issue_acceptance" : false,
+      "contexts" : [
+         2048,
+         2051,
+         2052,
+         3100,
+         8000,
+         65000,
+         262000
+      ],
+      "outputs_per_request" : 129,
+      "decode_intervals_per_request" : 128,
+      "interleaved_host_vram_pairs" : 5,
+      "pair_order" : "alternates host-first and vram-first by pair parity",
+      "trace_mode" : "Pass --trace; the runner default is untraced",
+      "minimum_core_capacity_positions" : 262128,
+      "required_live_inputs" : [
+         "host and vram core sockets",
+         "full source SHA and dirty-patch record",
+         "build record and built artifact identities",
+         "weight identity manifest",
+         "host and vram argv, launch environments, reload-command lists and limitations"
+      ],
+      "still_required_after_this_runner" : [
+         "Separate controlled tracing-overhead comparison",
+         "Full-model Maxwell memory and stall counter attribution",
+         "Checkpoint-derived selected-ID/layout coverage",
+         "Complete startup, prefill and resident-runtime provenance"
+      ],
+      "note" : "The live campaign has not run; SSH authentication to Archy fails before gpuq."
+   },
+   "previous_counter_matrix_lock_blocker" : {
+      "attempt_started_utc" : "2026-10-18T05:43:39Z",
+      "exit_code" : 73,
+      "holder_pid" : 970242,
+      "holder_task" : "bash kern/sequence_validate.sh (issue #7 validation)",
+      "latest_lock_record" : "counters/workloads/latest-lock.log",
+      "latest_observed_utc" : "2026-10-18T05:52:34Z",
+      "lock" : "/tmp/flash-sass-engine-validation.lock",
+      "new_gpu_measurements" : true,
+      "note" : "The component smoke completed before the lock was reacquired by other validators. No full-model campaign was accepted.",
+      "record" : "counters/workloads/matrix-attempt/nv775-clustered/status.json",
+      "retry_record" : "counters/workloads/retry-3100-changing/status.json",
+      "status" : "BLOCKED",
+      "wait_seconds" : 120
+   },
+   "previous_gpu_work_blocker" : {
+      "attempt_started_utc" : "2026-10-18T03:45:22Z",
+      "exit_code" : 73,
+      "holder_pid" : 4010221,
+      "holder_task" : "validation/issue19/run.rb --mode model",
+      "lock" : "/tmp/flash-sass-engine-validation.lock",
+      "new_gpu_measurements" : false,
+      "record" : "native-validation/gpu-lock-preflight.log",
+      "status" : "BLOCKED",
+      "wait_seconds" : 45
+   },
+   "pull_request" : "https://github.com/nm-z/flash-sass/pull/38",
+   "ready_for_review" : false,
+   "related_work" : [
+      {
+         "head" : "257ea63c6cc431e3a3c5b32f52ce0cfdfb8bfdff",
+         "observed_draft" : false,
+         "observed_state" : "OPEN",
+         "pull_request" : 30,
+         "scope" : "Schema-2 trace/lifecycle and separate short-generation overhead evidence"
+      },
+      {
+         "head" : "035693cd6fa0e14acfc39c6d5b8096764260379f",
+         "observed_draft" : true,
+         "observed_state" : "OPEN",
+         "pull_request" : 78,
+         "scope" : "Live provenance and strict matched campaign runner; genuine campaign remains pending"
+      },
+      {
+         "head" : "68e302a87c0d48e158012bf53c072f9dd88bb7ce",
+         "observed_draft" : true,
+         "observed_state" : "OPEN",
+         "pull_request" : 43,
+         "scope" : "Representative gather layouts; hardware traffic measurements remain pending"
+      }
+   ],
+   "reviewed_remote_head" : "f620ec94faf5a2eeea64e7ff7d3ee3eee03dc4e0",
+   "schema" : "flash.issue10.acceptance.v1",
+   "scope" : "Acceptance inventory for the preserved depth investigation. Capture/replay PASS flags do not imply issue closure.",
+   "status" : "INCOMPLETE"
+}

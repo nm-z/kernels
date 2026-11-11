@@ -1,0 +1,1 @@
+config rev=edc66d9 kv_host=0 ple_disk=1 maxt=230000 layers=48/48 nblk=512 dies=6 attn_dies=1,4,5 split=112,97,81,116,97,97 attn_map=1,1,1,1,4,4,4,4,5,5,5,5 img_rows=4096 two_position=0 prefill_chunk=0 cubin=/tmp/flash-sass-issue53-gates.4F55qE/attempt-1/original-die.cubin cubin_fnv=669dbb2e43186b1a

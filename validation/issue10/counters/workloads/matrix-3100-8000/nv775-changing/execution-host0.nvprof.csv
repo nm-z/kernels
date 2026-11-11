@@ -1,0 +1,7 @@
+==1109485== NVPROF is profiling process 1109485, command: /tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench 775 0 4 changing 0 /tmp/flash-issue10-after7-9VF51acq/nv775-changing/execution-host0.workload.csv 4242
+==1109485== Profiling application: /tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench 775 0 4 changing 0 /tmp/flash-issue10-after7-9VF51acq/nv775-changing/execution-host0.workload.csv 4242
+==1109485== Profiling result:
+==1109485== Metric result:
+"Device","Kernel","Invocations","Metric Name","Metric Description","Min","Max","Avg"
+"Tesla M60 (0)","die",18,"achieved_occupancy","Achieved Occupancy",0.124978,0.124982,0.124980
+"Tesla M60 (0)","die",18,"eligible_warps_per_cycle","Eligible Warps Per Active Cycle",0.137611,0.153134,0.144177

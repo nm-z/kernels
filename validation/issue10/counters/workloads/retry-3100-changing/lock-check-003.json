@@ -1,0 +1,13 @@
+{
+   "argv" : [
+      "timeout",
+      "--kill-after=10s",
+      "15s",
+      "lslocks",
+      "-o",
+      "PID,COMMAND,TYPE,MODE,PATH"
+   ],
+   "exit" : 0,
+   "stderr" : "",
+   "stdout" : "   PID COMMAND          TYPE MODE   PATH\n  3411 python3.11      POSIX READ   \n  3411 python3.11      POSIX READ   \n   578 containerd      FLOCK WRITE  /...\n   578 containerd      FLOCK WRITE  /run...\n   578 containerd      FLOCK WRITE  /...\n  1471 codex           POSIX READ   /home/nate/.codex/logs_2.sqlite\n  1471 codex           POSIX READ   /home/nate/.codex/logs_2.sqlite-shm\n993237 flock           FLOCK WRITE* /tmp/flash-sass-engine-validation.lock\n970242 bash            FLOCK WRITE  /tmp/flash-sass-engine-validation.lock\n   750 dockerd         FLOCK WRITE  /...\n  3413 python3.11      POSIX READ   \n  3413 python3.11      POSIX READ   \n974100 flock           FLOCK READ   /home/nate/codex/asm-port/GPU-c767d250-4454-d181-d648-8706b5f2fb64.lock\n   750 dockerd         FLOCK WRITE  /...\n   750 dockerd         FLOCK WRITE  /...\n   750 dockerd         FLOCK WRITE  /...\n   750 dockerd         FLOCK WRITE  /...\n   750 dockerd         FLOCK WRITE  /...\n  1471 codex           POSIX READ   /home/nate/.codex/queue_1.sqlite\n  1471 codex           POSIX READ   /home/nate/.codex/queue_1.sqlite-shm\n  3403 python3.11      POSIX READ   \n  3403 python3.11      POSIX READ   \n  3412 python3.11      POSIX READ   \n  3412 python3.11      POSIX READ   \n  3407 python3.11      POSIX READ   \n  3407 python3.11      POSIX READ   \n  3401 python3.11      POSIX READ   \n  3401 python3.11      POSIX READ   \n988065 flock           FLOCK READ   /home/nate/codex/asm-port/GPU-5f06269e-5fe2-ff52-1a0d-b0d0c0c763a6.lock\n988070 flock           FLOCK READ   /home/nate/codex/asm-port/GPU-906e6ede-6cde-d0dd-5110-d1bb8bf2458d.lock\n974058 flock           FLOCK READ   /home/nate/codex/asm-port/GPU-ccb8b3a3-f45d-8962-215b-c2b140e4bb28.lock\n988079 flock           FLOCK READ   /home/nate/codex/asm-port/GPU-1d9dc086-8739-66c2-fa98-f5bf3ef2b2d4.lock\n   624 pipewire        FLOCK WRITE  /run/user/1000/pipewire-0.lock\n   624 pipewire        FLOCK WRITE  /run/user/1000/pipewire-0-manager.lock\n  1471 codex           FLOCK WRITE  /home/nate/.codex/tmp/arg0/codex-arg0YFh8XF/.lock\n974015 flock           FLOCK READ   /home/nate/codex/asm-port/GPU-1783441e-9a1a-684e-82bb-14d24e6e0c8f.lock\n988058 flock           FLOCK READ   /home/nate/codex/asm-port/GPU-c767d250-4454-d181-d648-8706b5f2fb64.lock\n  2003 rpcbind         FLOCK WRITE  /run...\n  3405 python3.11      POSIX READ   \n  3405 python3.11      POSIX READ   \n  1471 codex           FLOCK WRITE  /home/nate/.codex/.sqlite-maintenance.lock\n"
+}

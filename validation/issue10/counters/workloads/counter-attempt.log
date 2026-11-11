@@ -1,0 +1,10 @@
+ACQUIRED: shared GPU lock; read-only device preflight
+MEASURED: traffic host=0; native outputs and profiler rows validated
+MEASURED: traffic host=1; native outputs and profiler rows validated
+MEASURED: transactions host=0; native outputs and profiler rows validated
+MEASURED: transactions host=1; native outputs and profiler rows validated
+MEASURED: execution host=0; native outputs and profiler rows validated
+MEASURED: execution host=1; native outputs and profiler rows validated
+MEASURED: stalls host=0; native outputs and profiler rows validated
+MEASURED: stalls host=1; native outputs and profiler rows validated
+PASS: Single-die native gather counter workload, not full-model timing

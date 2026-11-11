@@ -1,0 +1,63 @@
+{
+  "schema": "issue10.profiler-discovery.v1",
+  "host": "archy",
+  "successful_query_utc": "2026-10-17T23:15:11Z",
+  "driver": "470.256.02",
+  "gpu": {
+    "index": 6,
+    "uuid": "GPU-431371bd-b482-96b2-4b70-04f83c6d075b",
+    "name": "Tesla M60",
+    "compute_capability": "5.2"
+  },
+  "installed_probe": {
+    "executable": "/opt/cuda/bin/nvprof",
+    "version": "12.9.79",
+    "metrics_exit": 12,
+    "root_metrics_exit": 12,
+    "result": "CUDA error 12; no counters measured by this executable",
+    "logs": [
+      "nvprof12-metrics-failed.txt",
+      "nvprof12-root-metrics-failed.txt"
+    ],
+    "query_utc": "2026-10-17T23:36:40Z"
+  },
+  "compatible_profiler": {
+    "executable": "/home/nate/claude/pr38-profiler/usr/local/cuda-11.4/bin/nvprof",
+    "version": "11.4.120",
+    "sha256": "c3e58ebca670c1511c55e1d1420f8fea67d25fba93a4e0d178bc562473ae819d",
+    "metrics_argv": [
+      "sudo",
+      "-n",
+      "/home/nate/claude/pr38-profiler/usr/local/cuda-11.4/bin/nvprof",
+      "--devices",
+      "6",
+      "--query-metrics"
+    ],
+    "metrics_exit": 0,
+    "events_argv": [
+      "sudo",
+      "-n",
+      "/home/nate/claude/pr38-profiler/usr/local/cuda-11.4/bin/nvprof",
+      "--devices",
+      "6",
+      "--query-events"
+    ],
+    "events_exit": 0,
+    "logs": [
+      "nvprof114-metrics.txt",
+      "nvprof114-events.txt"
+    ]
+  },
+  "packages": [
+    {
+      "url": "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-nvprof-11-4_11.4.120-1_amd64.deb",
+      "sha256": "1f1b3c76f2ecdfc75b9d88d9a12f9a7aaad9d142e2212aeb1f463c7cc732444d"
+    },
+    {
+      "url": "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-cupti-11-4_11.4.120-1_amd64.deb",
+      "sha256": "128102d0b61ec66fd374abf510fc6ab70592d9f72c29810094f44ca521b79075"
+    }
+  ],
+  "archive_verification": "Both SHA256 values matched NVIDIA's Packages.gz records; packages extracted privately with ar and tar. No system package replacement.",
+  "scope": "Enumeration proves metric availability only. Measurement data and exits are recorded separately."
+}

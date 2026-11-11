@@ -1,0 +1,205 @@
+kern/decode_counter_capture_test.pl .. 
+ok 1 - quoted CSV and trailing field
+ok 2 - reject malformed quote
+ok 3 - thirteen requested hardware metrics
+ok 4 - complete workload metric fixture parsed
+ok 5 - nvprof average not divided by invocation count again
+ok 6 - stall percentage retains its unit
+ok 7 - occupancy is a ratio
+ok 8 - enumeration is not a workload measurement
+ok 9 - permission failure is not empty successful traffic
+ok 10 - reject incomplete kernel profiling warning
+ok 11 - missing metric
+ok 12 - duplicate metric
+ok 13 - wrong invocations
+ok 14 - wrong kernel
+ok 15 - mixed devices
+ok 16 - nonfinite value
+ok 17 - negative value
+ok 18 - unsupported value
+ok 19 - bad average
+ok 20 - wrong header
+ok 21 - wrong row width
+ok 22 - invalid metric sysmem_read_bytes=NaN
+ok 23 - invalid metric dram_read_bytes=Inf
+ok 24 - invalid metric dram_read_bytes=1e999
+ok 25 - invalid metric stall_sync=100.01%
+ok 26 - invalid metric achieved_occupancy=1.01
+ok 27 - invalid metric sysmem_read_bytes=2%
+ok 28 - invalid metric stall_sync=2
+ok 29 - complete workload fixture
+ok 30 - string success
+ok 31 - unverified output
+ok 32 - wrong source
+ok 33 - nonnumeric placement
+ok 34 - wrong placement
+ok 35 - wrong budget
+ok 36 - wrong physical slots
+ok 37 - wrong logical keys
+ok 38 - wrong warmups
+ok 39 - wrong visible length
+ok 40 - unchanging selections
+ok 41 - unchanging output
+ok 42 - fractional changes
+ok 43 - missing cache hash
+ok 44 - placement difference permitted in paired workload
+ok 45 - mismatched selection identity
+ok 46 - complete native output rows
+ok 47 - truncated workload CSV
+ok 48 - duplicate workload iteration
+ok 49 - nonfinite workload timing
+ok 50 - nonpositive workload timing
+ok 51 - acquire free lock
+ok 52 - busy lock blocks before GPU operations
+ok 53 - blocked attempt records lock status
+ok 54 - same inode can be acquired after release
+ok 55 - duplicate inherited queue lease without reopening its path
+ok 56 - closing borrowed descriptor preserves outer lease
+ok 57 - reject unrelated inherited descriptor
+ok 58 - reject invalid inherited descriptor 0
+ok 59 - reject invalid inherited descriptor 1
+ok 60 - reject invalid inherited descriptor 2
+ok 61 - reject invalid inherited descriptor -1
+ok 62 - reject invalid inherited descriptor not-a-descriptor
+ok 63 - inherited lease rejects a symlink pathname
+ok 64 - separate open description cannot borrow another lock
+ok 65 - subprocess exit and both streams preserved
+ok 66 - subprocess timeout is a failure
+ok 67 - current parser validates all eight archived real profiler arms
+1..67
+ok
+kern/decode_counter_matrix_test.pl ... 
+ok 1 - all 64 real profiler commands replay
+ok 2 - all 208 real metric rows replay
+ok 3 - both contexts and all four layouts present
+ok 4 - component PASS never claims full-model acceptance
+ok 5 - reproduces all observed host system-memory read averages
+ok 6 - reproduces all observed VRAM system-memory read averages
+ok 7 - failed queue is not accepted
+ok 8 - missing case rejected
+ok 9 - extra counter case rejected
+ok 10 - failed capture
+ok 11 - full issue acceptance flag
+ok 12 - unverified queue lease
+ok 13 - bad capture timestamp
+ok 14 - reversed capture timestamps
+ok 15 - wrong context
+ok 16 - wrong layout
+ok 17 - wrong tail
+ok 18 - wrong iterations
+ok 19 - wrong seed
+ok 20 - invalid source revision
+ok 21 - invalid GPU UUID
+ok 22 - missing metric group
+ok 23 - repeated metric group
+ok 24 - unknown metric group
+ok 25 - missing host arm
+ok 26 - unidentified executable
+ok 27 - invalid artifact identity
+ok 28 - different raw manifest
+ok 29 - failed hardware snapshot
+ok 30 - different hardware UUID
+ok 31 - failed process inventory
+ok 32 - occupied target GPU
+ok 33 - profile command failure
+ok 34 - profile command wrong device
+ok 35 - conflicting duplicate GPU environment
+ok 36 - profile command wrong kernel
+ok 37 - profile command missing identity
+ok 38 - raw native stdout differs
+ok 39 - accepted metric record is not independent truth
+ok 40 - truncated raw profiler rejected
+ok 41 - altered raw workload rejected
+ok 42 - cross-case binary mismatch
+ok 43 - coordinated raw-hash mutation still fails metric schema
+PASS: 8 cases, 64 profiler commands, 208 metric rows; component scope only
+ok 44 - CLI regenerates successful summary
+ok 45 - wide CSV includes all 104 matched metric rows and header
+ok 46 - never overwrite prior replay output
+ok 47 - bad campaign publishes no PASS output
+ok 48 - failed replay leaves no success directory
+1..48
+ok
+kern/decode_forensics_test.pl ........ 
+ok 1 - complete archived matrix has 60 traced, 20 untraced and 360 die records
+ok 2 - all die arithmetic partitions reconcile
+ok 3 - regenerates independent saved traced-summary.json
+ok 4 - regenerates independent saved untraced-summary.json
+ok 5 - regenerates independent saved matched-phase-deltas.json
+ok 6 - median is over the five run means
+ok 7 - p95 uses nearest rank over 640 token intervals
+ok 8 - selected-key count uses zero-based position, four-token blocks, cap and tail
+ok 9 - rejects missing traced run
+ok 10 - rejects missing untraced run
+ok 11 - rejects duplicated run replacing another pair
+ok 12 - rejects unrequested depth
+ok 13 - rejects incomplete run
+ok 14 - rejects a sixth pair
+ok 15 - rejects different block budget
+ok 16 - rejects unmatched PLE configuration
+ok 17 - rejects mismatched source identity
+ok 18 - rejects truthy string instead of JSON trace flag
+ok 19 - rejects truncated generated IDs
+ok 20 - rejects changed paired continuation
+ok 21 - rejects early stop
+ok 22 - rejects incorrect prefix reuse
+ok 23 - rejects raw completion inconsistent with parsed fields
+ok 24 - rejects altered interval
+ok 25 - rejects repeated arrival timestamp
+ok 26 - rejects incorrect request TTFT
+ok 27 - rejects observations outside request
+ok 28 - rejects nonfinite timing before tolerance comparison
+ok 29 - rejects stale embedded summary
+ok 30 - rejects missing larger-context capacity record
+ok 31 - rejects missing all-die frame
+ok 32 - rejects repeated all-die frame
+ok 33 - rejects missing die
+ok 34 - rejects repeated die
+ok 35 - rejects truncated trace
+ok 36 - rejects mixed requests
+ok 37 - binds complete phase frame to its run projection
+ok 38 - rejects missing phase component
+ok 39 - rejects negative phase time
+ok 40 - rejects nonfinite phase time
+ok 41 - rejects unreconciled duration
+ok 42 - rejects changed opcode count
+ok 43 - rejects time attributed to zero executions
+ok 44 - rejects fractional execution count
+ok 45 - rejects opcode/component disagreement
+ok 46 - rejects wrong selected-key count
+ok 47 - rejects shifted interior selected-key position
+ok 48 - rejects nonfinite recorded residual
+ok 49 - rejects undefined/nonfinite/boolean numeric input
+ok 50 - rejects undefined/nonfinite/boolean numeric input
+ok 51 - rejects undefined/nonfinite/boolean numeric input
+ok 52 - rejects undefined/nonfinite/boolean numeric input
+ok 53 - rejects undefined/nonfinite/boolean numeric input
+ok 54 - rejects fractional integer
+ok 55 - rejects different reference schema
+ok 56 - checks all required artifact identities
+ok 57 - requires reference summary identity
+ok 58 - rejects parent traversal in identity manifest
+ok 59 - binds identities to the required logical filenames
+ok 60 - rejects changed bytes even at identical size
+ok 61 - corrupt archive cannot publish a PASS directory
+ok 62 - failed validation leaves no output directory
+ok 63 - native CLI archive mode completes
+ok 64 - successful replay publishes its scoped status
+ok 65 - replay binds the input identity manifest
+ok 66 - replay identifies both source files
+ok 67 - CLI output agrees with saved traced-summary.json
+ok 68 - CLI output agrees with saved untraced-summary.json
+ok 69 - CLI output agrees with saved matched-phase-deltas.json
+ok 70 - refuses overwriting an existing replay
+ok 71 - refuses mixed archive and raw capture inputs
+ok 72 - rejects gzip without a complete trailer
+ok 73 - rejects trailing bytes after gzip
+ok 74 - rejects trailing data after a valid JSON prefix
+ok 75 - coordinated corruption has internally agreeing projections
+ok 76 - independent reference rejects internally consistent altered timings
+ok 77 - reference mismatch publishes no PASS directory
+1..77
+ok
+All tests successful.
+Files=3, Tests=192, 15 wallclock secs ( 0.02 usr  0.00 sys + 13.57 cusr  0.12 csys = 13.71 CPU)
+Result: PASS

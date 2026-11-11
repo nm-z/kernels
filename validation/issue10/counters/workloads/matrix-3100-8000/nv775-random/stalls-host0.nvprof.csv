@@ -1,0 +1,9 @@
+==1108004== NVPROF is profiling process 1108004, command: /tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench 775 0 4 random 0 /tmp/flash-issue10-after7-9VF51acq/nv775-random/stalls-host0.workload.csv 4242
+==1108004== Some kernel(s) will be replayed on device 0 in order to collect all events/metrics.
+==1108004== Profiling application: /tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench 775 0 4 random 0 /tmp/flash-issue10-after7-9VF51acq/nv775-random/stalls-host0.workload.csv 4242
+==1108004== Profiling result:
+==1108004== Metric result:
+"Device","Kernel","Invocations","Metric Name","Metric Description","Min","Max","Avg"
+"Tesla M60 (0)","die",18,"stall_memory_dependency","Issue Stall Reasons (Data Request)",83.434237%,85.490404%,84.697708%
+"Tesla M60 (0)","die",18,"stall_memory_throttle","Issue Stall Reasons (Memory Throttle)",0.000654%,0.000719%,0.000685%
+"Tesla M60 (0)","die",18,"stall_sync","Issue Stall Reasons (Synchronization)",3.052517%,3.886986%,3.503633%

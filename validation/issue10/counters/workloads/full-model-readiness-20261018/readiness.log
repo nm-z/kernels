@@ -1,0 +1,13 @@
+QUEUED: issue-10 full-model readiness PID=1135990
+2026-10-18T06:16:42Z
+ACQUIRED: read-only full-model readiness
+2026-10-18T06:18:12Z
+MODEL_READINESS sample=1 busy_model_gpus=5
+MODEL_READINESS sample=2 busy_model_gpus=5
+MODEL_READINESS sample=3 busy_model_gpus=5
+MODEL_READINESS sample=4 busy_model_gpus=5
+MODEL_READINESS sample=5 busy_model_gpus=5
+MODEL_READINESS sample=6 busy_model_gpus=5
+BLOCKED: six-sample full-model preflight observed active model GPUs; no resident service was modified
+2026-10-18T06:18:39Z
+READINESS_EXIT=75

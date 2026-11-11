@@ -1,0 +1,132 @@
+{
+   "metrics" : {
+      "stall_memory_dependency" : {
+         "avg" : {
+            "raw" : "84.605548%",
+            "unit" : "percent",
+            "value" : 84.605548
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "85.128432%",
+            "unit" : "percent",
+            "value" : 85.128432
+         },
+         "min" : {
+            "raw" : "83.443228%",
+            "unit" : "percent",
+            "value" : 83.443228
+         }
+      },
+      "stall_memory_throttle" : {
+         "avg" : {
+            "raw" : "0.000673%",
+            "unit" : "percent",
+            "value" : 0.000673
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "0.000709%",
+            "unit" : "percent",
+            "value" : 0.000709
+         },
+         "min" : {
+            "raw" : "0.000654%",
+            "unit" : "percent",
+            "value" : 0.000654
+         }
+      },
+      "stall_sync" : {
+         "avg" : {
+            "raw" : "3.636899%",
+            "unit" : "percent",
+            "value" : 3.636899
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "4.234046%",
+            "unit" : "percent",
+            "value" : 4.234046
+         },
+         "min" : {
+            "raw" : "3.134812%",
+            "unit" : "percent",
+            "value" : 3.134812
+         }
+      }
+   },
+   "raw_profiler" : {
+      "bytes" : 991,
+      "path" : "/tmp/flash-issue10-after7-9VF51acq/nv2000-random/stalls-host0.nvprof.csv",
+      "sha256" : "4da8ffe058cac886a74e9183d0bd967776b36490766e5d356efc4d2d7de3c39f"
+   },
+   "raw_workload" : {
+      "bytes" : 277,
+      "path" : "/tmp/flash-issue10-after7-9VF51acq/nv2000-random/stalls-host0.workload.csv",
+      "sha256" : "13cad4d1a279d0b1cc0f3548dbe9a0b73ea59d8e09bba917e4adbb0434c164b0"
+   },
+   "verified_rows" : [
+      {
+         "iteration" : 0,
+         "selection" : "24c93a354df02efb",
+         "verified_output" : "4c037fdefc723a2b"
+      },
+      {
+         "iteration" : 1,
+         "selection" : "24c93a354df02efb",
+         "verified_output" : "4c037fdefc723a2b"
+      },
+      {
+         "iteration" : 2,
+         "selection" : "24c93a354df02efb",
+         "verified_output" : "4c037fdefc723a2b"
+      },
+      {
+         "iteration" : 3,
+         "selection" : "24c93a354df02efb",
+         "verified_output" : "4c037fdefc723a2b"
+      }
+   ],
+   "workload" : {
+      "budget" : 512,
+      "cache_fnv1a64" : "ebe267f1dc2a3b14",
+      "destination_unique_address_bytes" : 8388608,
+      "gpu_us_max" : 104539.009094238,
+      "gpu_us_mean" : 101880.977630615,
+      "gpu_us_min" : 96931.137084961,
+      "gpu_us_p50" : 102700.866699219,
+      "gpu_us_p90" : 104539.009094238,
+      "gpu_us_p99" : 104539.009094238,
+      "gpu_us_stddev" : 2932.781073476,
+      "hardware_counter_gate" : "not_run",
+      "host_kv" : 0,
+      "iterations" : 4,
+      "logical_keys" : 2048,
+      "measured_hardware_transaction_bytes" : null,
+      "nv" : 2000,
+      "pattern" : "random",
+      "physical_gathered_slots" : 2048,
+      "physical_k_head_rows" : 4096,
+      "physical_v_head_rows" : 4096,
+      "position_policy" : "fixed visible length; layout varies per launch",
+      "preflight_verified_all" : true,
+      "quantile_method" : "nearest_rank",
+      "seed" : 4242,
+      "selection_changes" : 0,
+      "selection_upload_timed" : false,
+      "selections_fnv1a64" : "76ce5fdc7b5ed0fd",
+      "source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+      "source_unique_address_bytes" : 2228224,
+      "tail" : 0,
+      "timing_scope" : "CUDA event interval including persistent kernel framework",
+      "verified_output_signature_changes" : 0,
+      "visible" : 8000,
+      "warmup_launches" : 10
+   }
+}

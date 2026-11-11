@@ -1,0 +1,112 @@
+{
+   "metrics" : {
+      "achieved_occupancy" : {
+         "avg" : {
+            "raw" : "0.124980",
+            "unit" : "ratio",
+            "value" : 0.12498
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "0.124981",
+            "unit" : "ratio",
+            "value" : 0.124981
+         },
+         "min" : {
+            "raw" : "0.124979",
+            "unit" : "ratio",
+            "value" : 0.124979
+         }
+      },
+      "eligible_warps_per_cycle" : {
+         "avg" : {
+            "raw" : "0.142686",
+            "unit" : "warps_per_cycle",
+            "value" : 0.142686
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "0.152190",
+            "unit" : "warps_per_cycle",
+            "value" : 0.15219
+         },
+         "min" : {
+            "raw" : "0.136806",
+            "unit" : "warps_per_cycle",
+            "value" : 0.136806
+         }
+      }
+   },
+   "raw_profiler" : {
+      "bytes" : 748,
+      "path" : "/tmp/flash-issue10-after7-9VF51acq/nv775-even/execution-host0.nvprof.csv",
+      "sha256" : "05793ea6f27c80044e77350a78f871cc40559fa29005a2d8646a9464016f46c0"
+   },
+   "raw_workload" : {
+      "bytes" : 274,
+      "path" : "/tmp/flash-issue10-after7-9VF51acq/nv775-even/execution-host0.workload.csv",
+      "sha256" : "2214a7986a4c3eb910b59097580aa83cb75bbe4f6a73ef203ea4a5bf71a7179c"
+   },
+   "verified_rows" : [
+      {
+         "iteration" : 0,
+         "selection" : "a11dbee0f84d0cb3",
+         "verified_output" : "ec99041ce044cb5a"
+      },
+      {
+         "iteration" : 1,
+         "selection" : "a11dbee0f84d0cb3",
+         "verified_output" : "ec99041ce044cb5a"
+      },
+      {
+         "iteration" : 2,
+         "selection" : "a11dbee0f84d0cb3",
+         "verified_output" : "ec99041ce044cb5a"
+      },
+      {
+         "iteration" : 3,
+         "selection" : "a11dbee0f84d0cb3",
+         "verified_output" : "ec99041ce044cb5a"
+      }
+   ],
+   "workload" : {
+      "budget" : 512,
+      "cache_fnv1a64" : "09b60db5a807bd65",
+      "destination_unique_address_bytes" : 8388608,
+      "gpu_us_max" : 40083.648681641,
+      "gpu_us_mean" : 34718.808174133,
+      "gpu_us_min" : 31086.719512939,
+      "gpu_us_p50" : 32642.36831665,
+      "gpu_us_p90" : 40083.648681641,
+      "gpu_us_p99" : 40083.648681641,
+      "gpu_us_stddev" : 3405.998592356,
+      "hardware_counter_gate" : "not_run",
+      "host_kv" : 0,
+      "iterations" : 4,
+      "logical_keys" : 2048,
+      "measured_hardware_transaction_bytes" : null,
+      "nv" : 775,
+      "pattern" : "even",
+      "physical_gathered_slots" : 2048,
+      "physical_k_head_rows" : 4096,
+      "physical_v_head_rows" : 4096,
+      "position_policy" : "fixed visible length; layout varies per launch",
+      "preflight_verified_all" : true,
+      "quantile_method" : "nearest_rank",
+      "seed" : 4242,
+      "selection_changes" : 0,
+      "selection_upload_timed" : false,
+      "selections_fnv1a64" : "ed564fb58f9ccd3d",
+      "source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+      "source_unique_address_bytes" : 2228224,
+      "tail" : 0,
+      "timing_scope" : "CUDA event interval including persistent kernel framework",
+      "verified_output_signature_changes" : 0,
+      "visible" : 3100,
+      "warmup_launches" : 10
+   }
+}

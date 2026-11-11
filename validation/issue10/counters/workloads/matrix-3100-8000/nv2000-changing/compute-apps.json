@@ -1,0 +1,13 @@
+{
+   "argv" : [
+      "timeout",
+      "--kill-after=10s",
+      "30s",
+      "nvidia-smi",
+      "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory",
+      "--format=csv,noheader"
+   ],
+   "exit" : 0,
+   "stderr" : "",
+   "stdout" : "GPU-1783441e-9a1a-684e-82bb-14d24e6e0c8f, 974018, ./hold, 7177 MiB\nGPU-1783441e-9a1a-684e-82bb-14d24e6e0c8f, 3575268, ./flashcore, 200 MiB\nGPU-ccb8b3a3-f45d-8962-215b-c2b140e4bb28, 974061, ./hold, 6160 MiB\nGPU-ccb8b3a3-f45d-8962-215b-c2b140e4bb28, 3575268, ./flashcore, 1218 MiB\nGPU-c767d250-4454-d181-d648-8706b5f2fb64, 974103, ./fence, 2110 MiB\nGPU-c767d250-4454-d181-d648-8706b5f2fb64, 988060, ./hold, 5116 MiB\nGPU-c767d250-4454-d181-d648-8706b5f2fb64, 3575268, ./flashcore, 129 MiB\nGPU-5f06269e-5fe2-ff52-1a0d-b0d0c0c763a6, 988067, ./hold, 7224 MiB\nGPU-5f06269e-5fe2-ff52-1a0d-b0d0c0c763a6, 3575268, ./flashcore, 166 MiB\nGPU-906e6ede-6cde-d0dd-5110-d1bb8bf2458d, 988072, ./hold, 6172 MiB\nGPU-906e6ede-6cde-d0dd-5110-d1bb8bf2458d, 3575268, ./flashcore, 1218 MiB\nGPU-1d9dc086-8739-66c2-fa98-f5bf3ef2b2d4, 988080, ./hold, 6179 MiB\nGPU-1d9dc086-8739-66c2-fa98-f5bf3ef2b2d4, 3575268, ./flashcore, 1218 MiB\n"
+}

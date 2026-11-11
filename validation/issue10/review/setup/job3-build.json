@@ -1,0 +1,30 @@
+{
+  "engine_source": "bac5b88b665ee6973488dd40b363ded3134136f6",
+  "core_source": "resident core executable; source revision not embedded; binary SHA256 recorded",
+  "command": "make CUDA=/opt/cuda PTXAS11=/opt/cuda-11.4/bin/ptxas die.cubin die_trace.cubin libengine.so",
+  "compiler": {
+    "argv": [
+      "cc",
+      "--version"
+    ],
+    "exit": 0,
+    "stdout": "cc (GCC) 16.2.1 20260810\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n",
+    "stderr": ""
+  },
+  "assembler": {
+    "argv": [
+      "/opt/cuda-11.4/bin/ptxas",
+      "--version"
+    ],
+    "exit": 0,
+    "stdout": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2021 NVIDIA Corporation\nBuilt on Mon_Oct_11_21:26:15_PDT_2021\nCuda compilation tools, release 11.4, V11.4.152\nBuild cuda_11.4.r11.4/compiler.30521435_0\n",
+    "stderr": ""
+  },
+  "flags": "-std=gnu99 -O2 -ffp-contract=off -Wall -fPIC -shared",
+  "original_checkpoint": "Qwen/Qwen3.8-Flash-Next @ de4b8e4d43b917e7706784d8bb445c9af86a3540",
+  "gguf": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF @ ed59f92082b1e93c0e96d60a8b11aab089b52f09",
+  "conversion_revision": null,
+  "ple": "disk, offset192, same NFS shard; warmup/repetitions; storage cache not flushed",
+  "authoritative": false,
+  "note": "instrumented attribution; shared holders, resident VRAM core plus private host core; trace overhead measured separately"
+}

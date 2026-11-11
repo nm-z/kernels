@@ -1,0 +1,9 @@
+2026-10-18T05:52:34Z
+    PID COMMAND          TYPE MODE   PATH
+1003211 flock           FLOCK WRITE* /tmp/flash-sass-engine-validation.lock
+1002369 flock           FLOCK WRITE* /tmp/flash-sass-engine-validation.lock
+1002069 flock           FLOCK WRITE* /tmp/flash-sass-engine-validation.lock
+ 970242 bash            FLOCK WRITE  /tmp/flash-sass-engine-validation.lock
+    PID    PPID     ELAPSED COMMAND         COMMAND
+ 970242  970240       06:33 bash            bash kern/sequence_validate.sh /tmp/flash-issue7-a140799-9zQ4QV24/evidence/queued-20261018T054601Z-vram-q1-b1 /mnt/sentry-nfs/flash-next-q2/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf /tmp/hold-h0.manifest /tmp/hold-h1.manifest 
+/tmp/flash-issue7-a140799-9zQ4QV24

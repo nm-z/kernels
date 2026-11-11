@@ -1,0 +1,17 @@
+{
+  "scope": "Original executed orchestration source remains pinned in Git history; current analysis uses Perl",
+  "runners": [
+    {
+      "path": "validation/issue10/review/setup/bench_pair_job3.py",
+      "bytes": 4327,
+      "sha256": "6c9ae192ead8d4bfc26921ba5b0132fad158dba7b356512e73419243ba5c859e",
+      "historical_source_url": "https://github.com/nm-z/flash-sass/blob/0a24e35861e01339a43215b1e40f308c8b6583d6/validation/issue10/review/setup/bench_pair_job3.py"
+    },
+    {
+      "path": "validation/issue10/review/setup/bench_pair_job4.py",
+      "bytes": 4444,
+      "sha256": "28fe28362693305ba1e12685064c66d3dd2c5f78b1734f4eaa9de1587a071f03",
+      "historical_source_url": "https://github.com/nm-z/flash-sass/blob/0a24e35861e01339a43215b1e40f308c8b6583d6/validation/issue10/review/setup/bench_pair_job4.py"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "schema": "flash.issue10.counter-workload.v1",
+  "gpu_uuid": "GPU-431371bd-b482-96b2-4b70-04f83c6d075b",
+  "profiler": "/home/nate/claude/pr38-profiler/usr/local/cuda-11.4/bin/nvprof",
+  "binary": "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench",
+  "cubin": "/tmp/flash-resolve-issue16-20261017/kern/die.cubin",
+  "expected_source_revision": "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+  "nv": 2000,
+  "tail": 0,
+  "iterations": 4,
+  "pattern": "clustered",
+  "seed": 4242,
+  "source_files": [
+    "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench.c",
+    "/tmp/flash-resolve-issue16-20261017/kern/qsa_test.c",
+    "/tmp/flash-resolve-issue16-20261017/ref/qsa.c",
+    "/tmp/flash-resolve-issue16-20261017/ref/attn.c",
+    "/tmp/flash-resolve-issue16-20261017/ref/fmath.c"
+  ]
+}

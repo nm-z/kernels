@@ -1,0 +1,35 @@
+Package: cuda-cupti-11-4
+Version: 11.4.120-1
+Architecture: amd64
+Priority: optional
+Section: multiverse/devel
+Source: cuda-cupti
+Maintainer: cudatools <cudatools@nvidia.com>
+Installed-Size: 71903
+Provides: libcupti.so.11.4 (= 11.4.120)
+Depends: cuda-cudart-dev-11-4, cuda-nvcc-11-4
+Filename: ./cuda-cupti-11-4_11.4.120-1_amd64.deb
+Size: 12926736
+MD5sum: e5d0f9b0502a4b9860eac70018a39655
+SHA1: 9398e94feca84904af7cfedf222f23444738fc0c
+SHA256: 128102d0b61ec66fd374abf510fc6ab70592d9f72c29810094f44ca521b79075
+SHA512: c701d008b8afbf96d249f4ff45a4ee2ce6ae841828d5deff995beb7a093a262412327327fee1cdee8db43011aa8acc8ea2ae15b70936af72eb538bf119939fa8
+Description: CUDA profiling tools runtime libs.
+ Provides libraries to enable third party tools using GPU profiling APIs.
+Package: cuda-nvprof-11-4
+Version: 11.4.120-1
+Architecture: amd64
+Priority: optional
+Section: multiverse/devel
+Source: cuda-nvprof
+Maintainer: cudatools <cudatools@nvidia.com>
+Installed-Size: 10163
+Filename: ./cuda-nvprof-11-4_11.4.120-1_amd64.deb
+Size: 1947510
+MD5sum: b093b479d275cfb631ea89f103d5fc0e
+SHA1: 5508a3e3b03286beca6967961cff744eea101034
+SHA256: 1f1b3c76f2ecdfc75b9d88d9a12f9a7aaad9d142e2212aeb1f463c7cc732444d
+SHA512: df78374fb6510fb2697ca316e55bdfbdd75e9c4a4be279cda021a4307229919825d736427c1ee7065e1b96091417146ca452655922e34885f19b41b08db6d72a
+Description: CUDA Profiler tools
+ Tool for collecting and viewing CUDA application profiling data from
+ the command-line.

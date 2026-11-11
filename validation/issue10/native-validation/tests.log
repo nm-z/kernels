@@ -1,0 +1,83 @@
+kern/decode_forensics_test.pl .. 
+ok 1 - complete archived matrix has 60 traced, 20 untraced and 360 die records
+ok 2 - all die arithmetic partitions reconcile
+ok 3 - regenerates independent saved traced-summary.json
+ok 4 - regenerates independent saved untraced-summary.json
+ok 5 - regenerates independent saved matched-phase-deltas.json
+ok 6 - median is over the five run means
+ok 7 - p95 uses nearest rank over 640 token intervals
+ok 8 - selected-key count uses zero-based position, four-token blocks, cap and tail
+ok 9 - rejects missing traced run
+ok 10 - rejects missing untraced run
+ok 11 - rejects duplicated run replacing another pair
+ok 12 - rejects unrequested depth
+ok 13 - rejects incomplete run
+ok 14 - rejects a sixth pair
+ok 15 - rejects different block budget
+ok 16 - rejects unmatched PLE configuration
+ok 17 - rejects mismatched source identity
+ok 18 - rejects truthy string instead of JSON trace flag
+ok 19 - rejects truncated generated IDs
+ok 20 - rejects changed paired continuation
+ok 21 - rejects early stop
+ok 22 - rejects incorrect prefix reuse
+ok 23 - rejects raw completion inconsistent with parsed fields
+ok 24 - rejects altered interval
+ok 25 - rejects repeated arrival timestamp
+ok 26 - rejects incorrect request TTFT
+ok 27 - rejects observations outside request
+ok 28 - rejects nonfinite timing before tolerance comparison
+ok 29 - rejects stale embedded summary
+ok 30 - rejects missing larger-context capacity record
+ok 31 - rejects missing all-die frame
+ok 32 - rejects repeated all-die frame
+ok 33 - rejects missing die
+ok 34 - rejects repeated die
+ok 35 - rejects truncated trace
+ok 36 - rejects mixed requests
+ok 37 - binds complete phase frame to its run projection
+ok 38 - rejects missing phase component
+ok 39 - rejects negative phase time
+ok 40 - rejects nonfinite phase time
+ok 41 - rejects unreconciled duration
+ok 42 - rejects changed opcode count
+ok 43 - rejects time attributed to zero executions
+ok 44 - rejects fractional execution count
+ok 45 - rejects opcode/component disagreement
+ok 46 - rejects wrong selected-key count
+ok 47 - rejects shifted interior selected-key position
+ok 48 - rejects nonfinite recorded residual
+ok 49 - rejects undefined/nonfinite/boolean numeric input
+ok 50 - rejects undefined/nonfinite/boolean numeric input
+ok 51 - rejects undefined/nonfinite/boolean numeric input
+ok 52 - rejects undefined/nonfinite/boolean numeric input
+ok 53 - rejects undefined/nonfinite/boolean numeric input
+ok 54 - rejects fractional integer
+ok 55 - rejects different reference schema
+ok 56 - checks all required artifact identities
+ok 57 - requires reference summary identity
+ok 58 - rejects parent traversal in identity manifest
+ok 59 - binds identities to the required logical filenames
+ok 60 - rejects changed bytes even at identical size
+ok 61 - corrupt archive cannot publish a PASS directory
+ok 62 - failed validation leaves no output directory
+ok 63 - native CLI archive mode completes
+ok 64 - successful replay publishes its scoped status
+ok 65 - replay binds the input identity manifest
+ok 66 - replay identifies both source files
+ok 67 - CLI output agrees with saved traced-summary.json
+ok 68 - CLI output agrees with saved untraced-summary.json
+ok 69 - CLI output agrees with saved matched-phase-deltas.json
+ok 70 - refuses overwriting an existing replay
+ok 71 - refuses mixed archive and raw capture inputs
+ok 72 - rejects gzip without a complete trailer
+ok 73 - rejects trailing bytes after gzip
+ok 74 - rejects trailing data after a valid JSON prefix
+ok 75 - coordinated corruption has internally agreeing projections
+ok 76 - independent reference rejects internally consistent altered timings
+ok 77 - reference mismatch publishes no PASS directory
+1..77
+ok
+All tests successful.
+Files=1, Tests=77, 16 wallclock secs ( 0.02 usr  0.00 sys + 13.46 cusr  0.28 csys = 13.76 CPU)
+Result: PASS

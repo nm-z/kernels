@@ -1,0 +1,152 @@
+{
+   "metrics" : {
+      "dram_read_bytes" : {
+         "avg" : {
+            "raw" : "4638650",
+            "unit" : "bytes",
+            "value" : 4638650
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "4718208",
+            "unit" : "bytes",
+            "value" : 4718208
+         },
+         "min" : {
+            "raw" : "4557248",
+            "unit" : "bytes",
+            "value" : 4557248
+         }
+      },
+      "dram_write_bytes" : {
+         "avg" : {
+            "raw" : "14895372",
+            "unit" : "bytes",
+            "value" : 14895372
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "15508896",
+            "unit" : "bytes",
+            "value" : 15508896
+         },
+         "min" : {
+            "raw" : "14762272",
+            "unit" : "bytes",
+            "value" : 14762272
+         }
+      },
+      "sysmem_read_bytes" : {
+         "avg" : {
+            "raw" : "2359296",
+            "unit" : "bytes",
+            "value" : 2359296
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "2359296",
+            "unit" : "bytes",
+            "value" : 2359296
+         },
+         "min" : {
+            "raw" : "2359296",
+            "unit" : "bytes",
+            "value" : 2359296
+         }
+      },
+      "sysmem_write_bytes" : {
+         "avg" : {
+            "raw" : "672",
+            "unit" : "bytes",
+            "value" : 672
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "672",
+            "unit" : "bytes",
+            "value" : 672
+         },
+         "min" : {
+            "raw" : "672",
+            "unit" : "bytes",
+            "value" : 672
+         }
+      }
+   },
+   "raw_profiler" : {
+      "bytes" : 1058,
+      "path" : "/tmp/flash-issue10-after7-9VF51acq/nv775-clustered/traffic-host1.nvprof.csv",
+      "sha256" : "40d425713b0314aa49f70fac7b04c37456117a80b1966f3c94a1d7da9d939b99"
+   },
+   "raw_workload" : {
+      "bytes" : 274,
+      "path" : "/tmp/flash-issue10-after7-9VF51acq/nv775-clustered/traffic-host1.workload.csv",
+      "sha256" : "e561a72e893fddac76ab96c43bf15ae4ce667f8731bb031c51cc3b85b39a1ddd"
+   },
+   "verified_rows" : [
+      {
+         "iteration" : 0,
+         "selection" : "e2a5095f58d6ea03",
+         "verified_output" : "3e4bbacb3ce6a897"
+      },
+      {
+         "iteration" : 1,
+         "selection" : "e2a5095f58d6ea03",
+         "verified_output" : "3e4bbacb3ce6a897"
+      },
+      {
+         "iteration" : 2,
+         "selection" : "e2a5095f58d6ea03",
+         "verified_output" : "3e4bbacb3ce6a897"
+      },
+      {
+         "iteration" : 3,
+         "selection" : "e2a5095f58d6ea03",
+         "verified_output" : "3e4bbacb3ce6a897"
+      }
+   ],
+   "workload" : {
+      "budget" : 512,
+      "cache_fnv1a64" : "09b60db5a807bd65",
+      "destination_unique_address_bytes" : 8388608,
+      "gpu_us_max" : 76843.650817871,
+      "gpu_us_mean" : 69914.784431458,
+      "gpu_us_min" : 62780.06362915,
+      "gpu_us_p50" : 64687.324523926,
+      "gpu_us_p90" : 76843.650817871,
+      "gpu_us_p99" : 76843.650817871,
+      "gpu_us_stddev" : 6240.205764829,
+      "hardware_counter_gate" : "not_run",
+      "host_kv" : 1,
+      "iterations" : 4,
+      "logical_keys" : 2048,
+      "measured_hardware_transaction_bytes" : null,
+      "nv" : 775,
+      "pattern" : "clustered",
+      "physical_gathered_slots" : 2048,
+      "physical_k_head_rows" : 4096,
+      "physical_v_head_rows" : 4096,
+      "position_policy" : "fixed visible length; layout varies per launch",
+      "preflight_verified_all" : true,
+      "quantile_method" : "nearest_rank",
+      "seed" : 4242,
+      "selection_changes" : 0,
+      "selection_upload_timed" : false,
+      "selections_fnv1a64" : "60eac2eb18452525",
+      "source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+      "source_unique_address_bytes" : 2228224,
+      "tail" : 0,
+      "timing_scope" : "CUDA event interval including persistent kernel framework",
+      "verified_output_signature_changes" : 0,
+      "visible" : 3100,
+      "warmup_launches" : 10
+   }
+}

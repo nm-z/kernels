@@ -1,0 +1,858 @@
+    PID     TID    PPID STAT     ELAPSED COMMAND
+      1       1       0 Ss    1-00:12:51 systemd
+      2       2       0 S     1-00:12:51 kthreadd
+      3       3       2 S     1-00:12:51 pool_workqueue_release
+      4       4       2 I<    1-00:12:51 kworker/R-rcu_gp
+      5       5       2 I<    1-00:12:51 kworker/R-sync_wq
+      6       6       2 I<    1-00:12:51 kworker/R-kvfree_rcu_reclaim
+      7       7       2 I<    1-00:12:51 kworker/R-slub_flushwq
+      8       8       2 I<    1-00:12:51 kworker/R-netns
+     10      10       2 I<    1-00:12:51 kworker/0:0H-events_highpri
+     13      13       2 I<    1-00:12:51 kworker/R-mm_percpu_wq
+     14      14       2 S     1-00:12:51 ksoftirqd/0
+     16      16       2 I     1-00:12:51 rcu_preempt
+     17      17       2 S     1-00:12:51 rcub/0
+     18      18       2 S     1-00:12:51 rcu_exp_par_gp_kthread_worker/0
+     19      19       2 S     1-00:12:51 rcu_exp_gp_kthread_worker
+     20      20       2 S     1-00:12:51 migration/0
+     21      21       2 S     1-00:12:51 idle_inject/0
+     22      22       2 S     1-00:12:51 cpuhp/0
+     23      23       2 S     1-00:12:51 cpuhp/1
+     24      24       2 S     1-00:12:51 idle_inject/1
+     25      25       2 S     1-00:12:51 migration/1
+     26      26       2 S     1-00:12:51 ksoftirqd/1
+     28      28       2 I<    1-00:12:51 kworker/1:0H-events_highpri
+     29      29       2 S     1-00:12:51 cpuhp/2
+     30      30       2 S     1-00:12:51 idle_inject/2
+     31      31       2 S     1-00:12:51 migration/2
+     32      32       2 S     1-00:12:51 ksoftirqd/2
+     34      34       2 I<    1-00:12:51 kworker/2:0H-events_highpri
+     35      35       2 S     1-00:12:51 cpuhp/3
+     36      36       2 S     1-00:12:51 idle_inject/3
+     37      37       2 S     1-00:12:51 migration/3
+     38      38       2 S     1-00:12:51 ksoftirqd/3
+     40      40       2 I<    1-00:12:51 kworker/3:0H-events_highpri
+     41      41       2 S     1-00:12:51 cpuhp/4
+     42      42       2 S     1-00:12:51 idle_inject/4
+     43      43       2 S     1-00:12:51 migration/4
+     44      44       2 S     1-00:12:51 ksoftirqd/4
+     46      46       2 I<    1-00:12:51 kworker/4:0H-events_highpri
+     47      47       2 S     1-00:12:51 cpuhp/5
+     48      48       2 S     1-00:12:51 idle_inject/5
+     49      49       2 S     1-00:12:51 migration/5
+     50      50       2 S     1-00:12:51 ksoftirqd/5
+     52      52       2 I<    1-00:12:51 kworker/5:0H-events_highpri
+     53      53       2 S     1-00:12:51 cpuhp/6
+     54      54       2 S     1-00:12:51 idle_inject/6
+     55      55       2 S     1-00:12:51 migration/6
+     56      56       2 S     1-00:12:51 ksoftirqd/6
+     58      58       2 I<    1-00:12:51 kworker/6:0H-events_highpri
+     59      59       2 S     1-00:12:51 cpuhp/7
+     60      60       2 S     1-00:12:51 idle_inject/7
+     61      61       2 S     1-00:12:51 migration/7
+     62      62       2 S     1-00:12:51 ksoftirqd/7
+     64      64       2 I<    1-00:12:51 kworker/7:0H-events_highpri
+     65      65       2 S     1-00:12:51 cpuhp/8
+     66      66       2 S     1-00:12:51 idle_inject/8
+     67      67       2 S     1-00:12:51 migration/8
+     68      68       2 S     1-00:12:51 ksoftirqd/8
+     70      70       2 I<    1-00:12:51 kworker/8:0H-events_highpri
+     71      71       2 S     1-00:12:51 cpuhp/9
+     72      72       2 S     1-00:12:51 idle_inject/9
+     73      73       2 S     1-00:12:51 migration/9
+     74      74       2 S     1-00:12:51 ksoftirqd/9
+     76      76       2 I<    1-00:12:51 kworker/9:0H-events_highpri
+     77      77       2 S     1-00:12:51 cpuhp/10
+     78      78       2 S     1-00:12:51 idle_inject/10
+     79      79       2 S     1-00:12:51 migration/10
+     80      80       2 S     1-00:12:51 ksoftirqd/10
+     82      82       2 I<    1-00:12:51 kworker/10:0H-events_highpri
+     83      83       2 S     1-00:12:51 cpuhp/11
+     84      84       2 S     1-00:12:51 idle_inject/11
+     85      85       2 S     1-00:12:51 migration/11
+     86      86       2 S     1-00:12:51 ksoftirqd/11
+     88      88       2 I<    1-00:12:51 kworker/11:0H-events_highpri
+     89      89       2 S     1-00:12:51 kdevtmpfs
+     90      90       2 I<    1-00:12:51 kworker/R-inet_frag_wq
+     91      91       2 I     1-00:12:51 rcu_tasks_kthread
+     92      92       2 I     1-00:12:51 rcu_tasks_rude_kthread
+     93      93       2 I     1-00:12:51 rcu_tasks_trace_kthread
+     94      94       2 S     1-00:12:51 kauditd
+     95      95       2 S     1-00:12:51 khungtaskd
+     96      96       2 S     1-00:12:51 oom_reaper
+     98      98       2 I<    1-00:12:51 kworker/R-writeback
+     99      99       2 S     1-00:12:51 kcompactd0
+    100     100       2 SN    1-00:12:51 ksmd
+    101     101       2 SN    1-00:12:51 khugepaged
+    102     102       2 I<    1-00:12:51 kworker/R-kblockd
+    103     103       2 I<    1-00:12:51 kworker/R-blkcg_punt_bio
+    104     104       2 I<    1-00:12:51 kworker/R-kintegrityd
+    105     105       2 S     1-00:12:51 irq/9-acpi
+    107     107       2 I<    1-00:12:51 kworker/R-tpm_dev_wq
+    108     108       2 I<    1-00:12:51 kworker/R-ata_sff
+    109     109       2 I<    1-00:12:51 kworker/R-edac-poller
+    110     110       2 I<    1-00:12:51 kworker/R-devfreq_wq
+    111     111       2 S     1-00:12:51 watchdogd
+    112     112       2 I<    1-00:12:51 kworker/R-quota_events_unbound
+    113     113       2 I<    1-00:12:51 kworker/0:1H-kblockd
+    115     115       2 S     1-00:12:51 kswapd0
+    116     116       2 I<    1-00:12:51 kworker/R-kthrotld
+    117     117       2 I<    1-00:12:51 kworker/R-acpi_thermal_pm
+    118     118       2 S     1-00:12:51 scsi_eh_0
+    119     119       2 I<    1-00:12:51 kworker/R-scsi_tmf_0
+    120     120       2 S     1-00:12:51 scsi_eh_1
+    121     121       2 I<    1-00:12:51 kworker/R-scsi_tmf_1
+    122     122       2 S     1-00:12:51 scsi_eh_2
+    123     123       2 I<    1-00:12:51 kworker/R-scsi_tmf_2
+    124     124       2 S     1-00:12:51 scsi_eh_3
+    125     125       2 I<    1-00:12:51 kworker/R-scsi_tmf_3
+    136     136       2 I<    1-00:12:51 kworker/R-mld
+    138     138       2 I<    1-00:12:51 kworker/2:1H-kblockd
+    139     139       2 I<    1-00:12:51 kworker/R-ipv6_addrconf
+    140     140       2 I<    1-00:12:51 kworker/R-kstrp
+    147     147       2 I<    1-00:12:50 kworker/R-zswap-shrink
+    148     148       2 I<    1-00:12:50 kworker/u49:0
+    153     153       2 I<    1-00:12:50 kworker/9:1H-kblockd
+    170     170       2 I<    1-00:12:49 kworker/11:1H-kblockd
+    171     171       2 I<    1-00:12:49 kworker/10:1H-kblockd
+    172     172       2 I<    1-00:12:49 kworker/3:1H-kblockd
+    173     173       2 I<    1-00:12:49 kworker/1:1H-kblockd
+    177     177       2 I<    1-00:12:49 kworker/7:1H-kblockd
+    181     181       2 I<    1-00:12:49 kworker/5:1H-kblockd
+    224     224       2 I<    1-00:12:49 kworker/4:1H-kblockd
+    225     225       2 I<    1-00:12:49 kworker/6:1H-kblockd
+    226     226       2 I<    1-00:12:49 kworker/8:1H-kblockd
+    250     250       2 S     1-00:12:48 jbd2/sdb3-8
+    251     251       2 I<    1-00:12:48 kworker/R-ext4-rsv-conversion
+    331     331       1 Ss    1-00:12:46 systemd-userdbd
+    335     335       2 S     1-00:12:46 nv_queue
+    336     336       2 S     1-00:12:46 nv_queue
+    344     344       2 S     1-00:12:45 psimon
+    347     347       1 Ssl   1-00:12:45 systemd-timesyn
+    347     353       1 Ssl   1-00:12:45 sd-resolve
+    352     352       1 Ss    1-00:12:45 systemd-udevd
+    354     354       2 S     1-00:12:45 psimon
+    356     356       2 S     1-00:12:45 UVM global queue
+    357     357       2 S     1-00:12:45 UVM deferred release queue
+    358     358       2 S     1-00:12:45 UVM Tools Event Queue
+    425     425       2 S     1-00:12:45 irq/42-mei_me
+    431     431       2 S     1-00:12:44 nvidia-modeset/kthread_q
+    432     432       2 S     1-00:12:44 nvidia-modeset/deferred_close_kthread_q
+    435     435       2 S     1-00:12:44 irq/44-nvidia
+    436     436       2 S     1-00:12:44 nvidia
+    437     437       2 S     1-00:12:44 nv_queue
+    492     492       1 Ss    1-00:12:44 dbus-broker-lau
+    497     497     492 S     1-00:12:44 dbus-broker
+    498     498       1 Ssl   1-00:12:44 NetworkManager
+    498     529       1 Ssl   1-00:12:44 gmain
+    498     531       1 Ssl   1-00:12:44 pool-spawner
+    498     532       1 Ssl   1-00:12:44 gdbus
+    499     499       1 Ss    1-00:12:44 avahi-daemon
+    500     500       1 Ssl   1-00:12:44 lms
+    500     534       1 Ssl   1-00:12:44 lms
+    500     535       1 Ssl   1-00:12:44 lms
+    500     536       1 Ssl   1-00:12:44 lms
+    500     537       1 Ssl   1-00:12:44 lms
+    500     538       1 Ssl   1-00:12:44 lms
+    500     539       1 Ssl   1-00:12:44 lms
+    500     540       1 Ssl   1-00:12:44 lms
+    500     541       1 Ssl   1-00:12:44 pool-spawner
+    500     542       1 Ssl   1-00:12:44 gmain
+    500     544       1 Ssl   1-00:12:44 lms
+    500     545       1 Ssl   1-00:12:44 gdbus
+    500     546       1 Ssl   1-00:12:44 lms
+    500     547       1 Ssl   1-00:12:44 lms
+    500     548       1 Ssl   1-00:12:44 lms
+    500     549       1 Ssl   1-00:12:44 lms
+    500     550       1 Ssl   1-00:12:44 lms
+    500     551       1 Ssl   1-00:12:44 lms
+    500     552       1 Ssl   1-00:12:44 lms
+    501     501       1 Ss    1-00:12:44 systemd-logind
+    530     530     499 S     1-00:12:44 avahi-daemon
+    565     565       1 Ss    1-00:12:43 sshd
+    576     576       1 Ss    1-00:12:43 systemd
+    578     578       1 Ssl   1-00:12:43 containerd
+    578     583       1 Ssl   1-00:12:43 containerd
+    578     584       1 Ssl   1-00:12:43 containerd
+    578     585       1 Ssl   1-00:12:43 containerd
+    578     586       1 Ssl   1-00:12:43 containerd
+    578     587       1 Ssl   1-00:12:43 containerd
+    578     590       1 Ssl   1-00:12:43 containerd
+    578     591       1 Ssl   1-00:12:43 containerd
+    578     592       1 Ssl   1-00:12:43 containerd
+    578     593       1 Ssl   1-00:12:43 containerd
+    578     594       1 Ssl   1-00:12:43 containerd
+    578     600       1 Ssl   1-00:12:42 containerd
+    578     601       1 Ssl   1-00:12:42 containerd
+    578     602       1 Ssl   1-00:12:42 containerd
+    578     643       1 Ssl   1-00:12:42 containerd
+    578     644       1 Ssl   1-00:12:42 containerd
+    578    1217       1 Ssl   1-00:12:32 containerd
+    578    1218       1 Ssl   1-00:12:32 containerd
+    582     582     576 S     1-00:12:43 (sd-pam)
+    604     604       2 S     1-00:12:42 irq/46-nvidia
+    605     605       2 S     1-00:12:42 nvidia
+    606     606       2 S     1-00:12:42 nv_queue
+    615     615     576 Ss    1-00:12:42 dbus-broker-lau
+    621     621     615 S     1-00:12:42 dbus-broker
+    622     622     576 Ssl   1-00:12:42 node-MainThread
+    622     698     576 Ssl   1-00:12:42 DelayedTaskSche
+    622     699     576 Ssl   1-00:12:42 node-V8Worker
+    622     700     576 Ssl   1-00:12:42 node-V8Worker
+    622     701     576 Ssl   1-00:12:42 node-V8Worker
+    622     702     576 Ssl   1-00:12:42 node-V8Worker
+    622     715     576 Ssl   1-00:12:41 SignalInspector
+    623     623     576 Ss    1-00:12:42 nmz-chat-gw
+    624     624     576 Ssl   1-00:12:42 pipewire
+    624     651     576 Ssl   1-00:12:42 module-rt
+    624     658     576 Ssl   1-00:12:42 data-loop.0
+    625     625     576 Ss    1-00:12:42 bash
+    626     626     576 Ssl   1-00:12:42 wireplumber
+    626     653     576 Ssl   1-00:12:42 module-rt
+    626     656     576 Ssl   1-00:12:42 gmain
+    626     661     576 Ssl   1-00:12:42 pool-spawner
+    626     663     576 Ssl   1-00:12:42 data-loop.0
+    626     673     576 Ssl   1-00:12:42 gdbus
+    627     627     576 Ssl   1-00:12:42 pipewire-pulse
+    627     652     576 Ssl   1-00:12:42 module-rt
+    627     657     576 Ssl   1-00:12:42 data-loop.0
+    628     628     576 SNsl  1-00:12:42 llama-server
+    628     684     576 SNsl  1-00:12:42 llama-server
+    628     685     576 SNsl  1-00:12:42 llama-server
+    628     686     576 SNsl  1-00:12:42 llama-server
+    628     687     576 SNsl  1-00:12:42 llama-server
+    628     688     576 SNsl  1-00:12:42 llama-server
+    628     689     576 SNsl  1-00:12:42 llama-server
+    628     690     576 SNsl  1-00:12:42 llama-server
+    628     691     576 SNsl  1-00:12:42 llama-server
+    628     692     576 SNsl  1-00:12:42 llama-server
+    628     693     576 SNsl  1-00:12:42 llama-server
+    628     694     576 SNsl  1-00:12:42 llama-server
+    628     695     576 SNsl  1-00:12:42 llama-server
+    628     696     576 SNsl  1-00:12:42 llama-server
+    628     697     576 SNsl  1-00:12:42 llama-server
+    628    6734     576 SNsl  1-00:11:21 llama-server
+    628    6735     576 SNsl  1-00:11:21 llama-server
+    628    6736     576 SNsl  1-00:11:21 llama-server
+    628    6805     576 SNsl  1-00:11:20 llama-server
+    631     631     576 SNs   1-00:12:42 socat
+    632     632     576 SNs   1-00:12:42 socat
+    655     655       1 SNsl  1-00:12:42 rtkit-daemon
+    655     659       1 Ssl   1-00:12:42 rtkit-daemon
+    655     660       1 SNsl  1-00:12:42 rtkit-daemon
+    662     662       1 Ssl   1-00:12:42 polkitd
+    662     669       1 Ssl   1-00:12:42 gmain
+    662     670       1 Ssl   1-00:12:42 pool-spawner
+    662     671       1 Ssl   1-00:12:42 gdbus
+    738     738       2 S     1-00:12:40 irq/47-nvidia
+    739     739       2 S     1-00:12:40 nvidia
+    740     740       2 S     1-00:12:40 nv_queue
+    749     749       1 Ssl   1-00:12:40 cloudflared
+    749     760       1 Ssl   1-00:12:40 cloudflared
+    749     761       1 Ssl   1-00:12:40 cloudflared
+    749     762       1 Ssl   1-00:12:40 cloudflared
+    749     763       1 Ssl   1-00:12:40 cloudflared
+    749     766       1 Ssl   1-00:12:40 cloudflared
+    749     781       1 Ssl   1-00:12:39 cloudflared
+    749     833       1 Ssl   1-00:12:37 cloudflared
+    749     834       1 Ssl   1-00:12:37 cloudflared
+    749     835       1 Ssl   1-00:12:37 cloudflared
+    749     836       1 Ssl   1-00:12:37 cloudflared
+    749     837       1 Ssl   1-00:12:37 cloudflared
+    749     946       1 Ssl   1-00:12:34 cloudflared
+    749     947       1 Ssl   1-00:12:34 cloudflared
+    749    2483       1 Ssl   1-00:12:08 cloudflared
+    749    2484       1 Ssl   1-00:12:08 cloudflared
+    749  104445       1 Ssl     23:54:48 cloudflared
+    750     750       1 Ssl   1-00:12:40 dockerd
+    750     770       1 Ssl   1-00:12:39 dockerd
+    750     771       1 Ssl   1-00:12:39 dockerd
+    750     772       1 Ssl   1-00:12:39 dockerd
+    750     773       1 Ssl   1-00:12:39 dockerd
+    750     774       1 Ssl   1-00:12:39 dockerd
+    750     882       1 Ssl   1-00:12:36 dockerd
+    750     883       1 Ssl   1-00:12:36 dockerd
+    750     896       1 Ssl   1-00:12:35 dockerd
+    750     897       1 Ssl   1-00:12:35 dockerd
+    750     898       1 Ssl   1-00:12:35 dockerd
+    750     899       1 Ssl   1-00:12:35 dockerd
+    750     927       1 Ssl   1-00:12:34 dockerd
+    750     928       1 Ssl   1-00:12:34 dockerd
+    750     929       1 Ssl   1-00:12:34 dockerd
+    750     930       1 Ssl   1-00:12:34 dockerd
+    750     931       1 Ssl   1-00:12:34 dockerd
+    750    1367       1 Ssl   1-00:12:30 dockerd
+    750    1368       1 Ssl   1-00:12:30 dockerd
+    750    1369       1 Ssl   1-00:12:30 dockerd
+    751     751       1 Ssl   1-00:12:40 ollama
+    751     764       1 Ssl   1-00:12:40 ollama
+    751     765       1 Ssl   1-00:12:40 ollama
+    751     767       1 Ssl   1-00:12:40 ollama
+    751     768       1 Ssl   1-00:12:40 ollama
+    751     769       1 Ssl   1-00:12:40 ollama
+    751     786       1 Ssl   1-00:12:38 ollama
+    751     787       1 Ssl   1-00:12:38 ollama
+    751     788       1 Ssl   1-00:12:38 ollama
+    751     789       1 Ssl   1-00:12:38 ollama
+    751     790       1 Ssl   1-00:12:38 ollama
+    751     791       1 Ssl   1-00:12:38 ollama
+    751     812       1 Ssl   1-00:12:37 ollama
+    751     813       1 Ssl   1-00:12:37 ollama
+    751     814       1 Ssl   1-00:12:37 ollama
+    751     815       1 Ssl   1-00:12:37 ollama
+    751     816       1 Ssl   1-00:12:37 ollama
+    783     783       2 S     1-00:12:38 irq/49-nvidia
+    784     784       2 S     1-00:12:38 nvidia
+    785     785       2 S     1-00:12:38 nv_queue
+    802     802       2 S     1-00:12:38 jbd2/sda3-8
+    803     803       2 I<    1-00:12:38 kworker/R-ext4-rsv-conversion
+    806     806     565 Ss    1-00:12:37 sshd-session
+    807     807     565 Ss    1-00:12:37 sshd-session
+    831     831     565 Ss    1-00:12:37 sshd-session
+    857     857       2 S     1-00:12:36 irq/50-nvidia
+    858     858       2 S     1-00:12:36 nvidia
+    859     859       2 S     1-00:12:36 nv_queue
+    863     863     806 S     1-00:12:36 sshd-session
+    871     871     807 S     1-00:12:36 sshd-session
+    878     878     831 S     1-00:12:36 sshd-session
+    966     966     565 Ss    1-00:12:34 sshd-session
+    973     973     966 S     1-00:12:34 sshd-session
+   1230    1230       1 Sl    1-00:12:32 containerd-shim
+   1230    1236       1 Sl    1-00:12:32 containerd-shim
+   1230    1237       1 Sl    1-00:12:32 containerd-shim
+   1230    1238       1 Sl    1-00:12:32 containerd-shim
+   1230    1239       1 Sl    1-00:12:32 containerd-shim
+   1230    1243       1 Sl    1-00:12:32 containerd-shim
+   1230    1244       1 Sl    1-00:12:32 containerd-shim
+   1230    1245       1 Sl    1-00:12:32 containerd-shim
+   1230    1247       1 Sl    1-00:12:32 containerd-shim
+   1230    1248       1 Sl    1-00:12:32 containerd-shim
+   1230 1455912       1 Sl      23:09:32 containerd-shim
+   1231    1231       1 Sl    1-00:12:32 containerd-shim
+   1231    1232       1 Sl    1-00:12:32 containerd-shim
+   1231    1233       1 Sl    1-00:12:32 containerd-shim
+   1231    1234       1 Sl    1-00:12:32 containerd-shim
+   1231    1235       1 Sl    1-00:12:32 containerd-shim
+   1231    1240       1 Sl    1-00:12:32 containerd-shim
+   1231    1241       1 Sl    1-00:12:32 containerd-shim
+   1231    1242       1 Sl    1-00:12:32 containerd-shim
+   1231    1246       1 Sl    1-00:12:32 containerd-shim
+   1231    1251       1 Sl    1-00:12:32 containerd-shim
+   1231    1256       1 Sl    1-00:12:32 containerd-shim
+   1278    1278    1230 Ssl   1-00:12:31 mlflow
+   1278    1559    1230 Ssl   1-00:12:25 mlflow
+   1278    1560    1230 Ssl   1-00:12:25 mlflow
+   1278    1561    1230 Ssl   1-00:12:25 mlflow
+   1278    1562    1230 Ssl   1-00:12:25 mlflow
+   1278    1563    1230 Ssl   1-00:12:25 mlflow
+   1278    1564    1230 Ssl   1-00:12:25 mlflow
+   1278    1565    1230 Ssl   1-00:12:25 mlflow
+   1278    1566    1230 Ssl   1-00:12:25 mlflow
+   1278    1567    1230 Ssl   1-00:12:25 mlflow
+   1278    1568    1230 Ssl   1-00:12:25 mlflow
+   1278    1569    1230 Ssl   1-00:12:25 mlflow
+   1278    1580    1230 Ssl   1-00:12:23 jemalloc_bg_thd
+   1278    2973    1230 Ssl   1-00:12:02 mlflow
+   1279    1279    1231 Ss    1-00:12:31 nginx
+   1308    1308     750 Sl    1-00:12:31 docker-proxy
+   1308    1314     750 Sl    1-00:12:31 docker-proxy
+   1308    1315     750 Sl    1-00:12:31 docker-proxy
+   1308    1316     750 Sl    1-00:12:31 docker-proxy
+   1308    1317     750 Sl    1-00:12:31 docker-proxy
+   1308    1318     750 Sl    1-00:12:31 docker-proxy
+   1308    1319     750 Sl    1-00:12:31 docker-proxy
+   1308    2354     750 Sl    1-00:12:09 docker-proxy
+   1308   97139     750 Sl      23:56:05 docker-proxy
+   1308   97140     750 Sl      23:56:05 docker-proxy
+   1308   97141     750 Sl      23:56:05 docker-proxy
+   1308   97142     750 Sl      23:56:05 docker-proxy
+   1308   97143     750 Sl      23:56:05 docker-proxy
+   1308   97144     750 Sl      23:56:05 docker-proxy
+   1355    1355    1279 S     1-00:12:31 nginx
+   1356    1356    1279 S     1-00:12:31 nginx
+   1357    1357    1279 S     1-00:12:31 nginx
+   1358    1358    1279 S     1-00:12:31 nginx
+   1359    1359    1279 S     1-00:12:31 nginx
+   1360    1360    1279 S     1-00:12:31 nginx
+   1361    1361    1279 S     1-00:12:31 nginx
+   1362    1362    1279 S     1-00:12:31 nginx
+   1363    1363    1279 S     1-00:12:31 nginx
+   1364    1364    1279 S     1-00:12:31 nginx
+   1365    1365    1279 S     1-00:12:31 nginx
+   1366    1366    1279 S     1-00:12:31 nginx
+   1471    1471       1 Sl    1-00:12:28 codex
+   1471    1475       1 Sl    1-00:12:28 codex-main
+   1471    1476       1 Sl    1-00:12:28 tokio-rt-worker
+   1471    1477       1 Sl    1-00:12:28 tokio-rt-worker
+   1471    1478       1 Sl    1-00:12:28 tokio-rt-worker
+   1471    1479       1 Sl    1-00:12:28 tokio-rt-worker
+   1471    1480       1 Sl    1-00:12:28 tokio-rt-worker
+   1471    1481       1 Sl    1-00:12:28 tokio-rt-worker
+   1471    1482       1 Sl    1-00:12:28 tokio-rt-worker
+   1471    1484       1 Sl    1-00:12:28 tokio-rt-worker
+   1471    1485       1 Sl    1-00:12:28 tokio-rt-worker
+   1471    1487       1 Sl    1-00:12:28 tokio-rt-worker
+   1471    1490       1 Sl    1-00:12:28 tokio-rt-worker
+   1471    1492       1 Sl    1-00:12:28 tokio-rt-worker
+   1471    1730       1 Sl    1-00:12:18 sqlx-sqlite-wor
+   1471    1811       1 Sl    1-00:12:17 notify-rs inoti
+   1471    1813       1 Sl    1-00:12:17 notify-rs inoti
+   1471    2488       1 Sl    1-00:12:08 codex-child-rea
+   1471 3782271       1 Sl      04:19:39 tokio-rt-worker
+   1471 3782689       1 Sl      04:19:34 tokio-rt-worker
+   1471 3782702       1 Sl      04:19:34 tokio-rt-worker
+   1471 4155770       1 Sl      03:17:23 tokio-rt-worker
+   1471 4155771       1 Sl      03:17:23 tokio-rt-worker
+   1471  520741       1 Sl      01:51:20 tokio-rt-worker
+   1471 1074489       1 Sl         12:18 sqlx-sqlite-wor
+   1488    1488       2 S     1-00:12:28 irq/51-nvidia
+   1489    1489       2 S     1-00:12:28 nvidia
+   1491    1491       2 S     1-00:12:28 nv_queue
+   1686    1686       2 S     1-00:12:18 irq/52-nvidia
+   1687    1687       2 S     1-00:12:18 nvidia
+   1688    1688       2 S     1-00:12:18 nv_queue
+   1851    1851       2 S     1-00:12:16 irq/53-nvidia
+   1852    1852       2 S     1-00:12:16 nvidia
+   1853    1853       2 S     1-00:12:16 nv_queue
+   1877    1877       1 Ssl   1-00:12:13 plasmalogin
+   1877    1956       1 Ssl   1-00:12:12 QDBusConnection
+   1947    1947       2 I<    1-00:12:12 kworker/R-rpciod
+   1948    1948       2 I<    1-00:12:12 kworker/R-xprtiod
+   1960    1960       2 I<    1-00:12:12 kworker/R-nfsiod
+   1982    1982    1877 S     1-00:12:12 plasmalogin-hel
+   2003    2003       1 Ss    1-00:12:12 rpcbind
+   2009    2009       1 Ss    1-00:12:12 systemd
+   2011    2011    2009 S     1-00:12:12 (sd-pam)
+   2017    2017       1 Ss    1-00:12:12 rpc.statd
+   2151    2151    1982 Ssl+  1-00:12:11 startplasma-log
+   2151    2239    1982 Ssl+  1-00:12:10 QDBusConnection
+   2154    2154       2 I     1-00:12:11 lockd
+   2262    2262    2009 Ss    1-00:12:10 dbus-broker-lau
+   2267    2267    2262 S     1-00:12:10 dbus-broker
+   3013    3013    1278 S     1-00:12:02 python3.11
+   3014    3014    1278 Sl    1-00:12:02 python3.11
+   3014    3088    1278 Sl    1-00:12:01 python3.11
+   3014    3089    1278 Sl    1-00:12:01 python3.11
+   3014    3090    1278 Sl    1-00:12:01 python3.11
+   3014    3091    1278 Sl    1-00:12:01 python3.11
+   3014    3092    1278 Sl    1-00:12:01 python3.11
+   3014    3093    1278 Sl    1-00:12:01 python3.11
+   3014    3094    1278 Sl    1-00:12:01 python3.11
+   3014    3095    1278 Sl    1-00:12:01 python3.11
+   3014    3096    1278 Sl    1-00:12:01 python3.11
+   3014    3097    1278 Sl    1-00:12:01 python3.11
+   3014    3098    1278 Sl    1-00:12:01 python3.11
+   3014    3138    1278 Sl    1-00:12:01 jemalloc_bg_thd
+   3014    3397    1278 Sl    1-00:11:59 python3.11
+   3014    3398    1278 Sl    1-00:11:59 python3.11
+   3014    3399    1278 Sl    1-00:11:59 python3.11
+   3014    3400    1278 Sl    1-00:11:59 python3.11
+   3014    3402    1278 Sl    1-00:11:59 python3.11
+   3014    3404    1278 Sl    1-00:11:59 python3.11
+   3014    3406    1278 Sl    1-00:11:59 python3.11
+   3014    3408    1278 Sl    1-00:11:59 python3.11
+   3077    3077    3013 S     1-00:12:01 python3.11
+   3078    3078    3013 Sl    1-00:12:01 python3.11
+   3078    3145    3013 Sl    1-00:12:01 python3.11
+   3078    3288    3013 Sl    1-00:12:00 python3.11
+   3078    3289    3013 Sl    1-00:12:00 python3.11
+   3078    3290    3013 Sl    1-00:12:00 python3.11
+   3078    3291    3013 Sl    1-00:12:00 python3.11
+   3078    3292    3013 Sl    1-00:12:00 python3.11
+   3078    3293    3013 Sl    1-00:12:00 python3.11
+   3078    3294    3013 Sl    1-00:12:00 python3.11
+   3078    3295    3013 Sl    1-00:12:00 python3.11
+   3078    3296    3013 Sl    1-00:12:00 python3.11
+   3078    3297    3013 Sl    1-00:12:00 python3.11
+   3078    3298    3013 Sl    1-00:12:00 python3.11
+   3078    3315    3013 Sl    1-00:12:00 jemalloc_bg_thd
+   3078    3737    3013 Sl    1-00:11:56 python3.11
+   3079    3079    3013 Sl    1-00:12:01 python3.11
+   3079    3158    3013 Sl    1-00:12:01 python3.11
+   3079    3273    3013 Sl    1-00:12:00 python3.11
+   3079    3274    3013 Sl    1-00:12:00 python3.11
+   3079    3275    3013 Sl    1-00:12:00 python3.11
+   3079    3276    3013 Sl    1-00:12:00 python3.11
+   3079    3277    3013 Sl    1-00:12:00 python3.11
+   3079    3278    3013 Sl    1-00:12:00 python3.11
+   3079    3279    3013 Sl    1-00:12:00 python3.11
+   3079    3280    3013 Sl    1-00:12:00 python3.11
+   3079    3281    3013 Sl    1-00:12:00 python3.11
+   3079    3282    3013 Sl    1-00:12:00 python3.11
+   3079    3283    3013 Sl    1-00:12:00 python3.11
+   3079    3318    3013 Sl    1-00:12:00 jemalloc_bg_thd
+   3079    3739    3013 Sl    1-00:11:56 python3.11
+   3080    3080    3013 Sl    1-00:12:01 python3.11
+   3080    3153    3013 Sl    1-00:12:01 python3.11
+   3080    3245    3013 Sl    1-00:12:00 python3.11
+   3080    3246    3013 Sl    1-00:12:00 python3.11
+   3080    3247    3013 Sl    1-00:12:00 python3.11
+   3080    3248    3013 Sl    1-00:12:00 python3.11
+   3080    3249    3013 Sl    1-00:12:00 python3.11
+   3080    3250    3013 Sl    1-00:12:00 python3.11
+   3080    3251    3013 Sl    1-00:12:00 python3.11
+   3080    3252    3013 Sl    1-00:12:00 python3.11
+   3080    3253    3013 Sl    1-00:12:00 python3.11
+   3080    3254    3013 Sl    1-00:12:00 python3.11
+   3080    3255    3013 Sl    1-00:12:00 python3.11
+   3080    3299    3013 Sl    1-00:12:00 jemalloc_bg_thd
+   3080    3738    3013 Sl    1-00:11:56 python3.11
+   3080 2033552    3013 Sl      09:48:38 python3.11
+   3081    3081    3013 Sl    1-00:12:01 python3.11
+   3081    3152    3013 Sl    1-00:12:01 python3.11
+   3081    3260    3013 Sl    1-00:12:00 python3.11
+   3081    3261    3013 Sl    1-00:12:00 python3.11
+   3081    3262    3013 Sl    1-00:12:00 python3.11
+   3081    3263    3013 Sl    1-00:12:00 python3.11
+   3081    3264    3013 Sl    1-00:12:00 python3.11
+   3081    3265    3013 Sl    1-00:12:00 python3.11
+   3081    3266    3013 Sl    1-00:12:00 python3.11
+   3081    3267    3013 Sl    1-00:12:00 python3.11
+   3081    3268    3013 Sl    1-00:12:00 python3.11
+   3081    3269    3013 Sl    1-00:12:00 python3.11
+   3081    3270    3013 Sl    1-00:12:00 python3.11
+   3081    3312    3013 Sl    1-00:12:00 jemalloc_bg_thd
+   3081    3740    3013 Sl    1-00:11:56 python3.11
+   3401    3401    3014 Sl    1-00:11:59 python3.11
+   3401    3515    3014 Sl    1-00:11:58 python3.11
+   3401    3516    3014 Sl    1-00:11:58 python3.11
+   3401    3517    3014 Sl    1-00:11:58 python3.11
+   3401    3518    3014 Sl    1-00:11:58 python3.11
+   3401    3519    3014 Sl    1-00:11:58 python3.11
+   3401    3520    3014 Sl    1-00:11:58 python3.11
+   3401    3521    3014 Sl    1-00:11:58 python3.11
+   3401    3522    3014 Sl    1-00:11:58 python3.11
+   3401    3523    3014 Sl    1-00:11:58 python3.11
+   3401    3524    3014 Sl    1-00:11:58 python3.11
+   3401    3525    3014 Sl    1-00:11:58 python3.11
+   3401    3583    3014 Sl    1-00:11:57 jemalloc_bg_thd
+   3401    3879    3014 Sl    1-00:11:54 python3.11
+   3401    3880    3014 Sl    1-00:11:54 python3.11
+   3401    3881    3014 Sl    1-00:11:54 python3.11
+   3401    3882    3014 Sl    1-00:11:54 python3.11
+   3401    3883    3014 Sl    1-00:11:54 python3.11
+   3401    3884    3014 Sl    1-00:11:54 python3.11
+   3401    3885    3014 Sl    1-00:11:54 python3.11
+   3401    3886    3014 Sl    1-00:11:54 python3.11
+   3401    3887    3014 Sl    1-00:11:54 python3.11
+   3401    3888    3014 Sl    1-00:11:54 python3.11
+   3401    3889    3014 Sl    1-00:11:54 python3.11
+   3401    3890    3014 Sl    1-00:11:54 python3.11
+   3403    3403    3014 Sl    1-00:11:59 python3.11
+   3403    3503    3014 Sl    1-00:11:58 python3.11
+   3403    3504    3014 Sl    1-00:11:58 python3.11
+   3403    3505    3014 Sl    1-00:11:58 python3.11
+   3403    3506    3014 Sl    1-00:11:58 python3.11
+   3403    3507    3014 Sl    1-00:11:58 python3.11
+   3403    3508    3014 Sl    1-00:11:58 python3.11
+   3403    3509    3014 Sl    1-00:11:58 python3.11
+   3403    3510    3014 Sl    1-00:11:58 python3.11
+   3403    3511    3014 Sl    1-00:11:58 python3.11
+   3403    3512    3014 Sl    1-00:11:58 python3.11
+   3403    3513    3014 Sl    1-00:11:58 python3.11
+   3403    3568    3014 Sl    1-00:11:57 jemalloc_bg_thd
+   3403    3835    3014 Sl    1-00:11:54 python3.11
+   3403    3836    3014 Sl    1-00:11:54 python3.11
+   3403    3837    3014 Sl    1-00:11:54 python3.11
+   3403    3838    3014 Sl    1-00:11:54 python3.11
+   3403    3839    3014 Sl    1-00:11:54 python3.11
+   3403    3840    3014 Sl    1-00:11:54 python3.11
+   3403    3841    3014 Sl    1-00:11:54 python3.11
+   3403    3842    3014 Sl    1-00:11:54 python3.11
+   3403    3843    3014 Sl    1-00:11:54 python3.11
+   3403    3844    3014 Sl    1-00:11:54 python3.11
+   3403    3845    3014 Sl    1-00:11:54 python3.11
+   3403    3846    3014 Sl    1-00:11:54 python3.11
+   3405    3405    3014 Sl    1-00:11:59 python3.11
+   3405    3545    3014 Sl    1-00:11:58 python3.11
+   3405    3546    3014 Sl    1-00:11:58 python3.11
+   3405    3547    3014 Sl    1-00:11:58 python3.11
+   3405    3548    3014 Sl    1-00:11:58 python3.11
+   3405    3549    3014 Sl    1-00:11:58 python3.11
+   3405    3550    3014 Sl    1-00:11:58 python3.11
+   3405    3551    3014 Sl    1-00:11:58 python3.11
+   3405    3552    3014 Sl    1-00:11:58 python3.11
+   3405    3553    3014 Sl    1-00:11:58 python3.11
+   3405    3554    3014 Sl    1-00:11:58 python3.11
+   3405    3555    3014 Sl    1-00:11:58 python3.11
+   3405    3582    3014 Sl    1-00:11:57 jemalloc_bg_thd
+   3405    3938    3014 Sl    1-00:11:54 python3.11
+   3405    3939    3014 Sl    1-00:11:54 python3.11
+   3405    3940    3014 Sl    1-00:11:54 python3.11
+   3405    3941    3014 Sl    1-00:11:54 python3.11
+   3405    3942    3014 Sl    1-00:11:54 python3.11
+   3405    3943    3014 Sl    1-00:11:54 python3.11
+   3405    3944    3014 Sl    1-00:11:54 python3.11
+   3407    3407    3014 Sl    1-00:11:59 python3.11
+   3407    3534    3014 Sl    1-00:11:58 python3.11
+   3407    3535    3014 Sl    1-00:11:58 python3.11
+   3407    3536    3014 Sl    1-00:11:58 python3.11
+   3407    3537    3014 Sl    1-00:11:58 python3.11
+   3407    3538    3014 Sl    1-00:11:58 python3.11
+   3407    3539    3014 Sl    1-00:11:58 python3.11
+   3407    3540    3014 Sl    1-00:11:58 python3.11
+   3407    3541    3014 Sl    1-00:11:58 python3.11
+   3407    3542    3014 Sl    1-00:11:58 python3.11
+   3407    3543    3014 Sl    1-00:11:58 python3.11
+   3407    3544    3014 Sl    1-00:11:58 python3.11
+   3407    3584    3014 Sl    1-00:11:57 jemalloc_bg_thd
+   3407    3865    3014 Sl    1-00:11:54 python3.11
+   3407    3866    3014 Sl    1-00:11:54 python3.11
+   3407    3867    3014 Sl    1-00:11:54 python3.11
+   3407    3868    3014 Sl    1-00:11:54 python3.11
+   3407    3869    3014 Sl    1-00:11:54 python3.11
+   3407    3870    3014 Sl    1-00:11:54 python3.11
+   3407    3871    3014 Sl    1-00:11:54 python3.11
+   3407    3872    3014 Sl    1-00:11:54 python3.11
+   3407    3873    3014 Sl    1-00:11:54 python3.11
+   3407    3874    3014 Sl    1-00:11:54 python3.11
+   3407    3875    3014 Sl    1-00:11:54 python3.11
+   3407    3876    3014 Sl    1-00:11:54 python3.11
+   3411    3411    3014 Sl    1-00:11:59 python3.11
+   3411    3571    3014 Sl    1-00:11:57 python3.11
+   3411    3572    3014 Sl    1-00:11:57 python3.11
+   3411    3573    3014 Sl    1-00:11:57 python3.11
+   3411    3574    3014 Sl    1-00:11:57 python3.11
+   3411    3575    3014 Sl    1-00:11:57 python3.11
+   3411    3576    3014 Sl    1-00:11:57 python3.11
+   3411    3577    3014 Sl    1-00:11:57 python3.11
+   3411    3578    3014 Sl    1-00:11:57 python3.11
+   3411    3579    3014 Sl    1-00:11:57 python3.11
+   3411    3580    3014 Sl    1-00:11:57 python3.11
+   3411    3581    3014 Sl    1-00:11:57 python3.11
+   3411    3612    3014 Sl    1-00:11:57 jemalloc_bg_thd
+   3411    3953    3014 Sl    1-00:11:54 python3.11
+   3411    3954    3014 Sl    1-00:11:54 python3.11
+   3411    3955    3014 Sl    1-00:11:54 python3.11
+   3411    3956    3014 Sl    1-00:11:54 python3.11
+   3411    3957    3014 Sl    1-00:11:54 python3.11
+   3411    3958    3014 Sl    1-00:11:54 python3.11
+   3411    3959    3014 Sl    1-00:11:54 python3.11
+   3412    3412    3014 Sl    1-00:11:59 python3.11
+   3412    3493    3014 Sl    1-00:11:58 python3.11
+   3412    3494    3014 Sl    1-00:11:58 python3.11
+   3412    3495    3014 Sl    1-00:11:58 python3.11
+   3412    3496    3014 Sl    1-00:11:58 python3.11
+   3412    3497    3014 Sl    1-00:11:58 python3.11
+   3412    3498    3014 Sl    1-00:11:58 python3.11
+   3412    3499    3014 Sl    1-00:11:58 python3.11
+   3412    3500    3014 Sl    1-00:11:58 python3.11
+   3412    3501    3014 Sl    1-00:11:58 python3.11
+   3412    3502    3014 Sl    1-00:11:58 python3.11
+   3412    3514    3014 Sl    1-00:11:58 python3.11
+   3412    3606    3014 Sl    1-00:11:57 jemalloc_bg_thd
+   3412    3859    3014 Sl    1-00:11:54 python3.11
+   3412    3860    3014 Sl    1-00:11:54 python3.11
+   3412    3861    3014 Sl    1-00:11:54 python3.11
+   3412    3862    3014 Sl    1-00:11:54 python3.11
+   3413    3413    3014 Sl    1-00:11:59 python3.11
+   3413    3587    3014 Sl    1-00:11:57 python3.11
+   3413    3588    3014 Sl    1-00:11:57 python3.11
+   3413    3589    3014 Sl    1-00:11:57 python3.11
+   3413    3590    3014 Sl    1-00:11:57 python3.11
+   3413    3591    3014 Sl    1-00:11:57 python3.11
+   3413    3592    3014 Sl    1-00:11:57 python3.11
+   3413    3593    3014 Sl    1-00:11:57 python3.11
+   3413    3594    3014 Sl    1-00:11:57 python3.11
+   3413    3595    3014 Sl    1-00:11:57 python3.11
+   3413    3596    3014 Sl    1-00:11:57 python3.11
+   3413    3597    3014 Sl    1-00:11:57 python3.11
+   3413    3611    3014 Sl    1-00:11:57 jemalloc_bg_thd
+   3413    3903    3014 Sl    1-00:11:54 python3.11
+   3413    3904    3014 Sl    1-00:11:54 python3.11
+   3413    3905    3014 Sl    1-00:11:54 python3.11
+   3413    3906    3014 Sl    1-00:11:54 python3.11
+   3413    3907    3014 Sl    1-00:11:54 python3.11
+   3413    3908    3014 Sl    1-00:11:54 python3.11
+   3413    3909    3014 Sl    1-00:11:54 python3.11
+   3780    3780     565 Ss    1-00:11:55 sshd-session
+   3784    3784    3780 S     1-00:11:55 sshd-session
+   4496    4496     565 Ss    1-00:11:47 sshd-session
+   4497    4497     565 Ss    1-00:11:47 sshd-session
+   4514    4514    4497 S     1-00:11:47 sshd-session
+   4517    4517    4496 S     1-00:11:47 sshd-session
+   4891    4891     565 Ss    1-00:11:43 sshd-session
+   4911    4911    4891 S     1-00:11:43 sshd-session
+  44809   44809 4153572 Z       03:04:19 nates-dsh <defunct>
+ 146716  146716 4153572 Z       02:49:16 nates-dsh <defunct>
+ 246498  246498 4153572 Z       02:34:12 nates-dsh <defunct>
+ 339009  339009 4153572 Z       02:19:09 nates-dsh <defunct>
+ 436782  436782 4153572 Z       02:04:09 nates-dsh <defunct>
+ 537318  537318 4153572 Z       01:49:02 nates-dsh <defunct>
+ 637923  637923 4153572 Z       01:34:00 nates-dsh <defunct>
+ 724748  724748 4153572 Z       01:18:56 nates-dsh <defunct>
+ 753710  753710       1 Ss      01:13:30 flashd
+ 802476  802476 4153572 Z       01:03:53 nates-dsh <defunct>
+ 802653  802653       2 I       01:03:51 kworker/u48:3-events_unbound
+ 884277  884277 4153572 Z          48:51 nates-dsh <defunct>
+ 888987  888987       2 I          47:56 kworker/7:0-events
+ 898732  898732       2 I          46:01 kworker/u48:5-flush-8:16
+ 950518  950518       1 Ss      23:33:22 bash
+ 950520  950520       1 Ss      23:33:22 nvidia-smi
+ 961994  961994 4153572 Z          33:49 nates-dsh <defunct>
+ 974015  974015       1 Ss      23:32:47 flock
+ 974018  974018  974015 Sl      23:32:47 hold
+ 974018  974347  974015 Sl      23:32:46 cuda-EvtHandlr
+ 974018  974348  974015 Sl      23:32:46 cuda-EvtHandlr
+ 974058  974058       1 Ss      23:32:46 flock
+ 974061  974061  974058 Sl      23:32:46 hold
+ 974061  974352  974058 Sl      23:32:46 cuda-EvtHandlr
+ 974061  974353  974058 Sl      23:32:46 cuda-EvtHandlr
+ 974100  974100       1 Ss      23:32:46 flock
+ 974103  974103  974100 Sl      23:32:46 fence
+ 974103  974385  974100 Sl      23:32:46 cuda-EvtHandlr
+ 974103  974386  974100 Sl      23:32:46 cuda-EvtHandlr
+ 981676  981676       2 I          29:58 kworker/5:2-events
+ 988058  988058       1 Ss      23:32:31 flock
+ 988060  988060  988058 Sl      23:32:31 hold
+ 988060  988105  988058 Sl      23:32:31 cuda-EvtHandlr
+ 988060  988106  988058 Sl      23:32:31 cuda-EvtHandlr
+ 988065  988065       1 Ss      23:32:31 flock
+ 988067  988067  988065 Sl      23:32:31 hold
+ 988067  988130  988065 Sl      23:32:31 cuda-EvtHandlr
+ 988067  988131  988065 Sl      23:32:31 cuda-EvtHandlr
+ 988070  988070       1 Ss      23:32:31 flock
+ 988072  988072  988070 Sl      23:32:31 hold
+ 988072  988138  988070 Sl      23:32:31 cuda-EvtHandlr
+ 988072  988139  988070 Sl      23:32:31 cuda-EvtHandlr
+ 988079  988079       1 Ss      23:32:31 flock
+ 988080  988080  988079 Sl      23:32:31 hold
+ 988080  988150  988079 Sl      23:32:30 cuda-EvtHandlr
+ 988080  988151  988079 Sl      23:32:30 cuda-EvtHandlr
+1001442 1001442       2 I          26:02 kworker/11:1-events
+1002365 1002365       2 I          25:50 kworker/1:3-events
+1003633 1003633       2 I          25:35 kworker/2:2-mm_percpu_wq
+1004969 1004969       2 I          25:19 kworker/3:0-cgroup_free
+1009083 1009083       2 S       10:51:11 psimon
+1019364 1019364       2 I          22:28 kworker/9:1-events
+1020615 1020615       2 I          22:14 kworker/4:1-events
+1037874 1037874       2 I          18:48 kworker/u48:0-flush-8:16
+1038124 1038124 4153572 Z          18:45 nates-dsh <defunct>
+1038808 1038808       2 I          18:37 kworker/8:2-mm_percpu_wq
+1048943 1048943       2 I          16:43 kworker/9:2-cgroup_free
+1052744 1052744       2 I          16:02 kworker/4:0-cgroup_release
+1058603 1058603       2 I          15:00 kworker/6:1-events
+1059950 1059950       2 I          14:46 kworker/0:1-cgroup_release
+1065748 1065748       2 I          13:47 kworker/3:1-cgroup_free
+1070703 1070703       2 I          12:56 kworker/5:0-events
+1076266 1076266       2 I          11:59 kworker/10:2-cgroup_free
+1078218 1078218       2 I          11:39 kworker/u48:1-rpciod
+1087844 1087844       2 I          09:58 kworker/9:0-rcu_gp
+1087859 1087859       2 I          09:58 kworker/7:2-cgroup_free
+1094801 1094801       2 I          08:46 kworker/2:1-cgroup_free
+1096990 1096990       2 I          08:21 kworker/3:2-events
+1097781 1097781       2 I          08:13 kworker/1:1-cgroup_free
+1097816 1097816       2 I          08:13 kworker/0:0-cgroup_free
+1100576 1100576       2 I          07:43 kworker/4:2-mm_percpu_wq
+1103338 1103338       2 I          07:14 kworker/6:2-cgroup_release
+1106367 1106367       2 I          06:43 kworker/10:0-events
+1108907 1108907     565 Ss         06:17 sshd-session
+1108929 1108929 1108907 S          06:17 sshd-session
+1108930 1108930 1108929 Ss         06:17 bash
+1108935 1108935 1108930 S          06:17 timeout
+1108936 1108936 1108930 S          06:17 grep
+1108937 1108937 1108930 S          06:17 tail
+1108938 1108938 1108930 S          06:17 cut
+1108939 1108939 1108935 S          06:17 socat
+1108990 1108990       2 I          06:16 kworker/u48:2-rpciod
+1109207 1109207       2 I          06:14 kworker/u48:4-rpciod
+1109808 1109808       2 I          06:08 kworker/u48:6-events_unbound
+1113450 1113450       2 I          05:32 kworker/8:1-events
+1114971 1114971       2 I          05:17 kworker/11:2-events
+1118355 1118355       2 I          04:43 kworker/7:1-mm_percpu_wq
+1123811 1123811 4153572 Z          03:45 nates-dsh <defunct>
+1124959 1124959     331 S          03:33 systemd-userwor
+1125168 1125168     331 S          03:31 systemd-userwor
+1129612 1129612       2 I          02:42 kworker/0:2-mm_percpu_wq
+1131227 1131227     331 S          02:24 systemd-userwor
+1131257 1131257       2 I          02:24 kworker/2:0-events
+1134847 1134847       2 I          01:43 kworker/6:0
+1134865 1134865       2 I          01:43 kworker/1:0-events
+1135971 1135971     565 Ss         01:30 sshd-session
+1135989 1135989 1135971 S          01:30 sshd-session
+1135990 1135990 1135989 Ss         01:30 bash
+1135992 1135992 1135990 S          01:30 tee
+1138137 1138137     625 S          01:07 sleep
+1139960 1139960       1 S          00:45 gpuq
+1140148 1140148       2 I          00:43 kworker/5:1-cgroup_free
+1140719 1140719     565 Ss         00:36 sshd-session
+1140733 1140733 1140719 S          00:36 sshd-session
+1140734 1140734 1140733 Ss         00:36 bash
+1140735 1140735 1140734 S          00:36 bash
+1140736 1140736 1140734 S          00:36 tee
+1140745 1140745 1140735 S          00:36 flock
+1143156 1143156       2 I          00:08 kworker/11:0
+1143506 1143506 1139960 S          00:04 flock
+1143902 1143902  950518 S          00:00 sleep
+1143932 1143932 2872213 S          00:00 sleep
+1143940 1143940 1135990 R          00:00 ps
+1875170 1875170       1 Ss      09:54:06 systemd-journal
+2805936 2805936     576 SNsl    22:23:37 llama-server
+2805936 2806060     576 SNsl    22:23:36 llama-server
+2805936 2806061     576 SNsl    22:23:36 llama-server
+2805936 2806066     576 SNsl    22:23:36 llama-server
+2805936 2806067     576 SNsl    22:23:36 llama-server
+2805936 2806068     576 SNsl    22:23:36 llama-server
+2805936 2806069     576 SNsl    22:23:36 llama-server
+2805936 2806070     576 SNsl    22:23:36 llama-server
+2805936 2806071     576 SNsl    22:23:36 llama-server
+2805936 2806072     576 SNsl    22:23:36 llama-server
+2805936 2806073     576 SNsl    22:23:36 llama-server
+2805936 2806074     576 SNsl    22:23:36 llama-server
+2805936 2806075     576 SNsl    22:23:36 llama-server
+2805936 2806076     576 SNsl    22:23:36 llama-server
+2805936 2806077     576 SNsl    22:23:36 llama-server
+2805936 2807696     576 SNsl    22:23:19 llama-server
+2805936 2807697     576 SNsl    22:23:19 llama-server
+2805936 2807698     576 SNsl    22:23:19 llama-server
+2805936 2807742     576 SNsl    22:23:19 llama-server
+2871085 2871085     576 SNsl    22:19:55 llama-server
+2871085 2871105     576 SNsl    22:19:55 llama-server
+2871085 2871106     576 SNsl    22:19:55 llama-server
+2871085 2871109     576 SNsl    22:19:55 llama-server
+2871085 2871110     576 SNsl    22:19:55 llama-server
+2871085 2871111     576 SNsl    22:19:55 llama-server
+2871085 2871112     576 SNsl    22:19:55 llama-server
+2871085 2871113     576 SNsl    22:19:55 llama-server
+2871085 2871114     576 SNsl    22:19:55 llama-server
+2871085 2871115     576 SNsl    22:19:55 llama-server
+2871085 2871116     576 SNsl    22:19:55 llama-server
+2871085 2871117     576 SNsl    22:19:55 llama-server
+2871085 2871118     576 SNsl    22:19:55 llama-server
+2871085 2871119     576 SNsl    22:19:55 llama-server
+2871085 2871120     576 SNsl    22:19:55 llama-server
+2871085 2871980     576 SNsl    22:19:47 llama-server
+2871085 2871981     576 SNsl    22:19:47 llama-server
+2871085 2871982     576 SNsl    22:19:47 llama-server
+2871085 2872005     576 SNsl    22:19:46 llama-server
+2872195 2872195     565 Ss      22:19:44 sshd-session
+2872212 2872212 2872195 S       22:19:44 sshd-session
+2872213 2872213 2872212 Ss      22:19:44 bash
+3575268 3575268       1 Rsl     04:52:16 flashcore
+3575268 3575279       1 Ssl     04:52:16 cuda-EvtHandlr
+3575268 3575280       1 Ssl     04:52:16 cuda-EvtHandlr
+3575268 3575288       1 Ssl     04:52:16 cuda-EvtHandlr
+3575268 3575298       1 Ssl     04:52:16 cuda-EvtHandlr
+3575268 3575306       1 Ssl     04:52:15 cuda-EvtHandlr
+3575268 3575313       1 Ssl     04:52:15 cuda-EvtHandlr
+3575268 3575322       1 Ssl     04:52:15 cuda-EvtHandlr
+3575268 3575336       1 Ssl     04:52:15 cuda-EvtHandlr
+3687774 3687774     565 Ss      04:34:52 sshd-session
+3687873 3687873 3687774 S       04:34:49 sshd-session
+3687874 3687874 3687873 Ss      04:34:49 bash
+3779718 3779718 3687874 Sl+     04:20:10 btop
+3779718 3779739 3687874 Sl+     04:20:10 btop
+3779718 1143943 3687874 Sl+        00:00 btop
+3779718 1143944 3687874 Sl+        00:00 btop
+4153572 4153572     576 Ssl     03:17:45 nates-dsh
+4153572 4153578     576 Ssl     03:17:45 dsh-malloc-trim
+4153572 4153580     576 Ssl     03:17:45 nates-dsh
+4153572 4153581     576 Ssl     03:17:45 nates-dsh
+4153572 4153582     576 Ssl     03:17:45 nates-dsh
+4153572 4153583     576 Ssl     03:17:45 dsh-watch
+4153572 4153584     576 Ssl     03:17:45 dsh-list-refres
+4153572 4153585     576 Ssl     03:17:45 dsh-provider-re
+4153572 4153586     576 Ssl     03:17:45 dsh-watch
+4153572 4153595     576 Ssl     03:17:45 nates-dsh
+4153589 4153589 4153572 Sl      03:17:45 pw-top
+4153589 4153598 4153572 Sl      03:17:45 module-rt

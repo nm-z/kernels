@@ -1,0 +1,268 @@
+{
+   "full_issue_acceptance" : false,
+   "rows" : [
+      {
+         "avg" : 7269361,
+         "group" : "traffic",
+         "host_kv" : 0,
+         "invocations" : 18,
+         "max" : 7535392,
+         "metric" : "dram_read_bytes",
+         "min" : 7142688,
+         "unit" : "bytes"
+      },
+      {
+         "avg" : 12675361,
+         "group" : "traffic",
+         "host_kv" : 0,
+         "invocations" : 18,
+         "max" : 13236512,
+         "metric" : "dram_write_bytes",
+         "min" : 12123360,
+         "unit" : "bytes"
+      },
+      {
+         "avg" : 0,
+         "group" : "traffic",
+         "host_kv" : 0,
+         "invocations" : 18,
+         "max" : 0,
+         "metric" : "sysmem_read_bytes",
+         "min" : 0,
+         "unit" : "bytes"
+      },
+      {
+         "avg" : 672,
+         "group" : "traffic",
+         "host_kv" : 0,
+         "invocations" : 18,
+         "max" : 672,
+         "metric" : "sysmem_write_bytes",
+         "min" : 672,
+         "unit" : "bytes"
+      },
+      {
+         "avg" : 4723447,
+         "group" : "traffic",
+         "host_kv" : 1,
+         "invocations" : 18,
+         "max" : 4843872,
+         "metric" : "dram_read_bytes",
+         "min" : 4595392,
+         "unit" : "bytes"
+      },
+      {
+         "avg" : 15238163,
+         "group" : "traffic",
+         "host_kv" : 1,
+         "invocations" : 18,
+         "max" : 15735712,
+         "metric" : "dram_write_bytes",
+         "min" : 14873600,
+         "unit" : "bytes"
+      },
+      {
+         "avg" : 2359296,
+         "group" : "traffic",
+         "host_kv" : 1,
+         "invocations" : 18,
+         "max" : 2359296,
+         "metric" : "sysmem_read_bytes",
+         "min" : 2359296,
+         "unit" : "bytes"
+      },
+      {
+         "avg" : 672,
+         "group" : "traffic",
+         "host_kv" : 1,
+         "invocations" : 18,
+         "max" : 672,
+         "metric" : "sysmem_write_bytes",
+         "min" : 672,
+         "unit" : "bytes"
+      },
+      {
+         "avg" : 226505,
+         "group" : "transactions",
+         "host_kv" : 0,
+         "invocations" : 18,
+         "max" : 234139,
+         "metric" : "dram_read_transactions",
+         "min" : 219443,
+         "unit" : "transactions"
+      },
+      {
+         "avg" : 394891,
+         "group" : "transactions",
+         "host_kv" : 0,
+         "invocations" : 18,
+         "max" : 413039,
+         "metric" : "dram_write_transactions",
+         "min" : 378104,
+         "unit" : "transactions"
+      },
+      {
+         "avg" : 0,
+         "group" : "transactions",
+         "host_kv" : 0,
+         "invocations" : 18,
+         "max" : 0,
+         "metric" : "sysmem_read_transactions",
+         "min" : 0,
+         "unit" : "transactions"
+      },
+      {
+         "avg" : 21,
+         "group" : "transactions",
+         "host_kv" : 0,
+         "invocations" : 18,
+         "max" : 21,
+         "metric" : "sysmem_write_transactions",
+         "min" : 21,
+         "unit" : "transactions"
+      },
+      {
+         "avg" : 147132,
+         "group" : "transactions",
+         "host_kv" : 1,
+         "invocations" : 18,
+         "max" : 151455,
+         "metric" : "dram_read_transactions",
+         "min" : 142208,
+         "unit" : "transactions"
+      },
+      {
+         "avg" : 475440,
+         "group" : "transactions",
+         "host_kv" : 1,
+         "invocations" : 18,
+         "max" : 491924,
+         "metric" : "dram_write_transactions",
+         "min" : 460631,
+         "unit" : "transactions"
+      },
+      {
+         "avg" : 73728,
+         "group" : "transactions",
+         "host_kv" : 1,
+         "invocations" : 18,
+         "max" : 73728,
+         "metric" : "sysmem_read_transactions",
+         "min" : 73728,
+         "unit" : "transactions"
+      },
+      {
+         "avg" : 21,
+         "group" : "transactions",
+         "host_kv" : 1,
+         "invocations" : 18,
+         "max" : 21,
+         "metric" : "sysmem_write_transactions",
+         "min" : 21,
+         "unit" : "transactions"
+      },
+      {
+         "avg" : 0.12498,
+         "group" : "execution",
+         "host_kv" : 0,
+         "invocations" : 18,
+         "max" : 0.124982,
+         "metric" : "achieved_occupancy",
+         "min" : 0.124979,
+         "unit" : "ratio"
+      },
+      {
+         "avg" : 0.14341,
+         "group" : "execution",
+         "host_kv" : 0,
+         "invocations" : 18,
+         "max" : 0.154278,
+         "metric" : "eligible_warps_per_cycle",
+         "min" : 0.139476,
+         "unit" : "warps_per_cycle"
+      },
+      {
+         "avg" : 0.124999,
+         "group" : "execution",
+         "host_kv" : 1,
+         "invocations" : 18,
+         "max" : 0.124999,
+         "metric" : "achieved_occupancy",
+         "min" : 0.124999,
+         "unit" : "ratio"
+      },
+      {
+         "avg" : 0.007723,
+         "group" : "execution",
+         "host_kv" : 1,
+         "invocations" : 18,
+         "max" : 0.007921,
+         "metric" : "eligible_warps_per_cycle",
+         "min" : 0.007606,
+         "unit" : "warps_per_cycle"
+      },
+      {
+         "avg" : 84.63426,
+         "group" : "stalls",
+         "host_kv" : 0,
+         "invocations" : 18,
+         "max" : 85.650269,
+         "metric" : "stall_memory_dependency",
+         "min" : 83.481947,
+         "unit" : "percent"
+      },
+      {
+         "avg" : 0.000674,
+         "group" : "stalls",
+         "host_kv" : 0,
+         "invocations" : 18,
+         "max" : 0.000703,
+         "metric" : "stall_memory_throttle",
+         "min" : 0.000657,
+         "unit" : "percent"
+      },
+      {
+         "avg" : 3.508835,
+         "group" : "stalls",
+         "host_kv" : 0,
+         "invocations" : 18,
+         "max" : 4.045358,
+         "metric" : "stall_sync",
+         "min" : 3.01489,
+         "unit" : "percent"
+      },
+      {
+         "avg" : 97.232118,
+         "group" : "stalls",
+         "host_kv" : 1,
+         "invocations" : 18,
+         "max" : 97.456952,
+         "metric" : "stall_memory_dependency",
+         "min" : 96.903291,
+         "unit" : "percent"
+      },
+      {
+         "avg" : 3.4e-05,
+         "group" : "stalls",
+         "host_kv" : 1,
+         "invocations" : 18,
+         "max" : 3.5e-05,
+         "metric" : "stall_memory_throttle",
+         "min" : 3.3e-05,
+         "unit" : "percent"
+      },
+      {
+         "avg" : 2.429387,
+         "group" : "stalls",
+         "host_kv" : 1,
+         "invocations" : 18,
+         "max" : 2.755628,
+         "metric" : "stall_sync",
+         "min" : 2.219997,
+         "unit" : "percent"
+      }
+   ],
+   "scope" : "Single-die native gather counter workload, not full-model timing",
+   "source" : "smoke-8000-changing/status.json",
+   "status" : "PASS"
+}

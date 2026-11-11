@@ -1,0 +1,130 @@
+{
+   "metrics" : {
+      "dram_read_transactions" : {
+         "avg" : {
+            "raw" : "226505",
+            "unit" : "transactions",
+            "value" : 226505
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "234139",
+            "unit" : "transactions",
+            "value" : 234139
+         },
+         "min" : {
+            "raw" : "219443",
+            "unit" : "transactions",
+            "value" : 219443
+         }
+      },
+      "dram_write_transactions" : {
+         "avg" : {
+            "raw" : "394891",
+            "unit" : "transactions",
+            "value" : 394891
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "413039",
+            "unit" : "transactions",
+            "value" : 413039
+         },
+         "min" : {
+            "raw" : "378104",
+            "unit" : "transactions",
+            "value" : 378104
+         }
+      },
+      "sysmem_read_transactions" : {
+         "avg" : {
+            "raw" : "0",
+            "unit" : "transactions",
+            "value" : 0
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "0",
+            "unit" : "transactions",
+            "value" : 0
+         },
+         "min" : {
+            "raw" : "0",
+            "unit" : "transactions",
+            "value" : 0
+         }
+      },
+      "sysmem_write_transactions" : {
+         "avg" : {
+            "raw" : "21",
+            "unit" : "transactions",
+            "value" : 21
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "21",
+            "unit" : "transactions",
+            "value" : 21
+         },
+         "min" : {
+            "raw" : "21",
+            "unit" : "transactions",
+            "value" : 21
+         }
+      }
+   },
+   "raw_profiler" : {
+      "bytes" : 1046,
+      "path" : "/tmp/flash-issue10-counters-E04IkgnX/capture/transactions-host0.nvprof.csv",
+      "sha256" : "23de4eb42e24a06f8fc59f8de0887c74fb34e0181080c878cdd1f5f065f06f07"
+   },
+   "raw_workload" : {
+      "bytes" : 274,
+      "path" : "/tmp/flash-issue10-counters-E04IkgnX/capture/transactions-host0.workload.csv",
+      "sha256" : "543b81d52406a5e6841e3e017e3ecb51f923fb51f26d7595db1852ac6f57d2c3"
+   },
+   "workload" : {
+      "budget" : 512,
+      "cache_fnv1a64" : "ebe267f1dc2a3b14",
+      "destination_unique_address_bytes" : 8388608,
+      "gpu_us_max" : 53732.383728027,
+      "gpu_us_mean" : 50146.08001709,
+      "gpu_us_min" : 45428.161621094,
+      "gpu_us_p50" : 50122.272491455,
+      "gpu_us_p90" : 53732.383728027,
+      "gpu_us_p99" : 53732.383728027,
+      "gpu_us_stddev" : 3018.935887925,
+      "hardware_counter_gate" : "not_run",
+      "host_kv" : 0,
+      "iterations" : 4,
+      "logical_keys" : 2048,
+      "measured_hardware_transaction_bytes" : null,
+      "nv" : 2000,
+      "pattern" : "changing",
+      "physical_gathered_slots" : 2048,
+      "physical_k_head_rows" : 4096,
+      "physical_v_head_rows" : 4096,
+      "position_policy" : "fixed visible length; layout varies per launch",
+      "preflight_verified_all" : true,
+      "quantile_method" : "nearest_rank",
+      "seed" : 4242,
+      "selection_changes" : 3,
+      "selection_upload_timed" : false,
+      "selections_fnv1a64" : "bb6dac4bfd7ca46e",
+      "source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+      "source_unique_address_bytes" : 2228224,
+      "tail" : 0,
+      "timing_scope" : "CUDA event interval including persistent kernel framework",
+      "verified_output_signature_changes" : 3,
+      "visible" : 8000,
+      "warmup_launches" : 10
+   }
+}

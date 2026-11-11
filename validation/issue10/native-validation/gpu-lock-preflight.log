@@ -1,0 +1,6 @@
+2026-10-18T03:45:22Z
+2026-10-18T03:45:22Z
+BLOCKED: shared GPU lock remained held after 45 seconds.
+4010221 ruby            /tmp/flash-sass-engine-validation.lock
+    PID     ELAPSED %CPU STAT COMMAND
+4010221    01:11:03  0.0 Sl   ruby validation/issue19/run.rb --mode model --out /home/nate/codex/flash-pr44-evidence-20261018 --core-pid 3575268 --socket /tmp/flash.sock --checkpoint /mnt/sentry-nfs/flash-next-q2/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf --lock-dir /home/nate/codex/asm-port --engine-lock /tmp/flash-sass-engine-validation.lock --positions 128,32768,65536

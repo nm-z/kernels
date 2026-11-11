@@ -1,0 +1,24 @@
+{
+   "analyzer_sha256" : {
+      "kern/DecodeArchive.pm" : "a08af06ab768af6a21ba80139e2260c21ce388fc08261c2d7e7accba273ffb99",
+      "kern/decode_forensics.pl" : "fae243ea42ee1a0d889043c4872e9d63360be11d8629423b67f2086cdea7c443"
+   },
+   "die_frames" : 360,
+   "files" : 134,
+   "identity_manifest_sha256" : "3941a06371d32880ba10e708c5ad6960d3114bf12caa1f36086e3eb2d237c295",
+   "input_sha256" : {
+      "matched-phase-deltas.json" : "6a8a7bb95b8c7d0e2d4cb77451e1beb999a4d54470ed1896609bc96c3ff5f85b",
+      "traced-all-die-phase-totals.json.gz" : "ff780ef850e4d0e65ccd19ddbb3a0153615a4cb52bdec1af167f5d413dcdce0b",
+      "traced-summary.json" : "f05271c084148b2b4e66b9bafd3d99bf857ea3ba30140e7ddca51d7e737878d3",
+      "traced.json.gz" : "34aaea18a91b7dfd159296eee88e3507fb01346d0982533c456aac3a9ff8dc23",
+      "untraced-summary.json" : "d09c11585f1b4c916fba67840af66793c1f0aa7b41b851f53aa5e46f654fdd64",
+      "untraced.json.gz" : "f7e2c51e06c5d04e1354537a9297817aef17f2d011265fbaf5a5f261da142430"
+   },
+   "max_recomputed_residual_us" : 1.45519152283669e-11,
+   "max_summary_difference" : 0,
+   "scope" : "Compact archive consistency and numerical replay only; raw phase CSVs were not re-read; no GPU inference or issue-acceptance claim.",
+   "status" : "PASS",
+   "summary_tolerance" : 1e-08,
+   "traced_runs" : 60,
+   "untraced_runs" : 20
+}

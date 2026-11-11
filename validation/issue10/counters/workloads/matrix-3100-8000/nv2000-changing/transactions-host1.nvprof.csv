@@ -1,0 +1,10 @@
+==1116896== NVPROF is profiling process 1116896, command: /tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench 2000 0 4 changing 1 /tmp/flash-issue10-after7-9VF51acq/nv2000-changing/transactions-host1.workload.csv 4242
+==1116896== Some kernel(s) will be replayed on device 0 in order to collect all events/metrics.
+==1116896== Profiling application: /tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench 2000 0 4 changing 1 /tmp/flash-issue10-after7-9VF51acq/nv2000-changing/transactions-host1.workload.csv 4242
+==1116896== Profiling result:
+==1116896== Metric result:
+"Device","Kernel","Invocations","Metric Name","Metric Description","Min","Max","Avg"
+"Tesla M60 (0)","die",18,"sysmem_read_transactions","System Memory Read Transactions",73728,73728,73728
+"Tesla M60 (0)","die",18,"sysmem_write_transactions","System Memory Write Transactions",21,21,21
+"Tesla M60 (0)","die",18,"dram_read_transactions","Device Memory Read Transactions",143379,151020,146561
+"Tesla M60 (0)","die",18,"dram_write_transactions","Device Memory Write Transactions",462073,491055,474908

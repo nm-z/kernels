@@ -1,0 +1,112 @@
+{
+   "metrics" : {
+      "achieved_occupancy" : {
+         "avg" : {
+            "raw" : "0.124999",
+            "unit" : "ratio",
+            "value" : 0.124999
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "0.124999",
+            "unit" : "ratio",
+            "value" : 0.124999
+         },
+         "min" : {
+            "raw" : "0.124999",
+            "unit" : "ratio",
+            "value" : 0.124999
+         }
+      },
+      "eligible_warps_per_cycle" : {
+         "avg" : {
+            "raw" : "0.007646",
+            "unit" : "warps_per_cycle",
+            "value" : 0.007646
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "0.007853",
+            "unit" : "warps_per_cycle",
+            "value" : 0.007853
+         },
+         "min" : {
+            "raw" : "0.007509",
+            "unit" : "warps_per_cycle",
+            "value" : 0.007509
+         }
+      }
+   },
+   "raw_profiler" : {
+      "bytes" : 772,
+      "path" : "/tmp/flash-issue10-after7-9VF51acq/nv2000-clustered/execution-host1.nvprof.csv",
+      "sha256" : "557f6f6e605a12b34523aae4b405a100063fc377702d7efcc8a9dd3875364d01"
+   },
+   "raw_workload" : {
+      "bytes" : 274,
+      "path" : "/tmp/flash-issue10-after7-9VF51acq/nv2000-clustered/execution-host1.workload.csv",
+      "sha256" : "549a7dbd82659b0e8bd0f6bc0bf7d8672507c276a0d43a2fa2331f94ac4e57ce"
+   },
+   "verified_rows" : [
+      {
+         "iteration" : 0,
+         "selection" : "8fa73767045b490d",
+         "verified_output" : "a85af21da91786ec"
+      },
+      {
+         "iteration" : 1,
+         "selection" : "8fa73767045b490d",
+         "verified_output" : "a85af21da91786ec"
+      },
+      {
+         "iteration" : 2,
+         "selection" : "8fa73767045b490d",
+         "verified_output" : "a85af21da91786ec"
+      },
+      {
+         "iteration" : 3,
+         "selection" : "8fa73767045b490d",
+         "verified_output" : "a85af21da91786ec"
+      }
+   ],
+   "workload" : {
+      "budget" : 512,
+      "cache_fnv1a64" : "ebe267f1dc2a3b14",
+      "destination_unique_address_bytes" : 8388608,
+      "gpu_us_max" : 39203.712463379,
+      "gpu_us_mean" : 37014.880180359,
+      "gpu_us_min" : 35248.447418213,
+      "gpu_us_p50" : 35364.223480225,
+      "gpu_us_p90" : 39203.712463379,
+      "gpu_us_p99" : 39203.712463379,
+      "gpu_us_stddev" : 1742.451915153,
+      "hardware_counter_gate" : "not_run",
+      "host_kv" : 1,
+      "iterations" : 4,
+      "logical_keys" : 2048,
+      "measured_hardware_transaction_bytes" : null,
+      "nv" : 2000,
+      "pattern" : "clustered",
+      "physical_gathered_slots" : 2048,
+      "physical_k_head_rows" : 4096,
+      "physical_v_head_rows" : 4096,
+      "position_policy" : "fixed visible length; layout varies per launch",
+      "preflight_verified_all" : true,
+      "quantile_method" : "nearest_rank",
+      "seed" : 4242,
+      "selection_changes" : 0,
+      "selection_upload_timed" : false,
+      "selections_fnv1a64" : "c26e110453b01685",
+      "source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+      "source_unique_address_bytes" : 2228224,
+      "tail" : 0,
+      "timing_scope" : "CUDA event interval including persistent kernel framework",
+      "verified_output_signature_changes" : 0,
+      "visible" : 8000,
+      "warmup_launches" : 10
+   }
+}

@@ -1,0 +1,17 @@
+{
+  "positions": "N and N+1 are two adjacent fully decoded positions after the prompt-boundary output at N-1.",
+  "selection": "Pair 2 is illustrative. These excerpts do not replace all-run aggregates or the full archive.",
+  "dies": [
+    0,
+    4
+  ],
+  "prompt_depths": [
+    3100,
+    8000
+  ],
+  "placements": [
+    "host",
+    "vram"
+  ],
+  "host_traces": "Complete 129-output host trace for each illustrated run."
+}

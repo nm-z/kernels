@@ -1,0 +1,50 @@
+{
+   "host" : {
+      "client_delta_us_per_token" : 339.526890625002,
+      "die0_delta_us_per_token" : 340.135999999999,
+      "distinct_attention_work_delta_us" : {
+         "attnmerge" : 2.176,
+         "attnpartn" : 14.24,
+         "attnqkq" : 1.60799999999999,
+         "idxqk" : 2.06400000000002,
+         "idxscore" : 5.84800000000001,
+         "idxsel" : 17.4159999999999,
+         "kvgather" : -2.57600000000093
+      },
+      "pair" : 2,
+      "timeline_delta_us_per_token" : {
+         "barrier_send" : -41.1680000000006,
+         "between_phase" : -1.85599999999999,
+         "between_token" : 0,
+         "body_excluding_ple_wait" : 2.6239999999998,
+         "dispatch" : 0.871999999999957,
+         "exchange_wait" : 379.975999999999,
+         "ple_wait" : -0.288,
+         "publication_footer" : -0.024
+      }
+   },
+   "vram" : {
+      "client_delta_us_per_token" : 413.860664062504,
+      "die0_delta_us_per_token" : 413.208000000002,
+      "distinct_attention_work_delta_us" : {
+         "attnmerge" : 1.89599999999999,
+         "attnpartn" : 17.7120000000002,
+         "attnqkq" : 2.336,
+         "idxqk" : 2.42400000000001,
+         "idxscore" : 5.768,
+         "idxsel" : 19.88,
+         "kvgather" : 24.8799999999999
+      },
+      "pair" : 2,
+      "timeline_delta_us_per_token" : {
+         "barrier_send" : -36.96,
+         "between_phase" : -1.12799999999993,
+         "between_token" : 0.096,
+         "body_excluding_ple_wait" : -8.63999999999942,
+         "dispatch" : -1.27999999999997,
+         "exchange_wait" : 461.224,
+         "ple_wait" : -0.0640000000000001,
+         "publication_footer" : -0.04
+      }
+   }
+}

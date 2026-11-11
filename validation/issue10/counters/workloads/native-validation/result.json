@@ -1,0 +1,120 @@
+{
+   "archive_tests" : 77,
+   "base_commit" : "e80c2173e3eb4653413aa5dade1400ed2b477ffc\n",
+   "checks" : [
+      {
+         "argv" : [
+            "timeout",
+            "--kill-after=10s",
+            "30s",
+            "perl",
+            "-c",
+            "kern/decode_counter_capture.pl"
+         ],
+         "exit" : 0,
+         "name" : "counter-syntax",
+         "stderr" : "kern/decode_counter_capture.pl syntax OK\n",
+         "stdout" : ""
+      },
+      {
+         "argv" : [
+            "timeout",
+            "--kill-after=10s",
+            "30s",
+            "perl",
+            "-c",
+            "kern/decode_counter_capture_test.pl"
+         ],
+         "exit" : 0,
+         "name" : "counter-test-syntax",
+         "stderr" : "kern/decode_counter_capture_test.pl syntax OK\n",
+         "stdout" : ""
+      },
+      {
+         "argv" : [
+            "timeout",
+            "--kill-after=10s",
+            "90s",
+            "prove",
+            "-v",
+            "kern/decode_counter_capture_test.pl"
+         ],
+         "exit" : 0,
+         "name" : "counter-tests",
+         "stderr" : "",
+         "stdout" : "kern/decode_counter_capture_test.pl .. \nok 1 - quoted CSV and trailing field\nok 2 - reject malformed quote\nok 3 - thirteen requested hardware metrics\nok 4 - complete workload metric fixture parsed\nok 5 - nvprof average not divided by invocation count again\nok 6 - stall percentage retains its unit\nok 7 - occupancy is a ratio\nok 8 - enumeration is not a workload measurement\nok 9 - permission failure is not empty successful traffic\nok 10 - reject incomplete kernel profiling warning\nok 11 - missing metric\nok 12 - duplicate metric\nok 13 - wrong invocations\nok 14 - wrong kernel\nok 15 - mixed devices\nok 16 - nonfinite value\nok 17 - negative value\nok 18 - unsupported value\nok 19 - bad average\nok 20 - wrong header\nok 21 - wrong row width\nok 22 - invalid metric sysmem_read_bytes=NaN\nok 23 - invalid metric dram_read_bytes=Inf\nok 24 - invalid metric dram_read_bytes=1e999\nok 25 - invalid metric stall_sync=100.01%\nok 26 - invalid metric achieved_occupancy=1.01\nok 27 - invalid metric sysmem_read_bytes=2%\nok 28 - invalid metric stall_sync=2\nok 29 - complete workload fixture\nok 30 - string success\nok 31 - unverified output\nok 32 - wrong source\nok 33 - nonnumeric placement\nok 34 - wrong placement\nok 35 - wrong budget\nok 36 - wrong physical slots\nok 37 - wrong logical keys\nok 38 - wrong warmups\nok 39 - wrong visible length\nok 40 - unchanging selections\nok 41 - unchanging output\nok 42 - fractional changes\nok 43 - missing cache hash\nok 44 - placement difference permitted in paired workload\nok 45 - mismatched selection identity\nok 46 - complete native output rows\nok 47 - truncated workload CSV\nok 48 - duplicate workload iteration\nok 49 - nonfinite workload timing\nok 50 - nonpositive workload timing\nok 51 - acquire free lock\nok 52 - busy lock blocks before GPU operations\nok 53 - blocked attempt records lock status\nok 54 - same inode can be acquired after release\nok 55 - subprocess exit and both streams preserved\nok 56 - subprocess timeout is a failure\nok 57 - current parser validates all eight archived real profiler arms\n1..57\nok\nAll tests successful.\nFiles=1, Tests=57,  1 wallclock secs ( 0.01 usr  0.00 sys +  0.08 cusr  0.02 csys =  0.11 CPU)\nResult: PASS\n"
+      },
+      {
+         "argv" : [
+            "timeout",
+            "--kill-after=10s",
+            "180s",
+            "prove",
+            "-v",
+            "kern/decode_forensics_test.pl"
+         ],
+         "exit" : 0,
+         "name" : "archive-tests",
+         "stderr" : "",
+         "stdout" : "kern/decode_forensics_test.pl .. \nok 1 - complete archived matrix has 60 traced, 20 untraced and 360 die records\nok 2 - all die arithmetic partitions reconcile\nok 3 - regenerates independent saved traced-summary.json\nok 4 - regenerates independent saved untraced-summary.json\nok 5 - regenerates independent saved matched-phase-deltas.json\nok 6 - median is over the five run means\nok 7 - p95 uses nearest rank over 640 token intervals\nok 8 - selected-key count uses zero-based position, four-token blocks, cap and tail\nok 9 - rejects missing traced run\nok 10 - rejects missing untraced run\nok 11 - rejects duplicated run replacing another pair\nok 12 - rejects unrequested depth\nok 13 - rejects incomplete run\nok 14 - rejects a sixth pair\nok 15 - rejects different block budget\nok 16 - rejects unmatched PLE configuration\nok 17 - rejects mismatched source identity\nok 18 - rejects truthy string instead of JSON trace flag\nok 19 - rejects truncated generated IDs\nok 20 - rejects changed paired continuation\nok 21 - rejects early stop\nok 22 - rejects incorrect prefix reuse\nok 23 - rejects raw completion inconsistent with parsed fields\nok 24 - rejects altered interval\nok 25 - rejects repeated arrival timestamp\nok 26 - rejects incorrect request TTFT\nok 27 - rejects observations outside request\nok 28 - rejects nonfinite timing before tolerance comparison\nok 29 - rejects stale embedded summary\nok 30 - rejects missing larger-context capacity record\nok 31 - rejects missing all-die frame\nok 32 - rejects repeated all-die frame\nok 33 - rejects missing die\nok 34 - rejects repeated die\nok 35 - rejects truncated trace\nok 36 - rejects mixed requests\nok 37 - binds complete phase frame to its run projection\nok 38 - rejects missing phase component\nok 39 - rejects negative phase time\nok 40 - rejects nonfinite phase time\nok 41 - rejects unreconciled duration\nok 42 - rejects changed opcode count\nok 43 - rejects time attributed to zero executions\nok 44 - rejects fractional execution count\nok 45 - rejects opcode/component disagreement\nok 46 - rejects wrong selected-key count\nok 47 - rejects shifted interior selected-key position\nok 48 - rejects nonfinite recorded residual\nok 49 - rejects undefined/nonfinite/boolean numeric input\nok 50 - rejects undefined/nonfinite/boolean numeric input\nok 51 - rejects undefined/nonfinite/boolean numeric input\nok 52 - rejects undefined/nonfinite/boolean numeric input\nok 53 - rejects undefined/nonfinite/boolean numeric input\nok 54 - rejects fractional integer\nok 55 - rejects different reference schema\nok 56 - checks all required artifact identities\nok 57 - requires reference summary identity\nok 58 - rejects parent traversal in identity manifest\nok 59 - binds identities to the required logical filenames\nok 60 - rejects changed bytes even at identical size\nok 61 - corrupt archive cannot publish a PASS directory\nok 62 - failed validation leaves no output directory\nok 63 - native CLI archive mode completes\nok 64 - successful replay publishes its scoped status\nok 65 - replay binds the input identity manifest\nok 66 - replay identifies both source files\nok 67 - CLI output agrees with saved traced-summary.json\nok 68 - CLI output agrees with saved untraced-summary.json\nok 69 - CLI output agrees with saved matched-phase-deltas.json\nok 70 - refuses overwriting an existing replay\nok 71 - refuses mixed archive and raw capture inputs\nok 72 - rejects gzip without a complete trailer\nok 73 - rejects trailing bytes after gzip\nok 74 - rejects trailing data after a valid JSON prefix\nok 75 - coordinated corruption has internally agreeing projections\nok 76 - independent reference rejects internally consistent altered timings\nok 77 - reference mismatch publishes no PASS directory\n1..77\nok\nAll tests successful.\nFiles=1, Tests=77, 10 wallclock secs ( 0.02 usr  0.01 sys +  9.69 cusr  0.11 csys =  9.83 CPU)\nResult: PASS\n"
+      },
+      {
+         "argv" : [
+            "timeout",
+            "--kill-after=10s",
+            "180s",
+            "perl",
+            "kern/decode_forensics.pl",
+            "--archive",
+            "validation/issue10",
+            "--out",
+            "/home/nate/codex/flash-issue10-resume-aqTBbOhE/native-validator/replay"
+         ],
+         "exit" : 0,
+         "name" : "archive-replay",
+         "stderr" : "",
+         "stdout" : "{\n   \"analyzer_sha256\" : {\n      \"kern/DecodeArchive.pm\" : \"a08af06ab768af6a21ba80139e2260c21ce388fc08261c2d7e7accba273ffb99\",\n      \"kern/decode_forensics.pl\" : \"fae243ea42ee1a0d889043c4872e9d63360be11d8629423b67f2086cdea7c443\"\n   },\n   \"die_frames\" : 360,\n   \"files\" : 134,\n   \"identity_manifest_sha256\" : \"3941a06371d32880ba10e708c5ad6960d3114bf12caa1f36086e3eb2d237c295\",\n   \"input_sha256\" : {\n      \"matched-phase-deltas.json\" : \"6a8a7bb95b8c7d0e2d4cb77451e1beb999a4d54470ed1896609bc96c3ff5f85b\",\n      \"traced-all-die-phase-totals.json.gz\" : \"ff780ef850e4d0e65ccd19ddbb3a0153615a4cb52bdec1af167f5d413dcdce0b\",\n      \"traced-summary.json\" : \"f05271c084148b2b4e66b9bafd3d99bf857ea3ba30140e7ddca51d7e737878d3\",\n      \"traced.json.gz\" : \"34aaea18a91b7dfd159296eee88e3507fb01346d0982533c456aac3a9ff8dc23\",\n      \"untraced-summary.json\" : \"d09c11585f1b4c916fba67840af66793c1f0aa7b41b851f53aa5e46f654fdd64\",\n      \"untraced.json.gz\" : \"f7e2c51e06c5d04e1354537a9297817aef17f2d011265fbaf5a5f261da142430\"\n   },\n   \"max_recomputed_residual_us\" : 1.45519152283669e-11,\n   \"max_summary_difference\" : 0,\n   \"scope\" : \"Compact archive consistency and numerical replay only; raw phase CSVs were not re-read; no GPU inference or issue-acceptance claim.\",\n   \"status\" : \"PASS\",\n   \"summary_tolerance\" : 1e-08,\n   \"traced_runs\" : 60,\n   \"untraced_runs\" : 20\n}\n"
+      },
+      {
+         "argv" : [
+            "timeout",
+            "--kill-after=10s",
+            "30s",
+            "git",
+            "diff",
+            "--check"
+         ],
+         "exit" : 0,
+         "name" : "diff-check",
+         "stderr" : "",
+         "stdout" : ""
+      }
+   ],
+   "counter_tests" : 57,
+   "cwd" : "/home/nate/codex/flash-issue10-resume-aqTBbOhE/tree",
+   "hostname" : "engi\n",
+   "scope" : "CPU validation and replay of archived GPU measurements; this driver launches no GPU workload",
+   "source_identities" : [
+      {
+         "bytes" : 19436,
+         "path" : "/home/nate/codex/flash-issue10-resume-aqTBbOhE/tree/kern/decode_counter_capture.pl",
+         "sha256" : "ee382a4d4c9f504df201b081225d6128128ab21abedbc4f68ab1ea81ac1258d5"
+      },
+      {
+         "bytes" : 9754,
+         "path" : "/home/nate/codex/flash-issue10-resume-aqTBbOhE/tree/kern/decode_counter_capture_test.pl",
+         "sha256" : "0ad4a1cbef0e0b53a5c0a273243f80b6219567e00b99641699a36a9df22b47a8"
+      },
+      {
+         "bytes" : 11628,
+         "path" : "/home/nate/codex/flash-issue10-resume-aqTBbOhE/tree/kern/decode_forensics.pl",
+         "sha256" : "fae243ea42ee1a0d889043c4872e9d63360be11d8629423b67f2086cdea7c443"
+      },
+      {
+         "bytes" : 18538,
+         "path" : "/home/nate/codex/flash-issue10-resume-aqTBbOhE/tree/kern/DecodeArchive.pm",
+         "sha256" : "a08af06ab768af6a21ba80139e2260c21ce388fc08261c2d7e7accba273ffb99"
+      }
+   ],
+   "status" : "PASS"
+}

@@ -1,0 +1,95 @@
+QUEUED_ISSUE=10 PID=1097821 HOST=archy
+2026-10-18T06:10:00Z
+ACQUIRED: finite issue-10 counter campaign
+2026-10-18T06:10:59Z
+CASE=nv775-clustered
+ACQUIRED: shared GPU lock; read-only device preflight
+MEASURED: traffic host=0; native outputs and profiler rows validated
+MEASURED: traffic host=1; native outputs and profiler rows validated
+MEASURED: transactions host=0; native outputs and profiler rows validated
+MEASURED: transactions host=1; native outputs and profiler rows validated
+MEASURED: execution host=0; native outputs and profiler rows validated
+MEASURED: execution host=1; native outputs and profiler rows validated
+MEASURED: stalls host=0; native outputs and profiler rows validated
+MEASURED: stalls host=1; native outputs and profiler rows validated
+PASS: Single-die native gather counter workload, not full-model timing
+CASE=nv775-even
+ACQUIRED: shared GPU lock; read-only device preflight
+MEASURED: traffic host=0; native outputs and profiler rows validated
+MEASURED: traffic host=1; native outputs and profiler rows validated
+MEASURED: transactions host=0; native outputs and profiler rows validated
+MEASURED: transactions host=1; native outputs and profiler rows validated
+MEASURED: execution host=0; native outputs and profiler rows validated
+MEASURED: execution host=1; native outputs and profiler rows validated
+MEASURED: stalls host=0; native outputs and profiler rows validated
+MEASURED: stalls host=1; native outputs and profiler rows validated
+PASS: Single-die native gather counter workload, not full-model timing
+CASE=nv775-random
+ACQUIRED: shared GPU lock; read-only device preflight
+MEASURED: traffic host=0; native outputs and profiler rows validated
+MEASURED: traffic host=1; native outputs and profiler rows validated
+MEASURED: transactions host=0; native outputs and profiler rows validated
+MEASURED: transactions host=1; native outputs and profiler rows validated
+MEASURED: execution host=0; native outputs and profiler rows validated
+MEASURED: execution host=1; native outputs and profiler rows validated
+MEASURED: stalls host=0; native outputs and profiler rows validated
+MEASURED: stalls host=1; native outputs and profiler rows validated
+PASS: Single-die native gather counter workload, not full-model timing
+CASE=nv775-changing
+ACQUIRED: shared GPU lock; read-only device preflight
+MEASURED: traffic host=0; native outputs and profiler rows validated
+MEASURED: traffic host=1; native outputs and profiler rows validated
+MEASURED: transactions host=0; native outputs and profiler rows validated
+MEASURED: transactions host=1; native outputs and profiler rows validated
+MEASURED: execution host=0; native outputs and profiler rows validated
+MEASURED: execution host=1; native outputs and profiler rows validated
+MEASURED: stalls host=0; native outputs and profiler rows validated
+MEASURED: stalls host=1; native outputs and profiler rows validated
+PASS: Single-die native gather counter workload, not full-model timing
+CASE=nv2000-clustered
+ACQUIRED: shared GPU lock; read-only device preflight
+MEASURED: traffic host=0; native outputs and profiler rows validated
+MEASURED: traffic host=1; native outputs and profiler rows validated
+MEASURED: transactions host=0; native outputs and profiler rows validated
+MEASURED: transactions host=1; native outputs and profiler rows validated
+MEASURED: execution host=0; native outputs and profiler rows validated
+MEASURED: execution host=1; native outputs and profiler rows validated
+MEASURED: stalls host=0; native outputs and profiler rows validated
+MEASURED: stalls host=1; native outputs and profiler rows validated
+PASS: Single-die native gather counter workload, not full-model timing
+CASE=nv2000-even
+ACQUIRED: shared GPU lock; read-only device preflight
+MEASURED: traffic host=0; native outputs and profiler rows validated
+MEASURED: traffic host=1; native outputs and profiler rows validated
+MEASURED: transactions host=0; native outputs and profiler rows validated
+MEASURED: transactions host=1; native outputs and profiler rows validated
+MEASURED: execution host=0; native outputs and profiler rows validated
+MEASURED: execution host=1; native outputs and profiler rows validated
+MEASURED: stalls host=0; native outputs and profiler rows validated
+MEASURED: stalls host=1; native outputs and profiler rows validated
+PASS: Single-die native gather counter workload, not full-model timing
+CASE=nv2000-random
+ACQUIRED: shared GPU lock; read-only device preflight
+MEASURED: traffic host=0; native outputs and profiler rows validated
+MEASURED: traffic host=1; native outputs and profiler rows validated
+MEASURED: transactions host=0; native outputs and profiler rows validated
+MEASURED: transactions host=1; native outputs and profiler rows validated
+MEASURED: execution host=0; native outputs and profiler rows validated
+MEASURED: execution host=1; native outputs and profiler rows validated
+MEASURED: stalls host=0; native outputs and profiler rows validated
+MEASURED: stalls host=1; native outputs and profiler rows validated
+PASS: Single-die native gather counter workload, not full-model timing
+CASE=nv2000-changing
+ACQUIRED: shared GPU lock; read-only device preflight
+MEASURED: traffic host=0; native outputs and profiler rows validated
+MEASURED: traffic host=1; native outputs and profiler rows validated
+MEASURED: transactions host=0; native outputs and profiler rows validated
+MEASURED: transactions host=1; native outputs and profiler rows validated
+MEASURED: execution host=0; native outputs and profiler rows validated
+MEASURED: execution host=1; native outputs and profiler rows validated
+MEASURED: stalls host=0; native outputs and profiler rows validated
+MEASURED: stalls host=1; native outputs and profiler rows validated
+PASS: Single-die native gather counter workload, not full-model timing
+COMPLETE: finite issue-10 counter campaign; no resident-service mutations
+2026-10-18T06:13:27Z
+QUEUE_EXIT=0

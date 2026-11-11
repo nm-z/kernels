@@ -1,0 +1,132 @@
+{
+   "metrics" : {
+      "stall_memory_dependency" : {
+         "avg" : {
+            "raw" : "83.804328%",
+            "unit" : "percent",
+            "value" : 83.804328
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "84.731842%",
+            "unit" : "percent",
+            "value" : 84.731842
+         },
+         "min" : {
+            "raw" : "82.091929%",
+            "unit" : "percent",
+            "value" : 82.091929
+         }
+      },
+      "stall_memory_throttle" : {
+         "avg" : {
+            "raw" : "0.000694%",
+            "unit" : "percent",
+            "value" : 0.000694
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "0.000742%",
+            "unit" : "percent",
+            "value" : 0.000742
+         },
+         "min" : {
+            "raw" : "0.000654%",
+            "unit" : "percent",
+            "value" : 0.000654
+         }
+      },
+      "stall_sync" : {
+         "avg" : {
+            "raw" : "3.612318%",
+            "unit" : "percent",
+            "value" : 3.612318
+         },
+         "device" : "Tesla M60 (0)",
+         "invocations" : 18,
+         "kernel" : "die",
+         "max" : {
+            "raw" : "4.249309%",
+            "unit" : "percent",
+            "value" : 4.249309
+         },
+         "min" : {
+            "raw" : "3.208637%",
+            "unit" : "percent",
+            "value" : 3.208637
+         }
+      }
+   },
+   "raw_profiler" : {
+      "bytes" : 995,
+      "path" : "/tmp/flash-issue10-after7-9VF51acq/nv775-changing/stalls-host0.nvprof.csv",
+      "sha256" : "9d4bdad2cadc859f7ddadb76d00181b07647eeb10d83ea7151bba2ddac2a7ca5"
+   },
+   "raw_workload" : {
+      "bytes" : 276,
+      "path" : "/tmp/flash-issue10-after7-9VF51acq/nv775-changing/stalls-host0.workload.csv",
+      "sha256" : "276fc825997df608d5d90161e42ed7ec55601ee3ccde7d9ec2150688cc70f07d"
+   },
+   "verified_rows" : [
+      {
+         "iteration" : 0,
+         "selection" : "7895e62fcfd746a2",
+         "verified_output" : "14a5cff6c3217450"
+      },
+      {
+         "iteration" : 1,
+         "selection" : "681aa1e63866cb25",
+         "verified_output" : "838bd8d27252fda9"
+      },
+      {
+         "iteration" : 2,
+         "selection" : "699fe99f113b848c",
+         "verified_output" : "795de0542714418e"
+      },
+      {
+         "iteration" : 3,
+         "selection" : "ad00bbcca13604b0",
+         "verified_output" : "8b525b2d914d2e93"
+      }
+   ],
+   "workload" : {
+      "budget" : 512,
+      "cache_fnv1a64" : "09b60db5a807bd65",
+      "destination_unique_address_bytes" : 8388608,
+      "gpu_us_max" : 103162.590026855,
+      "gpu_us_mean" : 95568.822860718,
+      "gpu_us_min" : 84762.016296387,
+      "gpu_us_p50" : 92260.704040527,
+      "gpu_us_p90" : 103162.590026855,
+      "gpu_us_p99" : 103162.590026855,
+      "gpu_us_stddev" : 7548.534999092,
+      "hardware_counter_gate" : "not_run",
+      "host_kv" : 0,
+      "iterations" : 4,
+      "logical_keys" : 2048,
+      "measured_hardware_transaction_bytes" : null,
+      "nv" : 775,
+      "pattern" : "changing",
+      "physical_gathered_slots" : 2048,
+      "physical_k_head_rows" : 4096,
+      "physical_v_head_rows" : 4096,
+      "position_policy" : "fixed visible length; layout varies per launch",
+      "preflight_verified_all" : true,
+      "quantile_method" : "nearest_rank",
+      "seed" : 4242,
+      "selection_changes" : 3,
+      "selection_upload_timed" : false,
+      "selections_fnv1a64" : "0c10b45e0acefde6",
+      "source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+      "source_unique_address_bytes" : 2228224,
+      "tail" : 0,
+      "timing_scope" : "CUDA event interval including persistent kernel framework",
+      "verified_output_signature_changes" : 3,
+      "visible" : 3100,
+      "warmup_launches" : 10
+   }
+}

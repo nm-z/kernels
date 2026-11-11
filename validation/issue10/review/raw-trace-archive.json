@@ -1,0 +1,2107 @@
+{
+  "root": "/home/nate/claude/flash-sass-prs/paired-depth-trace3/runs",
+  "files": [
+    {
+      "path": "depth-2048-pair-0-host-die-0.csv.gz",
+      "bytes": 3599366,
+      "sha256": "cd7041aee7baea98b53083539a3471cce6a0b30602b71ae5fac1a49da23b37df"
+    },
+    {
+      "path": "depth-2048-pair-0-host-die-1.csv.gz",
+      "bytes": 3789821,
+      "sha256": "cd7a7b44603a808df68498cc1f698cbbf54198d1384e886ce9be2ac22d0b101c"
+    },
+    {
+      "path": "depth-2048-pair-0-host-die-2.csv.gz",
+      "bytes": 3601492,
+      "sha256": "d6bc61610ec838d80b841ef6773abffb8e43ccf2d2a06dd5c9a8efb304215e5a"
+    },
+    {
+      "path": "depth-2048-pair-0-host-die-3.csv.gz",
+      "bytes": 3600667,
+      "sha256": "b61cdf284c31967a123cf842396e9ad4b4096fd5a3eb9b5ba8c31c316d1469da"
+    },
+    {
+      "path": "depth-2048-pair-0-host-die-4.csv.gz",
+      "bytes": 3807500,
+      "sha256": "d093e91c2093bf9ff3d3e941a7e239e336a68e5d8bd03173d93b1253a1aba2e7"
+    },
+    {
+      "path": "depth-2048-pair-0-host-die-5.csv.gz",
+      "bytes": 3795749,
+      "sha256": "edd03870a499755f5bd7dcd0e359e3c0250fcbd85c5db725755297c96fce22a7"
+    },
+    {
+      "path": "depth-2048-pair-0-host-host.csv.gz",
+      "bytes": 3683,
+      "sha256": "00bf11f02f8fd53dd5520c5174146cdd4a75c946a9a7e93c0bdbfa6352e8a16a"
+    },
+    {
+      "path": "depth-2048-pair-0-vram-die-0.csv.gz",
+      "bytes": 3613379,
+      "sha256": "8ad1b4cf224c6b6de896efebe1065780ec5cb7ec4f7db971ca181f52e196485b"
+    },
+    {
+      "path": "depth-2048-pair-0-vram-die-1.csv.gz",
+      "bytes": 3791259,
+      "sha256": "129dd9bb5f7807c6c6459f65bbd18c825d78505151933fb8a8f3421af1efc909"
+    },
+    {
+      "path": "depth-2048-pair-0-vram-die-2.csv.gz",
+      "bytes": 3607539,
+      "sha256": "cabdbeada6deadad3f05e7cf2a4ce78ad33529975806b24e392eebe6bcdf26bc"
+    },
+    {
+      "path": "depth-2048-pair-0-vram-die-3.csv.gz",
+      "bytes": 3597182,
+      "sha256": "7e83ed6526261e76123a430e6c9942f4c415a5bef5b042d9cf4d403c2563276d"
+    },
+    {
+      "path": "depth-2048-pair-0-vram-die-4.csv.gz",
+      "bytes": 3804624,
+      "sha256": "5cb5855e0f6e94aabfb9da6c5a19507b1ecdbc82356bdd06350ae684c32d918b"
+    },
+    {
+      "path": "depth-2048-pair-0-vram-die-5.csv.gz",
+      "bytes": 3805659,
+      "sha256": "8893771354c150834ae2cbfd7269ac631051500571da1a999bf1c72d041f5277"
+    },
+    {
+      "path": "depth-2048-pair-0-vram-host.csv.gz",
+      "bytes": 3586,
+      "sha256": "086003f5a111a67d4e9cbdaed224dedb8646e68fd28d355322ba40471179533a"
+    },
+    {
+      "path": "depth-2048-pair-1-host-die-0.csv.gz",
+      "bytes": 3599412,
+      "sha256": "906377378cdd9e20a900c8ad2ca7c9bd08523f5a50850b4c62fb4bba46bad3d0"
+    },
+    {
+      "path": "depth-2048-pair-1-host-die-1.csv.gz",
+      "bytes": 3789880,
+      "sha256": "0fdcc41ec138f19b1747203650e2d2e9c7d2bc8422d636bbf8b49526e8bb4e9a"
+    },
+    {
+      "path": "depth-2048-pair-1-host-die-2.csv.gz",
+      "bytes": 3601363,
+      "sha256": "2f725dd610b66fb98d3645c68f31f4e52caaccdb33e4a875b2ace289301d6505"
+    },
+    {
+      "path": "depth-2048-pair-1-host-die-3.csv.gz",
+      "bytes": 3600227,
+      "sha256": "101f947aecece6be4e63557432223a9a9c7930081b5311bcbfdab2d62c8cd21b"
+    },
+    {
+      "path": "depth-2048-pair-1-host-die-4.csv.gz",
+      "bytes": 3806882,
+      "sha256": "866f50446a581c1e3661b5ab539029164f25f54e7364e5a6891b051811dbc011"
+    },
+    {
+      "path": "depth-2048-pair-1-host-die-5.csv.gz",
+      "bytes": 3794755,
+      "sha256": "c05bf826a4f3ce56041a8b49fa512fb28a024e88881dc28ce326032f7b9561a6"
+    },
+    {
+      "path": "depth-2048-pair-1-host-host.csv.gz",
+      "bytes": 3643,
+      "sha256": "718c67ac0c339266c199e76b008258768e459e0481332dfca49d57fa1c2fcebd"
+    },
+    {
+      "path": "depth-2048-pair-1-vram-die-0.csv.gz",
+      "bytes": 3613559,
+      "sha256": "583d81900f2c79a7224c126339cad89ce950b47e33ddee29355bff5972f64a46"
+    },
+    {
+      "path": "depth-2048-pair-1-vram-die-1.csv.gz",
+      "bytes": 3789696,
+      "sha256": "6dddcde2a30bfc4718b981710da5737791f577aabca0856fb031240916346fdd"
+    },
+    {
+      "path": "depth-2048-pair-1-vram-die-2.csv.gz",
+      "bytes": 3608669,
+      "sha256": "56145521d0f9e8f2b256487863cbdbfe1e6cf229d7aef6eef0c7f7923e954c76"
+    },
+    {
+      "path": "depth-2048-pair-1-vram-die-3.csv.gz",
+      "bytes": 3596627,
+      "sha256": "424cfb573e235d8a54fc974dc76ab8d8b389a6e0d733458eb6c9779f2225857b"
+    },
+    {
+      "path": "depth-2048-pair-1-vram-die-4.csv.gz",
+      "bytes": 3805001,
+      "sha256": "79d3b8746ddf4c11ea5dc10be499e91cebd745ce748ad14dc6a242828641aed2"
+    },
+    {
+      "path": "depth-2048-pair-1-vram-die-5.csv.gz",
+      "bytes": 3805918,
+      "sha256": "b693a616aa4605c95fe476b027c1cb1ea10cd1078f81ce3f317084841e66fa5e"
+    },
+    {
+      "path": "depth-2048-pair-1-vram-host.csv.gz",
+      "bytes": 3607,
+      "sha256": "013ae24ae959831bfbe9f7655847b7b5551504db9c2d9fa6eb607c442966ed1e"
+    },
+    {
+      "path": "depth-2048-pair-2-host-die-0.csv.gz",
+      "bytes": 3599103,
+      "sha256": "c2ffacfe51e9d301dae3045ebaddc38d8cc0bd48030111ebc06b55b6db4d0a98"
+    },
+    {
+      "path": "depth-2048-pair-2-host-die-1.csv.gz",
+      "bytes": 3789347,
+      "sha256": "be8db78338d3f4b36596c29e011367b69590b80e3384405f2378efc2e2f654b9"
+    },
+    {
+      "path": "depth-2048-pair-2-host-die-2.csv.gz",
+      "bytes": 3602012,
+      "sha256": "61a19e56bc2f162846383c7fd09af48e7cc270d103b56e73eab345baaabba2d8"
+    },
+    {
+      "path": "depth-2048-pair-2-host-die-3.csv.gz",
+      "bytes": 3599556,
+      "sha256": "3f6eb43e8c16f1f2bd292e9d36805456c71e8bacb98de5c8a159b7631bddc7b7"
+    },
+    {
+      "path": "depth-2048-pair-2-host-die-4.csv.gz",
+      "bytes": 3807055,
+      "sha256": "dd5d205d82f4c525524111006764dc56f08be0edc64d9f246c0beb776e653801"
+    },
+    {
+      "path": "depth-2048-pair-2-host-die-5.csv.gz",
+      "bytes": 3794517,
+      "sha256": "6e4360bfdd77c5f87c705521ed22bb00e3ef81dd525b42e990879dbe1fca580b"
+    },
+    {
+      "path": "depth-2048-pair-2-host-host.csv.gz",
+      "bytes": 3648,
+      "sha256": "0a0d70d9550284ae4481fe29b5c02ca20537c453687da410d2780190e03e9a7b"
+    },
+    {
+      "path": "depth-2048-pair-2-vram-die-0.csv.gz",
+      "bytes": 3613025,
+      "sha256": "4a64ad55189d279092d06f8c2faf196d1e03a612937970c9adb855e12c54cbf3"
+    },
+    {
+      "path": "depth-2048-pair-2-vram-die-1.csv.gz",
+      "bytes": 3790512,
+      "sha256": "6380f48948d7abb19b0d4a7a98c8f45a6edfe59c83de389830858689249f1abc"
+    },
+    {
+      "path": "depth-2048-pair-2-vram-die-2.csv.gz",
+      "bytes": 3608007,
+      "sha256": "89e0ca5a75ef69f68915b32c39c708f96e089887d9660d13d181b31e99ee3212"
+    },
+    {
+      "path": "depth-2048-pair-2-vram-die-3.csv.gz",
+      "bytes": 3595768,
+      "sha256": "0982d6f992e56faf4ea997381c4d41aa7ea0d1b7657de592069dc9a1c7b02fb8"
+    },
+    {
+      "path": "depth-2048-pair-2-vram-die-4.csv.gz",
+      "bytes": 3804951,
+      "sha256": "2f6dc3a3c14631810caa0be90be7e8a9168e12aea50674e96027dbcc505b5321"
+    },
+    {
+      "path": "depth-2048-pair-2-vram-die-5.csv.gz",
+      "bytes": 3806418,
+      "sha256": "59d60452845ea0e2bc08a479277ad8b78f61815d8995da870efdaf559e408015"
+    },
+    {
+      "path": "depth-2048-pair-2-vram-host.csv.gz",
+      "bytes": 3580,
+      "sha256": "1c59355cd119b9ea72f92dffcbd14b60128cac62da4231d892bb502512c2c40c"
+    },
+    {
+      "path": "depth-2048-pair-3-host-die-0.csv.gz",
+      "bytes": 3599375,
+      "sha256": "9c8d566b5a140565a8a67a90f269c59ed5067333e1303d8fec9f646088aa4961"
+    },
+    {
+      "path": "depth-2048-pair-3-host-die-1.csv.gz",
+      "bytes": 3790790,
+      "sha256": "77d8eef65bfa1340b3c8e2ca946d4e39c934620faf3e6972b40fadd02052cf82"
+    },
+    {
+      "path": "depth-2048-pair-3-host-die-2.csv.gz",
+      "bytes": 3600562,
+      "sha256": "33556c6d77d5d3bb9f644153fff8c45078baa9bd3014a17dee9c8840d91dde7a"
+    },
+    {
+      "path": "depth-2048-pair-3-host-die-3.csv.gz",
+      "bytes": 3600884,
+      "sha256": "667572093eec15123eaed04c27b1c540beb69ee07f5ef46da71d2d6615bb088a"
+    },
+    {
+      "path": "depth-2048-pair-3-host-die-4.csv.gz",
+      "bytes": 3807494,
+      "sha256": "245a9d3eee1cd77a36227185d8ec92623f9479a707f1ffa01e8abeeaf686a09d"
+    },
+    {
+      "path": "depth-2048-pair-3-host-die-5.csv.gz",
+      "bytes": 3794941,
+      "sha256": "ff45f87ee68770c0a55a801e61b6e752161c6fbf2c87b3285d69478c8ab81039"
+    },
+    {
+      "path": "depth-2048-pair-3-host-host.csv.gz",
+      "bytes": 3650,
+      "sha256": "d8b01751b25abd20cb8d14676f6a87432c4ce3a9a9de86dd89e4061ee22c1f10"
+    },
+    {
+      "path": "depth-2048-pair-3-vram-die-0.csv.gz",
+      "bytes": 3613227,
+      "sha256": "f2e39f67be1b7f7535a05babf66638804f57694c94611332343623f6f9ca96c5"
+    },
+    {
+      "path": "depth-2048-pair-3-vram-die-1.csv.gz",
+      "bytes": 3790432,
+      "sha256": "9f50bd1a19ae40fcc0a61caea6c0a8ddb6672f450386e17b0ab17a460bfefba5"
+    },
+    {
+      "path": "depth-2048-pair-3-vram-die-2.csv.gz",
+      "bytes": 3607557,
+      "sha256": "1bef97fc91acd6584d670bdfde2dd9cb4fe6df876c52b94c98be98c709bdb765"
+    },
+    {
+      "path": "depth-2048-pair-3-vram-die-3.csv.gz",
+      "bytes": 3595572,
+      "sha256": "73edf77b73b4a88bae75b094e0c956d94873d38a25a7fa0f7b16ff01a9013088"
+    },
+    {
+      "path": "depth-2048-pair-3-vram-die-4.csv.gz",
+      "bytes": 3804936,
+      "sha256": "6592273c0a0806bf04a3da6547a011f242253f02702b22326cb4b1e7956923bf"
+    },
+    {
+      "path": "depth-2048-pair-3-vram-die-5.csv.gz",
+      "bytes": 3806784,
+      "sha256": "e7436260eca0360677e34f90f92cb2fadbc3f263b476e7f62ac83e975f1396fe"
+    },
+    {
+      "path": "depth-2048-pair-3-vram-host.csv.gz",
+      "bytes": 3576,
+      "sha256": "1df2bf39fc03f7d6a682b147cafe28145b5ac5765403c72b353ebf31b7e91a53"
+    },
+    {
+      "path": "depth-2048-pair-4-host-die-0.csv.gz",
+      "bytes": 3599352,
+      "sha256": "4277e33c2648f254689f5c10b05c5b6a0cf7dc423d46cf620dffe05248502cbd"
+    },
+    {
+      "path": "depth-2048-pair-4-host-die-1.csv.gz",
+      "bytes": 3789858,
+      "sha256": "ade8e32662d01e3518b189978a6adcc1f4587d0c421c496aff020160ffe2721e"
+    },
+    {
+      "path": "depth-2048-pair-4-host-die-2.csv.gz",
+      "bytes": 3600348,
+      "sha256": "286cd9afdb21f3f39bc8cc9b9b3fc6ffe67385e9ff243418b524536541503daf"
+    },
+    {
+      "path": "depth-2048-pair-4-host-die-3.csv.gz",
+      "bytes": 3600651,
+      "sha256": "389975fa455075a2630f002fa21ad2d9e97962c3f84c94f7b823cd549ed132d2"
+    },
+    {
+      "path": "depth-2048-pair-4-host-die-4.csv.gz",
+      "bytes": 3806746,
+      "sha256": "df4a68c6e70a5737c6a607f547e79995f97e8d863b7aa81b57338318a4903ac5"
+    },
+    {
+      "path": "depth-2048-pair-4-host-die-5.csv.gz",
+      "bytes": 3795614,
+      "sha256": "d4188bb276f3f557febd83862265c1a56f83de8c79872658bbb33f969928fcb1"
+    },
+    {
+      "path": "depth-2048-pair-4-host-host.csv.gz",
+      "bytes": 3639,
+      "sha256": "8daacb7408f515dad2a5e5851ed6852608167b51c70b03f45cb17a1fb18e2853"
+    },
+    {
+      "path": "depth-2048-pair-4-vram-die-0.csv.gz",
+      "bytes": 3613363,
+      "sha256": "e1b68be1029f1d846be3f6c6afd1704c13b6074761bcf96e24efea110053fbbf"
+    },
+    {
+      "path": "depth-2048-pair-4-vram-die-1.csv.gz",
+      "bytes": 3789594,
+      "sha256": "381125a05373788b494eef65ec1f29243afd8ed84fe0ffe59d4ef864df551ae8"
+    },
+    {
+      "path": "depth-2048-pair-4-vram-die-2.csv.gz",
+      "bytes": 3608367,
+      "sha256": "f813a344ea95675b9c512076a1d4e44e553143838d2f263d800559b19f324ae3"
+    },
+    {
+      "path": "depth-2048-pair-4-vram-die-3.csv.gz",
+      "bytes": 3596136,
+      "sha256": "c06b354d48bf7489c8c72aca941f9550dab8b24ca2699a1e1d164d5915105463"
+    },
+    {
+      "path": "depth-2048-pair-4-vram-die-4.csv.gz",
+      "bytes": 3804249,
+      "sha256": "2b9701e9ca73c6ec577eb57153908c0297f274d0fb039c34ddf41d9968c0ba39"
+    },
+    {
+      "path": "depth-2048-pair-4-vram-die-5.csv.gz",
+      "bytes": 3805052,
+      "sha256": "fbdbb24afb18220ee0990598ecf01b3fb18f6270ffdd8c0316f5a9070d618ab8"
+    },
+    {
+      "path": "depth-2048-pair-4-vram-host.csv.gz",
+      "bytes": 3619,
+      "sha256": "1569984032c8d07a9fdcc32f9350d34396cbae064649790947969e3e4905029a"
+    },
+    {
+      "path": "depth-2051-pair-0-host-die-0.csv.gz",
+      "bytes": 3599199,
+      "sha256": "5347f0249645409aed495db5534154d4dfed1affe23fd89ea97140ce8fd40461"
+    },
+    {
+      "path": "depth-2051-pair-0-host-die-1.csv.gz",
+      "bytes": 3789936,
+      "sha256": "7e7829b34b65e926f4867dca8d296077923f935c9e4bdc12dd759a6771cee989"
+    },
+    {
+      "path": "depth-2051-pair-0-host-die-2.csv.gz",
+      "bytes": 3601199,
+      "sha256": "59b0380f93072b8e048f2510c67ce52ac11b3f8dca981580172f502c18eedf7e"
+    },
+    {
+      "path": "depth-2051-pair-0-host-die-3.csv.gz",
+      "bytes": 3601534,
+      "sha256": "f481551d1e162777571a116366f37e118296b3d4b9440dbfa9f174fbe0cf7ff0"
+    },
+    {
+      "path": "depth-2051-pair-0-host-die-4.csv.gz",
+      "bytes": 3806713,
+      "sha256": "75bf90a7206401baf38b46ebd27c029308c29e522f4c2bcb6ae3fd949c530821"
+    },
+    {
+      "path": "depth-2051-pair-0-host-die-5.csv.gz",
+      "bytes": 3796098,
+      "sha256": "c8cf2a9375be1b46d04fca033d2de51ff12f51f2a0578e97f564474868877bf3"
+    },
+    {
+      "path": "depth-2051-pair-0-host-host.csv.gz",
+      "bytes": 3746,
+      "sha256": "324a2ec6b6a50f555b4c10924f75e4b806ed1d53cc87d9cb9294273f1129e125"
+    },
+    {
+      "path": "depth-2051-pair-0-vram-die-0.csv.gz",
+      "bytes": 3612218,
+      "sha256": "2d46e8f20059e6b5b994e3decb4c3bff9f739158eaaf043deee3f9400cf49fa3"
+    },
+    {
+      "path": "depth-2051-pair-0-vram-die-1.csv.gz",
+      "bytes": 3790116,
+      "sha256": "802c221181211729bfc5fbf9cfd658ec2fb1390bd46ce91e8f16dc21ab689d73"
+    },
+    {
+      "path": "depth-2051-pair-0-vram-die-2.csv.gz",
+      "bytes": 3607674,
+      "sha256": "fd6946a0da0ad25d20f4e1bb856812f8cc94c37afb8983131b9dc9acad5aab62"
+    },
+    {
+      "path": "depth-2051-pair-0-vram-die-3.csv.gz",
+      "bytes": 3596830,
+      "sha256": "f5ea7e63db1347a5110f2111abf6874eb35a78e87f6f7d31f981375350a96257"
+    },
+    {
+      "path": "depth-2051-pair-0-vram-die-4.csv.gz",
+      "bytes": 3805122,
+      "sha256": "5538a80da05b55b21f0957dfe35c1e2dafa5c347c0c31be458b8f447eae343f8"
+    },
+    {
+      "path": "depth-2051-pair-0-vram-die-5.csv.gz",
+      "bytes": 3805095,
+      "sha256": "daaef67fb7652edb5a636185dd827e23e7c088562c2622e24f18a978528bd895"
+    },
+    {
+      "path": "depth-2051-pair-0-vram-host.csv.gz",
+      "bytes": 3610,
+      "sha256": "ec6d6a7445cf11736427e2bfe5971ec2d6b8e4e2126305d93fb1cae2559056c1"
+    },
+    {
+      "path": "depth-2051-pair-1-host-die-0.csv.gz",
+      "bytes": 3599413,
+      "sha256": "5425f51efdaea8980211cc7799f333caa6389de162521a7705924eb3db38bfd0"
+    },
+    {
+      "path": "depth-2051-pair-1-host-die-1.csv.gz",
+      "bytes": 3790355,
+      "sha256": "330b7c27227652ab83a6bd389367f523507a2f36bd1e367d63552a03257bbe25"
+    },
+    {
+      "path": "depth-2051-pair-1-host-die-2.csv.gz",
+      "bytes": 3600874,
+      "sha256": "6675ca4a0e83307a388e1438093eb3b7cca058c30f8969f09072c2a133dc7ef6"
+    },
+    {
+      "path": "depth-2051-pair-1-host-die-3.csv.gz",
+      "bytes": 3600442,
+      "sha256": "d28f8a0e5bf4997fe1da3d6dd955c23fabd0da65520b14fd5bba1a0e2f177902"
+    },
+    {
+      "path": "depth-2051-pair-1-host-die-4.csv.gz",
+      "bytes": 3806540,
+      "sha256": "8c9609184e075a317fafe773963a23dca458e2e7b24c40fd2fc54e1420a423c2"
+    },
+    {
+      "path": "depth-2051-pair-1-host-die-5.csv.gz",
+      "bytes": 3794069,
+      "sha256": "30923d0c7430e41256b78626e7bcc3bef8fe0060046af445555fa5a865dc7e55"
+    },
+    {
+      "path": "depth-2051-pair-1-host-host.csv.gz",
+      "bytes": 3644,
+      "sha256": "29d056c2c25c86369c904e0a1e8532057b520261ab021575bd975ae0624e2c04"
+    },
+    {
+      "path": "depth-2051-pair-1-vram-die-0.csv.gz",
+      "bytes": 3613390,
+      "sha256": "6ad2c8169c5480757913903cb6060be474f70967ba7ed01b254afc48127a5607"
+    },
+    {
+      "path": "depth-2051-pair-1-vram-die-1.csv.gz",
+      "bytes": 3791042,
+      "sha256": "c6bb8514ea6d744cc76c84c2d46dc1e954d9285e5efd1c418c6751ad54683b81"
+    },
+    {
+      "path": "depth-2051-pair-1-vram-die-2.csv.gz",
+      "bytes": 3608321,
+      "sha256": "ddf79c2c726f61b196d4cb5831cd2f08abe5af4d762a01d1cd74040dad3a5d98"
+    },
+    {
+      "path": "depth-2051-pair-1-vram-die-3.csv.gz",
+      "bytes": 3596014,
+      "sha256": "42217db798c96a69a0239b676e842df37af38940af750b76d79d6d6937927d66"
+    },
+    {
+      "path": "depth-2051-pair-1-vram-die-4.csv.gz",
+      "bytes": 3804594,
+      "sha256": "a9bd32dfd2237af66e59ab26ab791f349765211f7b4364260d82ca06456c43d8"
+    },
+    {
+      "path": "depth-2051-pair-1-vram-die-5.csv.gz",
+      "bytes": 3805722,
+      "sha256": "d28c10692d49cf5c951f038c984bbf3cfc816861bbfa866eb1b42b1712041003"
+    },
+    {
+      "path": "depth-2051-pair-1-vram-host.csv.gz",
+      "bytes": 3631,
+      "sha256": "e63b4e0d5a44f00a8ab00fcdbc12bbfade29168aa84240828c7ef5e12347a06b"
+    },
+    {
+      "path": "depth-2051-pair-2-host-die-0.csv.gz",
+      "bytes": 3599612,
+      "sha256": "b2cd80b7d10f35565eca030fb0d7ba943679a0de04893849d15b38e2a01b5349"
+    },
+    {
+      "path": "depth-2051-pair-2-host-die-1.csv.gz",
+      "bytes": 3789391,
+      "sha256": "941c98ffc7a9c8f8d31da0626a81ec9b52b44d7a7780281ef6ff0d48f1f0a0d8"
+    },
+    {
+      "path": "depth-2051-pair-2-host-die-2.csv.gz",
+      "bytes": 3600991,
+      "sha256": "ad92dff42094228bbb2c51f4e8bdcbef3be9b270074d3e88c8ce460de9b03b54"
+    },
+    {
+      "path": "depth-2051-pair-2-host-die-3.csv.gz",
+      "bytes": 3599885,
+      "sha256": "b982ac584e65c098f33e502de2b2cb2ee40813af43c2953a976734d8d5d2dd47"
+    },
+    {
+      "path": "depth-2051-pair-2-host-die-4.csv.gz",
+      "bytes": 3807237,
+      "sha256": "1df6b346afb690669ef57e466a1b774c714408599765dbe60ca68d62c2aed535"
+    },
+    {
+      "path": "depth-2051-pair-2-host-die-5.csv.gz",
+      "bytes": 3794519,
+      "sha256": "b15eb49c9221811f178e16885b608ad9b19f1edb84b586b24183e46d6e49be83"
+    },
+    {
+      "path": "depth-2051-pair-2-host-host.csv.gz",
+      "bytes": 3635,
+      "sha256": "75d075ee5d2f5f78e4fef241bd4b1a47778198596d2e4cd9739b5f4e8e686ed7"
+    },
+    {
+      "path": "depth-2051-pair-2-vram-die-0.csv.gz",
+      "bytes": 3614221,
+      "sha256": "6c8853e4d4c9d317062573a2f77e256a61af75a884e52047d26010679351172f"
+    },
+    {
+      "path": "depth-2051-pair-2-vram-die-1.csv.gz",
+      "bytes": 3789600,
+      "sha256": "a8c408d9e3b8b0c84f9542f28c6a353deb830b9c648921b25ca5cf454d0677fe"
+    },
+    {
+      "path": "depth-2051-pair-2-vram-die-2.csv.gz",
+      "bytes": 3608440,
+      "sha256": "bf4de54fa507dfaa00e161fc67cd3deba9d3d3881af91e8ddb28553d70169e70"
+    },
+    {
+      "path": "depth-2051-pair-2-vram-die-3.csv.gz",
+      "bytes": 3596470,
+      "sha256": "909fc2de348e500b161eaa5944ef6535fdeeeb51f294e81f0b9e779989f1ecad"
+    },
+    {
+      "path": "depth-2051-pair-2-vram-die-4.csv.gz",
+      "bytes": 3804384,
+      "sha256": "041232db5c260997db60337dd7be0d3b3c58f6f7639161473dd97b7ee87aba11"
+    },
+    {
+      "path": "depth-2051-pair-2-vram-die-5.csv.gz",
+      "bytes": 3805952,
+      "sha256": "e7107ab801f6b7ec850be7763e53567e1a1a2c8b16f9cb60bd131db46eccaf5b"
+    },
+    {
+      "path": "depth-2051-pair-2-vram-host.csv.gz",
+      "bytes": 3627,
+      "sha256": "13833626cb7e845f7f879c3e131ee118b110a7c030aa807ed4a8125b63d133af"
+    },
+    {
+      "path": "depth-2051-pair-3-host-die-0.csv.gz",
+      "bytes": 3599033,
+      "sha256": "fdb2f9efd618337fd860edcf773608a5f8a3855ff43a49c98f924af8836108b9"
+    },
+    {
+      "path": "depth-2051-pair-3-host-die-1.csv.gz",
+      "bytes": 3789197,
+      "sha256": "f4ac4a48be14d8c5ff3014b30f21ddf4fa26eabb2c7f41296bb850a36c2f999b"
+    },
+    {
+      "path": "depth-2051-pair-3-host-die-2.csv.gz",
+      "bytes": 3601353,
+      "sha256": "78ab5b8107f3cb51354349ae9998c3e2c8b8c359cd519bcd890c6aec6bf11f13"
+    },
+    {
+      "path": "depth-2051-pair-3-host-die-3.csv.gz",
+      "bytes": 3600563,
+      "sha256": "0289a823378f6243ec61065421945fb70a0a477069562f64432666d900086b9e"
+    },
+    {
+      "path": "depth-2051-pair-3-host-die-4.csv.gz",
+      "bytes": 3806751,
+      "sha256": "29c2be51747ac692113b585b4678b73a870da60506ab112f0ebe35f8afbc0c5a"
+    },
+    {
+      "path": "depth-2051-pair-3-host-die-5.csv.gz",
+      "bytes": 3793976,
+      "sha256": "dcf41c8e923c87e73e0a9972f843387e6b714634aeb4143f93c83941b03b3a61"
+    },
+    {
+      "path": "depth-2051-pair-3-host-host.csv.gz",
+      "bytes": 3608,
+      "sha256": "023af63184edb38565bdb008838016a9f33e7fb6e5d3c1668d260338f9eb1fd1"
+    },
+    {
+      "path": "depth-2051-pair-3-vram-die-0.csv.gz",
+      "bytes": 3612401,
+      "sha256": "448141c52c99bec76312888a103a618ceafab03253a4facf4230979acd32eabb"
+    },
+    {
+      "path": "depth-2051-pair-3-vram-die-1.csv.gz",
+      "bytes": 3789847,
+      "sha256": "b2299ccf250cb953f49fe97ead974e04ead6a40b45a61b3e0cbc535ca7548c1d"
+    },
+    {
+      "path": "depth-2051-pair-3-vram-die-2.csv.gz",
+      "bytes": 3608393,
+      "sha256": "3ff5806323d3201d2a0059715395780cf10771251f739125044c6b4bec5cf07b"
+    },
+    {
+      "path": "depth-2051-pair-3-vram-die-3.csv.gz",
+      "bytes": 3596534,
+      "sha256": "606a4f6d7499f3b64116e1889f12a310e59c81fb430dad463752bf42665f6784"
+    },
+    {
+      "path": "depth-2051-pair-3-vram-die-4.csv.gz",
+      "bytes": 3804508,
+      "sha256": "975ddeb85870ca743a45bbc76a1456ed81ba9777dbfe9b2613fbcf8105c8f5b6"
+    },
+    {
+      "path": "depth-2051-pair-3-vram-die-5.csv.gz",
+      "bytes": 3805910,
+      "sha256": "adcfd89725e43da65eabdc806eed3c7c6ad4320fb4bc161bad5bbe1fa653ffe1"
+    },
+    {
+      "path": "depth-2051-pair-3-vram-host.csv.gz",
+      "bytes": 3572,
+      "sha256": "5700812959410564fac237c7eca40262119bc0befd19e362f32fd1fc246ec4ed"
+    },
+    {
+      "path": "depth-2051-pair-4-host-die-0.csv.gz",
+      "bytes": 3599809,
+      "sha256": "7c5bd7ca0cb313a3b9d66692c02c49c1c175789c31a92e175f23015272ab6c33"
+    },
+    {
+      "path": "depth-2051-pair-4-host-die-1.csv.gz",
+      "bytes": 3789235,
+      "sha256": "3ebf54258126462a2221993bf0640cc34b2b6108a367fc4c51ed874404a7ea09"
+    },
+    {
+      "path": "depth-2051-pair-4-host-die-2.csv.gz",
+      "bytes": 3601395,
+      "sha256": "8af1265d3948b1fcd06f2b934e9105fc4f09cbc2fc231b31a8fc880dc65f813b"
+    },
+    {
+      "path": "depth-2051-pair-4-host-die-3.csv.gz",
+      "bytes": 3600298,
+      "sha256": "cae258e6a4f791c5b249abe41aa4794a9ad1e87cb3ca8666ecd3c1370e44ead1"
+    },
+    {
+      "path": "depth-2051-pair-4-host-die-4.csv.gz",
+      "bytes": 3806890,
+      "sha256": "b86fa1a285d186173f694b6751044e409b72e34030089b98fe854663a5ae5004"
+    },
+    {
+      "path": "depth-2051-pair-4-host-die-5.csv.gz",
+      "bytes": 3794012,
+      "sha256": "67e6a6497dcafccf21591f65b35e3c5ec6fbb8ff0014a1ec2794095faba3c62d"
+    },
+    {
+      "path": "depth-2051-pair-4-host-host.csv.gz",
+      "bytes": 3595,
+      "sha256": "6a4d75a720744f2d0a645f425f1d3f961a039c2af12a8a386e7e40b164be5666"
+    },
+    {
+      "path": "depth-2051-pair-4-vram-die-0.csv.gz",
+      "bytes": 3613288,
+      "sha256": "dc597771f5b4105bf813a55880ca057655244af314b7d4f9ee9c49339f01c4dc"
+    },
+    {
+      "path": "depth-2051-pair-4-vram-die-1.csv.gz",
+      "bytes": 3790115,
+      "sha256": "d8e87d67195aa2760fec79d546019a05e3954ab40c210519037df9270e50ffc1"
+    },
+    {
+      "path": "depth-2051-pair-4-vram-die-2.csv.gz",
+      "bytes": 3607726,
+      "sha256": "2a2493a631b48abe39cdb55fbd91cb34bad0b49c36e499b55ac9f292a9bd546b"
+    },
+    {
+      "path": "depth-2051-pair-4-vram-die-3.csv.gz",
+      "bytes": 3595070,
+      "sha256": "c3202fa8083e12dca3688f5251bc3f004ab3ac5f0674eb1b75d944be334e33c3"
+    },
+    {
+      "path": "depth-2051-pair-4-vram-die-4.csv.gz",
+      "bytes": 3803942,
+      "sha256": "9062eaf4bb028ac9bb66c1c935717b07c4ffb7bd5a8b21bef74597fe1add0eae"
+    },
+    {
+      "path": "depth-2051-pair-4-vram-die-5.csv.gz",
+      "bytes": 3805543,
+      "sha256": "cd6ba610384043a291ebb4ccd3e0eeedbb0054aa96c9d4315f42ae75691a5af5"
+    },
+    {
+      "path": "depth-2051-pair-4-vram-host.csv.gz",
+      "bytes": 3604,
+      "sha256": "a17d553705a46e8f4d6e1f8ed69b8c7f6f711812edfc2a683c62626233dacb00"
+    },
+    {
+      "path": "depth-2052-pair-0-host-die-0.csv.gz",
+      "bytes": 3598472,
+      "sha256": "715521a2cfacfa2daed21a7d4e6f2cdad89782f91bc8c98a92b6df86d0c87e17"
+    },
+    {
+      "path": "depth-2052-pair-0-host-die-1.csv.gz",
+      "bytes": 3789103,
+      "sha256": "f47c274489e0875170b1d6dc92348615178d7620dac39acce5f2aa416972b41d"
+    },
+    {
+      "path": "depth-2052-pair-0-host-die-2.csv.gz",
+      "bytes": 3600097,
+      "sha256": "5686a2df081c91f7ea12e9fe74893936e3038724fdd8ddbfa90dfe32831c829a"
+    },
+    {
+      "path": "depth-2052-pair-0-host-die-3.csv.gz",
+      "bytes": 3600637,
+      "sha256": "23a0d1d71b53f6e79e1133759f1dafa0576d6ef40d2c4ab851ceb575efc88243"
+    },
+    {
+      "path": "depth-2052-pair-0-host-die-4.csv.gz",
+      "bytes": 3805904,
+      "sha256": "452c700153227e7c1159e0a880dc60a079ab45fbb93c9ed62ce6bd814789996c"
+    },
+    {
+      "path": "depth-2052-pair-0-host-die-5.csv.gz",
+      "bytes": 3793022,
+      "sha256": "640ba59274d61dece2caf0220e0d4513efd321b512878fb2ceecc805197775ec"
+    },
+    {
+      "path": "depth-2052-pair-0-host-host.csv.gz",
+      "bytes": 3650,
+      "sha256": "8ba9c3aa7ff496f4c29e64ea9d62450bf94c9e87bdba9ae82928a096cce11656"
+    },
+    {
+      "path": "depth-2052-pair-0-vram-die-0.csv.gz",
+      "bytes": 3613593,
+      "sha256": "f99678adc6288b879eccf7fba7986018f8c1382016de6162afacf12b0f2c23a4"
+    },
+    {
+      "path": "depth-2052-pair-0-vram-die-1.csv.gz",
+      "bytes": 3789560,
+      "sha256": "2a40b846b0c5e31b40192adc53df05ad68736393bbda0577513864353213ac3b"
+    },
+    {
+      "path": "depth-2052-pair-0-vram-die-2.csv.gz",
+      "bytes": 3607507,
+      "sha256": "3e5a74dce0c812bbe632084ee90e75048fa3d953132a410634caa470aba34781"
+    },
+    {
+      "path": "depth-2052-pair-0-vram-die-3.csv.gz",
+      "bytes": 3596171,
+      "sha256": "d8063bf3150290e0146a71f1b4aebffecfb4a6609fa29a4c15287b0c07c831fc"
+    },
+    {
+      "path": "depth-2052-pair-0-vram-die-4.csv.gz",
+      "bytes": 3805001,
+      "sha256": "2f38ac700644f403756058c5c3ae9f6f8730b54aa4ba04e100086d65695a098b"
+    },
+    {
+      "path": "depth-2052-pair-0-vram-die-5.csv.gz",
+      "bytes": 3806313,
+      "sha256": "492eaa0e459af3cec861a4cf70d9effe7061927f7933efbda0ca5ef6ccedbefd"
+    },
+    {
+      "path": "depth-2052-pair-0-vram-host.csv.gz",
+      "bytes": 3620,
+      "sha256": "6f03e71d167904810506f72e68a5e27180971feb3d7fa09b901f9580d1e8d11f"
+    },
+    {
+      "path": "depth-2052-pair-1-host-die-0.csv.gz",
+      "bytes": 3600153,
+      "sha256": "8cf06983477fe7abfbb759ab4eb066285c1dc60cb813a742676ec606c1f87028"
+    },
+    {
+      "path": "depth-2052-pair-1-host-die-1.csv.gz",
+      "bytes": 3789699,
+      "sha256": "b37d023c8381b5d5ea27f9352d88287799d54019e7af59f2ee40722d3154dae6"
+    },
+    {
+      "path": "depth-2052-pair-1-host-die-2.csv.gz",
+      "bytes": 3600103,
+      "sha256": "502bd8fe9403205362f2644ddb3254a2dac11c9035ed4a8be02b20e3a483be24"
+    },
+    {
+      "path": "depth-2052-pair-1-host-die-3.csv.gz",
+      "bytes": 3601400,
+      "sha256": "9d2ecdb25b6be4f326bcd3e8a3c7a735975be1ec3b679c4e408df5051439eab8"
+    },
+    {
+      "path": "depth-2052-pair-1-host-die-4.csv.gz",
+      "bytes": 3807443,
+      "sha256": "ea0cd70d9636db113ba910b5ab5605913614b384894ded0ee7f3a4842fe6a1c6"
+    },
+    {
+      "path": "depth-2052-pair-1-host-die-5.csv.gz",
+      "bytes": 3794609,
+      "sha256": "bc7f5658d3d6fac7e567f2c0ff35559b25f9c20a0e6e1d5f58fe2f5ff0d005ef"
+    },
+    {
+      "path": "depth-2052-pair-1-host-host.csv.gz",
+      "bytes": 3650,
+      "sha256": "e79cbea1a70bc1035742295953e77e5026a49b0f1ddd53de5e71adf62775c64e"
+    },
+    {
+      "path": "depth-2052-pair-1-vram-die-0.csv.gz",
+      "bytes": 3613063,
+      "sha256": "40ff8a8990853e095bfe43d393a417d41e232abf4b4644f1b9e649a62fc5f78e"
+    },
+    {
+      "path": "depth-2052-pair-1-vram-die-1.csv.gz",
+      "bytes": 3789601,
+      "sha256": "268af242a3560ae09ee7b5e182c28d7789ffcacdcd54127d5d648715f87dd37d"
+    },
+    {
+      "path": "depth-2052-pair-1-vram-die-2.csv.gz",
+      "bytes": 3607842,
+      "sha256": "d28c8834ead5c7dc117a5afd1d372de16c07b4e4fccb05ee5bd3c90e79b3194e"
+    },
+    {
+      "path": "depth-2052-pair-1-vram-die-3.csv.gz",
+      "bytes": 3595705,
+      "sha256": "f021046c957a90ed92d127b4697e15dc70afb61696483ce6f7004302ca8f2fba"
+    },
+    {
+      "path": "depth-2052-pair-1-vram-die-4.csv.gz",
+      "bytes": 3803776,
+      "sha256": "85a8d0cd092f45d3046cce4018e47af6599f4eb62b337f94731d15771cd228b8"
+    },
+    {
+      "path": "depth-2052-pair-1-vram-die-5.csv.gz",
+      "bytes": 3805538,
+      "sha256": "cc40fd733d27bc76eb0b146d656026b9ca2d2f54c881b9a7310a17c4af9c15a2"
+    },
+    {
+      "path": "depth-2052-pair-1-vram-host.csv.gz",
+      "bytes": 3589,
+      "sha256": "79ea72c2ace03f6b00a1ccfa4cbfedb07181e7b4486b559640ea225979b09494"
+    },
+    {
+      "path": "depth-2052-pair-2-host-die-0.csv.gz",
+      "bytes": 3598204,
+      "sha256": "e2ccd83fbcc27821b34b5ea7dada84950b2a463a6d2f36ff4071aaa434b52d12"
+    },
+    {
+      "path": "depth-2052-pair-2-host-die-1.csv.gz",
+      "bytes": 3789566,
+      "sha256": "6b56bc8ee15dade2392cf45bb63b2ecd6473d2f957cd032bea31a557ee03db6f"
+    },
+    {
+      "path": "depth-2052-pair-2-host-die-2.csv.gz",
+      "bytes": 3601303,
+      "sha256": "33f2af7275959baea9102f4a9e9b8f01c7c3840cb2ef02cb806be06494291e72"
+    },
+    {
+      "path": "depth-2052-pair-2-host-die-3.csv.gz",
+      "bytes": 3601265,
+      "sha256": "b2bdf94af4e5ab91b6d21ebd2198341455ba6511a5e388fc50b02c2401b37f22"
+    },
+    {
+      "path": "depth-2052-pair-2-host-die-4.csv.gz",
+      "bytes": 3806620,
+      "sha256": "8efd5304cd7a4a292dd814bb4b3fdcf57ea2397041f53515e1d69ddbfb5a8911"
+    },
+    {
+      "path": "depth-2052-pair-2-host-die-5.csv.gz",
+      "bytes": 3795648,
+      "sha256": "8a039c7c0cfc8fb9848890436a6a9fd9769ce0548e2c14db05640a4ea283df39"
+    },
+    {
+      "path": "depth-2052-pair-2-host-host.csv.gz",
+      "bytes": 3638,
+      "sha256": "c3411584a6888d07c495a47fefec2fe94d72ce5ab5e9710bb82f2f48fa2c1bad"
+    },
+    {
+      "path": "depth-2052-pair-2-vram-die-0.csv.gz",
+      "bytes": 3612401,
+      "sha256": "511488584d3310dbde0bf785dceeafbc91f330118f003e103550fe569cc468f2"
+    },
+    {
+      "path": "depth-2052-pair-2-vram-die-1.csv.gz",
+      "bytes": 3790168,
+      "sha256": "09f4ca91f11eee75f8ec3747bd7155d4a3a3702e51ea0a41326ee13c8243fc1f"
+    },
+    {
+      "path": "depth-2052-pair-2-vram-die-2.csv.gz",
+      "bytes": 3608413,
+      "sha256": "e6a76655ec82ef9b85a80d2fed2589c418f77e7c7a553a6dc52c6ef66a1e6b63"
+    },
+    {
+      "path": "depth-2052-pair-2-vram-die-3.csv.gz",
+      "bytes": 3596352,
+      "sha256": "1dd133270b4b9a8f803c7f85803172c658c7fded86f6e0ae9d23c62ca04f3123"
+    },
+    {
+      "path": "depth-2052-pair-2-vram-die-4.csv.gz",
+      "bytes": 3803655,
+      "sha256": "63912a32604cecbc655629eaa1704d68a941e152a6a0568dc2d66df950da3125"
+    },
+    {
+      "path": "depth-2052-pair-2-vram-die-5.csv.gz",
+      "bytes": 3806025,
+      "sha256": "5e32783502ed4f3ea639cc805885f2a72d8f81462cb9a622d9e9a5f9a69522d6"
+    },
+    {
+      "path": "depth-2052-pair-2-vram-host.csv.gz",
+      "bytes": 3599,
+      "sha256": "d277ef3ed75b0306ea6f9aeeec0446acf78f76cca8f40c575afe6b0bd4350023"
+    },
+    {
+      "path": "depth-2052-pair-3-host-die-0.csv.gz",
+      "bytes": 3598443,
+      "sha256": "a72e36eff9cf02b9dc6df020002b13b064155513255b12efb47f15e66420b222"
+    },
+    {
+      "path": "depth-2052-pair-3-host-die-1.csv.gz",
+      "bytes": 3789497,
+      "sha256": "4f533fc635ac5ab480d7d204c4775ee575f5aec69a3ea0405af9a42923e62dde"
+    },
+    {
+      "path": "depth-2052-pair-3-host-die-2.csv.gz",
+      "bytes": 3600171,
+      "sha256": "514681eb6e1e9ee9775569a0e4b54b6542deb2c68d946e641249680856ce94db"
+    },
+    {
+      "path": "depth-2052-pair-3-host-die-3.csv.gz",
+      "bytes": 3600913,
+      "sha256": "808fbb1451a003566a408d1a80fc84d9b1e3e9449bc403461324beff169ec388"
+    },
+    {
+      "path": "depth-2052-pair-3-host-die-4.csv.gz",
+      "bytes": 3805454,
+      "sha256": "03bd5815fd218b6062a14eaa2725195d7b6f40b7f4d00fbe9bec0795567aa4f2"
+    },
+    {
+      "path": "depth-2052-pair-3-host-die-5.csv.gz",
+      "bytes": 3794078,
+      "sha256": "5dadbab5358f8d21bbb5b039d8c11fcce21a21d604d22074bddc49360f589c25"
+    },
+    {
+      "path": "depth-2052-pair-3-host-host.csv.gz",
+      "bytes": 3640,
+      "sha256": "ca2ddb547c665edc534c7580763f3f7e8e3c7fbaebe2685c0dbc935803a0cb01"
+    },
+    {
+      "path": "depth-2052-pair-3-vram-die-0.csv.gz",
+      "bytes": 3613519,
+      "sha256": "d23892140f805986ff8ba22a0d8a3195d5f2f0e05ea46d345befa96d1f84d6e5"
+    },
+    {
+      "path": "depth-2052-pair-3-vram-die-1.csv.gz",
+      "bytes": 3791036,
+      "sha256": "12367d4b3280f7b4d8248e79cf0d84a70c2bfa93bc008402c738670cd7d4becd"
+    },
+    {
+      "path": "depth-2052-pair-3-vram-die-2.csv.gz",
+      "bytes": 3607969,
+      "sha256": "e61697f9c11bcf7e855f2d204a454a1f9563af2603cc16921afd1c532f33f378"
+    },
+    {
+      "path": "depth-2052-pair-3-vram-die-3.csv.gz",
+      "bytes": 3595840,
+      "sha256": "2016b4bf49407ed05441bdf1531b81861e16e2ea73888a14a2926932fa6696bf"
+    },
+    {
+      "path": "depth-2052-pair-3-vram-die-4.csv.gz",
+      "bytes": 3803059,
+      "sha256": "80b593b07c93c9f507773c190cf211aee3661117eec4aa2d3853060d88ac294d"
+    },
+    {
+      "path": "depth-2052-pair-3-vram-die-5.csv.gz",
+      "bytes": 3806104,
+      "sha256": "aead8c904906510a454090078a0397f647ea1344dabad7d1c1ac88abb6f82fa7"
+    },
+    {
+      "path": "depth-2052-pair-3-vram-host.csv.gz",
+      "bytes": 3612,
+      "sha256": "992920d8a66dfb2a2dd246442868745b9149ca273dc2eee52b859897f6c35205"
+    },
+    {
+      "path": "depth-2052-pair-4-host-die-0.csv.gz",
+      "bytes": 3598374,
+      "sha256": "a8037a23f614ea5b9401b63e7778acf8a4fc719570a20a862951084438bf0441"
+    },
+    {
+      "path": "depth-2052-pair-4-host-die-1.csv.gz",
+      "bytes": 3790173,
+      "sha256": "030ef1e32aa22fa2af2f44fb8d5d149d8504c29666282e17eab45c262b2ad2fa"
+    },
+    {
+      "path": "depth-2052-pair-4-host-die-2.csv.gz",
+      "bytes": 3600741,
+      "sha256": "38af7b53000bf7b327a4542ac1f5e2b460f899852adef1a61038c936af625d4c"
+    },
+    {
+      "path": "depth-2052-pair-4-host-die-3.csv.gz",
+      "bytes": 3599870,
+      "sha256": "feff337f818ea7204444cd0b66e76009e913f3b9db17efcf8ad991a0c414821e"
+    },
+    {
+      "path": "depth-2052-pair-4-host-die-4.csv.gz",
+      "bytes": 3805670,
+      "sha256": "9a32d541dad57e8751b5f6799172b5e1760fc38047ce4a4ac5a0473ff49d0b29"
+    },
+    {
+      "path": "depth-2052-pair-4-host-die-5.csv.gz",
+      "bytes": 3794623,
+      "sha256": "2fc3c92e0c5a45867f0b3331c22d63ebb30c806e9c615b88f9af1617d0f545e6"
+    },
+    {
+      "path": "depth-2052-pair-4-host-host.csv.gz",
+      "bytes": 3626,
+      "sha256": "75c9804cad0e50cea32692385f36aa158e5df75c273fca6c1e2cc5d9231e116d"
+    },
+    {
+      "path": "depth-2052-pair-4-vram-die-0.csv.gz",
+      "bytes": 3614073,
+      "sha256": "6ce1c271bb28cceae964b7395d78659b086c0434133e3f52d97cf4249a0bcf1b"
+    },
+    {
+      "path": "depth-2052-pair-4-vram-die-1.csv.gz",
+      "bytes": 3789688,
+      "sha256": "59bc919b69cd38a7690e00100f84ebc735fbe2c32217fbdc61b95641f479f070"
+    },
+    {
+      "path": "depth-2052-pair-4-vram-die-2.csv.gz",
+      "bytes": 3607391,
+      "sha256": "5c4978b1c1576957877f485c1f606ddd8573ec28036844a7971e9f4721c218a6"
+    },
+    {
+      "path": "depth-2052-pair-4-vram-die-3.csv.gz",
+      "bytes": 3595676,
+      "sha256": "95448a050635348d20475b9920b0899583107665d1d8a53a9f7f774baa69d6aa"
+    },
+    {
+      "path": "depth-2052-pair-4-vram-die-4.csv.gz",
+      "bytes": 3803684,
+      "sha256": "9f60777b06a2539cecd5b741914314592bf06818d306f6133aaef73c7421d514"
+    },
+    {
+      "path": "depth-2052-pair-4-vram-die-5.csv.gz",
+      "bytes": 3806205,
+      "sha256": "bd3139fd10d0b1485fae43653f3994f3b85786b46e57bd7e52f4c682d301d794"
+    },
+    {
+      "path": "depth-2052-pair-4-vram-host.csv.gz",
+      "bytes": 3600,
+      "sha256": "4d3431cf42908f49e393f31c6057a7f5f3a9bb9e5faac8926b11a11baca6169b"
+    },
+    {
+      "path": "depth-256-pair-0-host-die-0.csv.gz",
+      "bytes": 3614412,
+      "sha256": "a8bab99a329c715aab27cde1160219eba83a8cbb49b80d6592745848812c899a"
+    },
+    {
+      "path": "depth-256-pair-0-host-die-1.csv.gz",
+      "bytes": 3802406,
+      "sha256": "7e6dbf040614d90da789d191928d16246450f323a6ae2e122c31e41879cb2344"
+    },
+    {
+      "path": "depth-256-pair-0-host-die-2.csv.gz",
+      "bytes": 3618474,
+      "sha256": "5f1d37b07f4a861b65eefe5f681ac1eb5ef580c53c3d8fee3e8b460e317c4624"
+    },
+    {
+      "path": "depth-256-pair-0-host-die-3.csv.gz",
+      "bytes": 3616417,
+      "sha256": "73f0529ab357c68d79b5675cf5f47b788c91a82122d153f5e4e0843d6c5c2b76"
+    },
+    {
+      "path": "depth-256-pair-0-host-die-4.csv.gz",
+      "bytes": 3816655,
+      "sha256": "148afae6309a4f11ae8286bf1c6769d066be935191c44b840e9bd60ce5479f86"
+    },
+    {
+      "path": "depth-256-pair-0-host-die-5.csv.gz",
+      "bytes": 3808213,
+      "sha256": "cfea185e96b9e110276c8ddf0a2c4bc4358f72b8729f9778b9d2ace8d0f5bb0c"
+    },
+    {
+      "path": "depth-256-pair-0-host-host.csv.gz",
+      "bytes": 3621,
+      "sha256": "77164a7a05f491193e6ddf52da40d8be9a55145f0f272c0c0e6d525a875d2439"
+    },
+    {
+      "path": "depth-256-pair-0-vram-die-0.csv.gz",
+      "bytes": 3622452,
+      "sha256": "7f1e8d645a54202e4624c024168fd80e225768074feeaff8f73c199577b71107"
+    },
+    {
+      "path": "depth-256-pair-0-vram-die-1.csv.gz",
+      "bytes": 3797811,
+      "sha256": "310bc8385b8e84f8ad5b3edb7ed6847971b537db5a8d3a02d96f2b799b62296b"
+    },
+    {
+      "path": "depth-256-pair-0-vram-die-2.csv.gz",
+      "bytes": 3617823,
+      "sha256": "ca5b08d8b46e23762dc6312ea71e4bff0810a9a1d4e4bab44c1e284274207b2c"
+    },
+    {
+      "path": "depth-256-pair-0-vram-die-3.csv.gz",
+      "bytes": 3606177,
+      "sha256": "cf7a6eab82ba83457a93ce709b0d0d3f170fc12fa3012385c3c103337ecd3bd3"
+    },
+    {
+      "path": "depth-256-pair-0-vram-die-4.csv.gz",
+      "bytes": 3810392,
+      "sha256": "1d4570969f708ab185a05601db4ac11e580a4a1dd3d4c921b5128ef9aca29e6f"
+    },
+    {
+      "path": "depth-256-pair-0-vram-die-5.csv.gz",
+      "bytes": 3815854,
+      "sha256": "6ef7c0f7f76c8a5f8aa81b429faf83715d913a69900c1c323918eccd015ade30"
+    },
+    {
+      "path": "depth-256-pair-0-vram-host.csv.gz",
+      "bytes": 3592,
+      "sha256": "c510509ba4eef4ea1782d88099ed259e3c531a205dda05f6f72046490449b89e"
+    },
+    {
+      "path": "depth-256-pair-1-host-die-0.csv.gz",
+      "bytes": 3614630,
+      "sha256": "71d4f504ab180f13f11ac365bda070bc3d0a759340812ca497eb5a1cd66abcb9"
+    },
+    {
+      "path": "depth-256-pair-1-host-die-1.csv.gz",
+      "bytes": 3802572,
+      "sha256": "77d7cfe97b8ada19b2f255434eb2c23d91ba0869e67214dcbb2c5cb88c67d1ba"
+    },
+    {
+      "path": "depth-256-pair-1-host-die-2.csv.gz",
+      "bytes": 3617094,
+      "sha256": "ac857c272be2a62936121f9e992adbface4af0ec584e5aa52bbea87a59a0830e"
+    },
+    {
+      "path": "depth-256-pair-1-host-die-3.csv.gz",
+      "bytes": 3615299,
+      "sha256": "622e885d1d0423a378fc6944df58c8135618c6d55ae1827d712a5440127c470d"
+    },
+    {
+      "path": "depth-256-pair-1-host-die-4.csv.gz",
+      "bytes": 3816834,
+      "sha256": "6d806effcd7d5738cb1655cb538fe9b1404191d4874cc215a377b6fa24f8ed82"
+    },
+    {
+      "path": "depth-256-pair-1-host-die-5.csv.gz",
+      "bytes": 3808389,
+      "sha256": "852a30cf8ce6ddea6e4fb9e29b251500fb36fa96404d85f801387c2e5a773c5f"
+    },
+    {
+      "path": "depth-256-pair-1-host-host.csv.gz",
+      "bytes": 3648,
+      "sha256": "e24df73aa26db4e42cf251701e8c4d69f494db6ca0177e73313ea3d7d07465c8"
+    },
+    {
+      "path": "depth-256-pair-1-vram-die-0.csv.gz",
+      "bytes": 3623534,
+      "sha256": "3226d4e30b768e449abe9d8af82077f8b693c4acfcbd4a8f771ec684f6a361e6"
+    },
+    {
+      "path": "depth-256-pair-1-vram-die-1.csv.gz",
+      "bytes": 3797641,
+      "sha256": "d6386075b53feb9c8c9b1b07126f395639fdebb55ac879530120472b030541ef"
+    },
+    {
+      "path": "depth-256-pair-1-vram-die-2.csv.gz",
+      "bytes": 3616989,
+      "sha256": "1ea886874bf2aa53fd3777fef85d14fe47936b27a675adf5e1bb610da6990e51"
+    },
+    {
+      "path": "depth-256-pair-1-vram-die-3.csv.gz",
+      "bytes": 3604009,
+      "sha256": "5eb83cd4e53e8d118019840a55363e9d22ade49afcd8c887b5f1c6d5b0d10c0f"
+    },
+    {
+      "path": "depth-256-pair-1-vram-die-4.csv.gz",
+      "bytes": 3809721,
+      "sha256": "c13f6b496c7a4b8ce2497034545c7fb74895732b5fa366a60d081a41e89fe3b5"
+    },
+    {
+      "path": "depth-256-pair-1-vram-die-5.csv.gz",
+      "bytes": 3814797,
+      "sha256": "51b68d6217d4797de6c6736308c9efaa01ff211c5397894d1e692418206ea1b1"
+    },
+    {
+      "path": "depth-256-pair-1-vram-host.csv.gz",
+      "bytes": 3575,
+      "sha256": "ac31a117bf9174fce133daae17f5e56e5a207f7549433dce4952315fa5e85ff6"
+    },
+    {
+      "path": "depth-256-pair-2-host-die-0.csv.gz",
+      "bytes": 3613896,
+      "sha256": "80159211c4ab49c3b2fa6c3c314aaf36b7a88292ed41330aefc15794a9dd9e36"
+    },
+    {
+      "path": "depth-256-pair-2-host-die-1.csv.gz",
+      "bytes": 3802761,
+      "sha256": "9a7f90925e56a9d8e4177c755e5b8c1b98e75da6fb8939081fb38223a622555e"
+    },
+    {
+      "path": "depth-256-pair-2-host-die-2.csv.gz",
+      "bytes": 3618564,
+      "sha256": "6e6087d2e46e56f4057c5db0b8e15100ff4811c88c227702c0c62b03ec920286"
+    },
+    {
+      "path": "depth-256-pair-2-host-die-3.csv.gz",
+      "bytes": 3615476,
+      "sha256": "02e65f738ca05bf6f9eff4bce55f9390751ebfa334303012e413d1f3a23d9ad1"
+    },
+    {
+      "path": "depth-256-pair-2-host-die-4.csv.gz",
+      "bytes": 3816875,
+      "sha256": "98688ade35a086b0fb3604774613d573e3cb1b9112c1da068078e1fe8e1af7b7"
+    },
+    {
+      "path": "depth-256-pair-2-host-die-5.csv.gz",
+      "bytes": 3808324,
+      "sha256": "d456b0e0596bf199487ef29ea4cf884987ebe3248dbe3b9fbc8ff945bc276b59"
+    },
+    {
+      "path": "depth-256-pair-2-host-host.csv.gz",
+      "bytes": 3621,
+      "sha256": "5a3093c68919feb3099dcea9780a0e1a33ab67dc272aee70a881e90ef92b27f2"
+    },
+    {
+      "path": "depth-256-pair-2-vram-die-0.csv.gz",
+      "bytes": 3621247,
+      "sha256": "8d5f392e997f8c1483161f0be41a47cf88c0aeade14ef0d498822ae4bdba23bb"
+    },
+    {
+      "path": "depth-256-pair-2-vram-die-1.csv.gz",
+      "bytes": 3798989,
+      "sha256": "29e841be6162873f79b5a70c5e388ec140cd23908e56b0db55e3895830275034"
+    },
+    {
+      "path": "depth-256-pair-2-vram-die-2.csv.gz",
+      "bytes": 3616527,
+      "sha256": "46185bb69b6f903127f25bc64c770c7ded308a12f6d624173490f7fb1b91f5ef"
+    },
+    {
+      "path": "depth-256-pair-2-vram-die-3.csv.gz",
+      "bytes": 3605839,
+      "sha256": "ebdcd1cdb3a0836a6f6c7fdffa582dd32f99e997935f8a3c65c995f5674a92e2"
+    },
+    {
+      "path": "depth-256-pair-2-vram-die-4.csv.gz",
+      "bytes": 3809495,
+      "sha256": "449e8384fa46040775ccffa9cd44f7b5b1359b05343461ee1d45dc9b3cbf8a6a"
+    },
+    {
+      "path": "depth-256-pair-2-vram-die-5.csv.gz",
+      "bytes": 3814204,
+      "sha256": "8cd21cdb17912e6b4106e4b0becb769d403dbd4da1657c3a36bd3678fb44511b"
+    },
+    {
+      "path": "depth-256-pair-2-vram-host.csv.gz",
+      "bytes": 3577,
+      "sha256": "0ff65b52cca7fbba38073345733d4db4c695f62390cb718835e16d0bcd0fc20c"
+    },
+    {
+      "path": "depth-256-pair-3-host-die-0.csv.gz",
+      "bytes": 3614751,
+      "sha256": "5739f5f744223eab396617eeface8f128043b45d8996adfbdde549e1b461212d"
+    },
+    {
+      "path": "depth-256-pair-3-host-die-1.csv.gz",
+      "bytes": 3803302,
+      "sha256": "cae37d488a30a9e18d0f09d265fb36c5e0195bb166a13d972aa731fa7d8fde8b"
+    },
+    {
+      "path": "depth-256-pair-3-host-die-2.csv.gz",
+      "bytes": 3617184,
+      "sha256": "fdea745cc7b66cd2d763c6b892c714eeaca766a9ddb9e00f0408465ad69c6e5e"
+    },
+    {
+      "path": "depth-256-pair-3-host-die-3.csv.gz",
+      "bytes": 3616825,
+      "sha256": "429422d8939640441fcb04f7b33bfd0c34f7c38898ebbd1a2f16e7743ef52546"
+    },
+    {
+      "path": "depth-256-pair-3-host-die-4.csv.gz",
+      "bytes": 3815940,
+      "sha256": "2a501c4a5aae616a79a5942614df8afafffc2845cb0e1d7e0f47958b08d2de10"
+    },
+    {
+      "path": "depth-256-pair-3-host-die-5.csv.gz",
+      "bytes": 3807570,
+      "sha256": "0c7116babb039d1d45d697e2cc8a7f9c5d325c72b25b1453d0a8a738691f71a2"
+    },
+    {
+      "path": "depth-256-pair-3-host-host.csv.gz",
+      "bytes": 3622,
+      "sha256": "b02c4ba8687c3e941d37e8f2ff4e210340d3383942c03169652e63ecf88189c8"
+    },
+    {
+      "path": "depth-256-pair-3-vram-die-0.csv.gz",
+      "bytes": 3623125,
+      "sha256": "6f389817690d3d50cb7f5ed03cef8c125b3759142352f579382b87e30a4dac70"
+    },
+    {
+      "path": "depth-256-pair-3-vram-die-1.csv.gz",
+      "bytes": 3798826,
+      "sha256": "530ac0cdf6b605a5e787df9cd8dce1e21e0ebe79d07d7a7392246511584cc46e"
+    },
+    {
+      "path": "depth-256-pair-3-vram-die-2.csv.gz",
+      "bytes": 3616618,
+      "sha256": "0334474c9af7f6734b45c16c3a2fac7a6682960d854302f3759bf9ed7d24579e"
+    },
+    {
+      "path": "depth-256-pair-3-vram-die-3.csv.gz",
+      "bytes": 3603847,
+      "sha256": "5c387fa341e045889b608c7013bed7bcd6b0b007c5ac1c33ea3e8896b4c662b0"
+    },
+    {
+      "path": "depth-256-pair-3-vram-die-4.csv.gz",
+      "bytes": 3809920,
+      "sha256": "3dee9a4ae62dcbb4e9fe0f50ff64e7e96a0589feb043aea44281c6102a07bfe5"
+    },
+    {
+      "path": "depth-256-pair-3-vram-die-5.csv.gz",
+      "bytes": 3813581,
+      "sha256": "5f3d80f9daccddd1badccb5130da34c810d4748d098c3e962b06597ce0b17ec6"
+    },
+    {
+      "path": "depth-256-pair-3-vram-host.csv.gz",
+      "bytes": 3613,
+      "sha256": "47d6ed9a07133054ed7c34dc3b5508fe50d943c1a63c2140d21d04d1d3dd4a74"
+    },
+    {
+      "path": "depth-256-pair-4-host-die-0.csv.gz",
+      "bytes": 3613980,
+      "sha256": "733dab9c6c30e257123c2cbe74587e9d8e56fa0f1d344c6c7817d9f3dfb81ee4"
+    },
+    {
+      "path": "depth-256-pair-4-host-die-1.csv.gz",
+      "bytes": 3801989,
+      "sha256": "3dc6ce3a1698d427f69dc7326029611bb4bb0bd50e84f2a0e302d14146018a4c"
+    },
+    {
+      "path": "depth-256-pair-4-host-die-2.csv.gz",
+      "bytes": 3616046,
+      "sha256": "fbed7c455f70bb54ea56ecc84990dc09b56a910043ec4815331080d6938f71ba"
+    },
+    {
+      "path": "depth-256-pair-4-host-die-3.csv.gz",
+      "bytes": 3617362,
+      "sha256": "e020cc27b1b835dd2b4b2598107472822dfd04cd3106a50efda51771848d60be"
+    },
+    {
+      "path": "depth-256-pair-4-host-die-4.csv.gz",
+      "bytes": 3816817,
+      "sha256": "cb87b464a2cef670ba452be91d38b353ad3706e3880cdebec8fa9b10fd025106"
+    },
+    {
+      "path": "depth-256-pair-4-host-die-5.csv.gz",
+      "bytes": 3807844,
+      "sha256": "04b35cd762f57a254efbf05128c7ea986074ce5795909b39049e32f2009903d9"
+    },
+    {
+      "path": "depth-256-pair-4-host-host.csv.gz",
+      "bytes": 3600,
+      "sha256": "93ab758d22dff3be7929cb82ff3708bcf41e8427eadd6f01c280abe763cbb7b8"
+    },
+    {
+      "path": "depth-256-pair-4-vram-die-0.csv.gz",
+      "bytes": 3623206,
+      "sha256": "b20f0f09ef7e63c6a595aff5d4118abe8658fff63004f65c57488fff8c56db44"
+    },
+    {
+      "path": "depth-256-pair-4-vram-die-1.csv.gz",
+      "bytes": 3799141,
+      "sha256": "b1a5360e38cf9e6f36a2131f9b1ba93dc59d90c5fb156360505d27e452db0416"
+    },
+    {
+      "path": "depth-256-pair-4-vram-die-2.csv.gz",
+      "bytes": 3615966,
+      "sha256": "cfc162bf9bd374311a15ab5657b96c1b65ce7d9aec132976d6bbaa5a8a3862e6"
+    },
+    {
+      "path": "depth-256-pair-4-vram-die-3.csv.gz",
+      "bytes": 3605285,
+      "sha256": "77533ee5ba02a56923fb5eee60ed6c596ac8fe90dde808910da4671c36c97636"
+    },
+    {
+      "path": "depth-256-pair-4-vram-die-4.csv.gz",
+      "bytes": 3809033,
+      "sha256": "6c7d496f5f62ad59c1a69b425adb9cdd00b08ce4ae0356b91d25584485391a68"
+    },
+    {
+      "path": "depth-256-pair-4-vram-die-5.csv.gz",
+      "bytes": 3815055,
+      "sha256": "b7de6abe712705685dd7a1abe02fe1cb5114208df27491a6d545ee165b703324"
+    },
+    {
+      "path": "depth-256-pair-4-vram-host.csv.gz",
+      "bytes": 3543,
+      "sha256": "7a5c45b4d868459cbbea950637cfddd9c3ef51f292847126590894c57bd484fe"
+    },
+    {
+      "path": "depth-3100-pair-0-host-die-0.csv.gz",
+      "bytes": 3599519,
+      "sha256": "5d1aba3d1ae2db7426344025d962a7945c21888395f81785059f16ddae3607d2"
+    },
+    {
+      "path": "depth-3100-pair-0-host-die-1.csv.gz",
+      "bytes": 3790887,
+      "sha256": "b718ee511e05461efd5ace79602edc2c03e592fa90138b4f0092069d97f27e68"
+    },
+    {
+      "path": "depth-3100-pair-0-host-die-2.csv.gz",
+      "bytes": 3602186,
+      "sha256": "7a23630780456aeb53fa9dd3842a05b4be9e5b9933270e4460f4abdd7bfaf97d"
+    },
+    {
+      "path": "depth-3100-pair-0-host-die-3.csv.gz",
+      "bytes": 3601314,
+      "sha256": "8d54bb40c7d9113fcabf367c1073270e718d5df82bf735540239ebc4563d8287"
+    },
+    {
+      "path": "depth-3100-pair-0-host-die-4.csv.gz",
+      "bytes": 3806914,
+      "sha256": "f227b503c344ff0a25d145e9b4b97aac7496c195528a5baa65ec2d6ae8c47b60"
+    },
+    {
+      "path": "depth-3100-pair-0-host-die-5.csv.gz",
+      "bytes": 3794480,
+      "sha256": "a4bb81fc0b97587bf7e19d5350908818c298ec79b06d3cedabf9fa52db0f57e2"
+    },
+    {
+      "path": "depth-3100-pair-0-host-host.csv.gz",
+      "bytes": 3627,
+      "sha256": "d93f806158d6ab7e60ae5db49e7a7e5a17f31e77a52bc4bec730ee6340a610c8"
+    },
+    {
+      "path": "depth-3100-pair-0-vram-die-0.csv.gz",
+      "bytes": 3614654,
+      "sha256": "836f85fb0f294c10fd4b83474f89287e2a96e56399cb3d855803be6c0e79213a"
+    },
+    {
+      "path": "depth-3100-pair-0-vram-die-1.csv.gz",
+      "bytes": 3789429,
+      "sha256": "3742c7cde9299366596b435fdcd0fe27bbe942d9cad344fd5c7c6e32e5d6c44a"
+    },
+    {
+      "path": "depth-3100-pair-0-vram-die-2.csv.gz",
+      "bytes": 3608456,
+      "sha256": "3ff679c5d92976e2f799e9b1a07fe94a43bcb8fe1aa0c0826e42fbed3d545682"
+    },
+    {
+      "path": "depth-3100-pair-0-vram-die-3.csv.gz",
+      "bytes": 3596669,
+      "sha256": "d53398c2e1cb201cf63f552c62dad0e0b08bda709680046ff16a34d48d4cb6db"
+    },
+    {
+      "path": "depth-3100-pair-0-vram-die-4.csv.gz",
+      "bytes": 3805727,
+      "sha256": "8bc550618eba78ed5b33b553b863688aa4a35c57f6eee9294bc2194f8298df7a"
+    },
+    {
+      "path": "depth-3100-pair-0-vram-die-5.csv.gz",
+      "bytes": 3806359,
+      "sha256": "213fb0d5091417610df877423993fd3a4568c2db1f9f20bc9e55975839085cb4"
+    },
+    {
+      "path": "depth-3100-pair-0-vram-host.csv.gz",
+      "bytes": 3550,
+      "sha256": "502c65cf18167ec46a17883f02887e18280eb5d0b7625a64289006c61b1a5d69"
+    },
+    {
+      "path": "depth-3100-pair-1-host-die-0.csv.gz",
+      "bytes": 3600191,
+      "sha256": "5cb426ddb9add47cf7b4e0d597dde5cc6efd8d6f93e51de24d91069990192ad7"
+    },
+    {
+      "path": "depth-3100-pair-1-host-die-1.csv.gz",
+      "bytes": 3790083,
+      "sha256": "76d2b88aa77170d100c4eb3f07cb53df3bd2ecf29a5a3a8280a56ec34ad94889"
+    },
+    {
+      "path": "depth-3100-pair-1-host-die-2.csv.gz",
+      "bytes": 3601562,
+      "sha256": "24fc8b3806f99a98fa68c954172a17b50b251e4fd1c001177ae1db4e6dc2e48e"
+    },
+    {
+      "path": "depth-3100-pair-1-host-die-3.csv.gz",
+      "bytes": 3598647,
+      "sha256": "d94a5d530ecc417b0e0c606e239123b659e4ef1287fcf1e36c291dcdd730cfcf"
+    },
+    {
+      "path": "depth-3100-pair-1-host-die-4.csv.gz",
+      "bytes": 3806019,
+      "sha256": "e4eefc9170671d3a62bc916dd70f8f0cd7825f10a9de0305ebeb36a600530367"
+    },
+    {
+      "path": "depth-3100-pair-1-host-die-5.csv.gz",
+      "bytes": 3794538,
+      "sha256": "8c3253d9b8421ccbb38fa2543acae100ad31a6b5eb8077d33614b80b8fd25c4e"
+    },
+    {
+      "path": "depth-3100-pair-1-host-host.csv.gz",
+      "bytes": 3588,
+      "sha256": "6e827660ed41083667c01eda7e65f10e74c0733858ccc3159e1c5d1b118d55fb"
+    },
+    {
+      "path": "depth-3100-pair-1-vram-die-0.csv.gz",
+      "bytes": 3613572,
+      "sha256": "39d8ec355cf9a2fe33111f2b986b0d6cbc2d66088e1eb0f537b08539ee2dc089"
+    },
+    {
+      "path": "depth-3100-pair-1-vram-die-1.csv.gz",
+      "bytes": 3789832,
+      "sha256": "d38ef80019dea473088f16aede76d2dca02702570ac13a46c1d09fa6390b2640"
+    },
+    {
+      "path": "depth-3100-pair-1-vram-die-2.csv.gz",
+      "bytes": 3607707,
+      "sha256": "8990f25dd533d85c13397c75549342a7816ce617f877eac3e2938f6f4227f0e2"
+    },
+    {
+      "path": "depth-3100-pair-1-vram-die-3.csv.gz",
+      "bytes": 3595180,
+      "sha256": "359f692036c4e2c5d401d76e6991d472ca061adca94b9173a81365c58cc620e9"
+    },
+    {
+      "path": "depth-3100-pair-1-vram-die-4.csv.gz",
+      "bytes": 3804818,
+      "sha256": "04211b1fd9bcd2a2ab26cc740fa02e72f92d5df7485b7bc860fa006e92e2d3b5"
+    },
+    {
+      "path": "depth-3100-pair-1-vram-die-5.csv.gz",
+      "bytes": 3805058,
+      "sha256": "a9e57b910a8091cc1b35c0b6392e40a07738827f6d88852afab85d7be31b9544"
+    },
+    {
+      "path": "depth-3100-pair-1-vram-host.csv.gz",
+      "bytes": 3614,
+      "sha256": "1a00252666ba8886775a096e2a910c340baded27bbe517079cb7d8b07ec1d669"
+    },
+    {
+      "path": "depth-3100-pair-2-host-die-0.csv.gz",
+      "bytes": 3598191,
+      "sha256": "d008d172788c7879a8d7f57efb2be2847a19f286fc98248c56afe8058e0443ca"
+    },
+    {
+      "path": "depth-3100-pair-2-host-die-1.csv.gz",
+      "bytes": 3789728,
+      "sha256": "13f23ed1b3a92fc5ecfd425fa2d7a2c3f7d9a8fd1c0413c67f74484b50dac154"
+    },
+    {
+      "path": "depth-3100-pair-2-host-die-2.csv.gz",
+      "bytes": 3601012,
+      "sha256": "1b68e7ae1a6b0063f6e62396400ef23676f36be487ce542c8aff6284665dcd59"
+    },
+    {
+      "path": "depth-3100-pair-2-host-die-3.csv.gz",
+      "bytes": 3600728,
+      "sha256": "ef3124b0d47e33bce32f895271b55c9bf810165edbc5a9701c7ced44e652cac6"
+    },
+    {
+      "path": "depth-3100-pair-2-host-die-4.csv.gz",
+      "bytes": 3805916,
+      "sha256": "dd8736da9f5b69c50bffb0ac4a61a57a7a9195a151becffb66d7a10a23508d48"
+    },
+    {
+      "path": "depth-3100-pair-2-host-die-5.csv.gz",
+      "bytes": 3794685,
+      "sha256": "5ac3859f34535735e92880eba48b21c66594555eadb1a7ec2c7596f440ceae7f"
+    },
+    {
+      "path": "depth-3100-pair-2-host-host.csv.gz",
+      "bytes": 3615,
+      "sha256": "ff9e8ec668564c0ea02ace122682ec1066704961b6962a152101346b5e2236f1"
+    },
+    {
+      "path": "depth-3100-pair-2-vram-die-0.csv.gz",
+      "bytes": 3614042,
+      "sha256": "1e1c764c047bdb311fc2b839c9f9be6d458c9c681d5f3c3aeab4c3bf1bc674b4"
+    },
+    {
+      "path": "depth-3100-pair-2-vram-die-1.csv.gz",
+      "bytes": 3789170,
+      "sha256": "a9f03d9f81a2bc3346e835fb20deea40df504040f6c852c0b4b85983080af3e7"
+    },
+    {
+      "path": "depth-3100-pair-2-vram-die-2.csv.gz",
+      "bytes": 3607120,
+      "sha256": "5c272b40ee77bda1843a270cebe4117d4eb01b5a98041ccfdf6cab28b4b2648e"
+    },
+    {
+      "path": "depth-3100-pair-2-vram-die-3.csv.gz",
+      "bytes": 3596300,
+      "sha256": "3ca45d3f8cdff8db62c6ce868d9f4b24f4c0782f4eaa5d17809cf9f8f358e2f1"
+    },
+    {
+      "path": "depth-3100-pair-2-vram-die-4.csv.gz",
+      "bytes": 3803587,
+      "sha256": "a384c69e6b973dc0e8b3ba73228b77414f5d4e0b4d36efd6447ac7cbf4f09c73"
+    },
+    {
+      "path": "depth-3100-pair-2-vram-die-5.csv.gz",
+      "bytes": 3804868,
+      "sha256": "0da4017e8c031818a854a6eeddfa8f0a1d2c0dff838229264bb83a6b22842759"
+    },
+    {
+      "path": "depth-3100-pair-2-vram-host.csv.gz",
+      "bytes": 3618,
+      "sha256": "6549af73d4149b77b69961305a607d2d71f5c47e495854457ee9897a816ab312"
+    },
+    {
+      "path": "depth-3100-pair-3-host-die-0.csv.gz",
+      "bytes": 3599396,
+      "sha256": "fbedf427654443b6e79dbb60c19e73a74e4b7d519fd7d80a24923bb606c54c19"
+    },
+    {
+      "path": "depth-3100-pair-3-host-die-1.csv.gz",
+      "bytes": 3789686,
+      "sha256": "eea0a9b4e840db41db8e6dd66bbe89d249215f221a12c5d5f1b0564d10ef15e4"
+    },
+    {
+      "path": "depth-3100-pair-3-host-die-2.csv.gz",
+      "bytes": 3600681,
+      "sha256": "b2f2b58c8c6c14923e570bf00a77ba94c9a9e251f0854f121e1eb828126b1e5a"
+    },
+    {
+      "path": "depth-3100-pair-3-host-die-3.csv.gz",
+      "bytes": 3601528,
+      "sha256": "c11d2ac438fe72488c07e217b86a8d12f087fdf568a8b973e2ad60c82ff745c7"
+    },
+    {
+      "path": "depth-3100-pair-3-host-die-4.csv.gz",
+      "bytes": 3807825,
+      "sha256": "cedd156c74b4280b2dfaaa28724eae0ca4864ca343f5f277d3090f534a73f752"
+    },
+    {
+      "path": "depth-3100-pair-3-host-die-5.csv.gz",
+      "bytes": 3794702,
+      "sha256": "a8e6cfa9e10878b7ceaa900a9047e1ad4c8407b371ad5f79376ccdf9a3e9062a"
+    },
+    {
+      "path": "depth-3100-pair-3-host-host.csv.gz",
+      "bytes": 3605,
+      "sha256": "e7e56f5f689a3f07c43bb1cbaced26a5495592c99acdea9dcf64e6c72c0173e4"
+    },
+    {
+      "path": "depth-3100-pair-3-vram-die-0.csv.gz",
+      "bytes": 3612968,
+      "sha256": "6da3a808e9a6fa58d0837ba2726d7c206b9958a71b3032ecc19f0ccd7cc469a2"
+    },
+    {
+      "path": "depth-3100-pair-3-vram-die-1.csv.gz",
+      "bytes": 3789889,
+      "sha256": "7c6a3da4b8bd87e92a5d18e3dffa82739601995ff61c5ca48499ac36380f5c77"
+    },
+    {
+      "path": "depth-3100-pair-3-vram-die-2.csv.gz",
+      "bytes": 3607563,
+      "sha256": "ca8a38d4fd59c8e756db20baad7ec2fc3b71e0e74b19267838d261102e9b0143"
+    },
+    {
+      "path": "depth-3100-pair-3-vram-die-3.csv.gz",
+      "bytes": 3596812,
+      "sha256": "a08fc56e1ee17cd17da9a2ac5caad95343441e1b2566c06d4035d3a040cbc14f"
+    },
+    {
+      "path": "depth-3100-pair-3-vram-die-4.csv.gz",
+      "bytes": 3805245,
+      "sha256": "3121ec3cde619f2b4ece7f13390d46841f6ea2d07227f8b4412b621f534417ff"
+    },
+    {
+      "path": "depth-3100-pair-3-vram-die-5.csv.gz",
+      "bytes": 3806092,
+      "sha256": "b21bf9899c3006d1d70e3cd0a708662476a34a2a2050d0c44f5fbd974ef93c60"
+    },
+    {
+      "path": "depth-3100-pair-3-vram-host.csv.gz",
+      "bytes": 3594,
+      "sha256": "4ad1e1915207865bb370bc8b8eab321c4d499a92dfcb9d6e00904e62c37659f4"
+    },
+    {
+      "path": "depth-3100-pair-4-host-die-0.csv.gz",
+      "bytes": 3599100,
+      "sha256": "7dd23364299cd18281bb42c23630e8fb341879c8727af43ccb35fa9c5424fb90"
+    },
+    {
+      "path": "depth-3100-pair-4-host-die-1.csv.gz",
+      "bytes": 3791130,
+      "sha256": "af9df2d9a662a94091d42f0621704463b45de02f20d146140acada60787a3183"
+    },
+    {
+      "path": "depth-3100-pair-4-host-die-2.csv.gz",
+      "bytes": 3601603,
+      "sha256": "151802601cc3082ee2f70a7aff7ac2520bc3e393b89c9e6ae0944006b1c8e068"
+    },
+    {
+      "path": "depth-3100-pair-4-host-die-3.csv.gz",
+      "bytes": 3600954,
+      "sha256": "a414c6dda47a1d57eafc06fce71c8f7094e31bf79e939c6e77aec39381c8bcf3"
+    },
+    {
+      "path": "depth-3100-pair-4-host-die-4.csv.gz",
+      "bytes": 3807424,
+      "sha256": "4aa2907bd78d0b180fc104771c945fbb45f8d3501930f67ffba430d5fc1517cc"
+    },
+    {
+      "path": "depth-3100-pair-4-host-die-5.csv.gz",
+      "bytes": 3794321,
+      "sha256": "6ebe22a15d1440f372e78a8a491d720939e0990919e80ac02c960c5a23c1a89a"
+    },
+    {
+      "path": "depth-3100-pair-4-host-host.csv.gz",
+      "bytes": 3630,
+      "sha256": "bd32d49444f575fa386c323ba170cffa675b58653deb0931c1673de92526749a"
+    },
+    {
+      "path": "depth-3100-pair-4-vram-die-0.csv.gz",
+      "bytes": 3612974,
+      "sha256": "747d7a65b3982367f41629038245d0d740a15f0b44dd63a301bba6a0f5043ae8"
+    },
+    {
+      "path": "depth-3100-pair-4-vram-die-1.csv.gz",
+      "bytes": 3791455,
+      "sha256": "b71c18f3f71c64d063df760052825622ba5cf2ce021676c03fe668d1d24dfb57"
+    },
+    {
+      "path": "depth-3100-pair-4-vram-die-2.csv.gz",
+      "bytes": 3607762,
+      "sha256": "1f99327480c5a6658a0fe8591d28077a17b7d25a8301cd881593f2ec50aaf76f"
+    },
+    {
+      "path": "depth-3100-pair-4-vram-die-3.csv.gz",
+      "bytes": 3595346,
+      "sha256": "64b1ec4252d3ffeaf9a657dac43b02ad36ba669d0d361fc6b6acb63a285522de"
+    },
+    {
+      "path": "depth-3100-pair-4-vram-die-4.csv.gz",
+      "bytes": 3805250,
+      "sha256": "5b463eb0db3022e4bcbe09f0cb049e2c6290d729b5cc0709c5445e2986876861"
+    },
+    {
+      "path": "depth-3100-pair-4-vram-die-5.csv.gz",
+      "bytes": 3806534,
+      "sha256": "591c5e76521842d2b83b443aa3aa30f08356875d82ecf0a69eea0d9c59ef42fb"
+    },
+    {
+      "path": "depth-3100-pair-4-vram-host.csv.gz",
+      "bytes": 3612,
+      "sha256": "fd39f7f7d8a35c76e2e7700506fe64b495bb313b5996a8e4ca90f06686f7a6cc"
+    },
+    {
+      "path": "depth-8000-pair-0-host-die-0.csv.gz",
+      "bytes": 3603918,
+      "sha256": "033a6393da7dd5442af97b1a5da28001f542bfedfcdec20a26fbdeed97e2d0ac"
+    },
+    {
+      "path": "depth-8000-pair-0-host-die-1.csv.gz",
+      "bytes": 3790788,
+      "sha256": "9a356088103fab52ebb26e585a98f07313005b908f120c3247a05d9a8040b5ec"
+    },
+    {
+      "path": "depth-8000-pair-0-host-die-2.csv.gz",
+      "bytes": 3602328,
+      "sha256": "1ed485a3ff5b29ab8f402bcb233388ac0bab850bbb74fe69e8011aad43bf0752"
+    },
+    {
+      "path": "depth-8000-pair-0-host-die-3.csv.gz",
+      "bytes": 3605910,
+      "sha256": "46b363708b1aefbbad6745122fae57a2c6c478e2ffc3cc4b956e319d3a7d6d36"
+    },
+    {
+      "path": "depth-8000-pair-0-host-die-4.csv.gz",
+      "bytes": 4079623,
+      "sha256": "b48866a95eef7b785775c6c746b16bde2a595700897db75424d10226976f40fc"
+    },
+    {
+      "path": "depth-8000-pair-0-host-die-5.csv.gz",
+      "bytes": 3797207,
+      "sha256": "2267bcb08101dd6d3c1c6e4439f3ee6c417dd5f5feed755d57dbc0a2d0de261a"
+    },
+    {
+      "path": "depth-8000-pair-0-host-host.csv.gz",
+      "bytes": 3657,
+      "sha256": "d6a24710a4fa567903e74aa5c437c418630565cfc27703ad1b8871997528742e"
+    },
+    {
+      "path": "depth-8000-pair-0-vram-die-0.csv.gz",
+      "bytes": 3614573,
+      "sha256": "9208198e5e1ec3c6c27490a4f02b21af4dba004828ac8152266bb868fe7865fe"
+    },
+    {
+      "path": "depth-8000-pair-0-vram-die-1.csv.gz",
+      "bytes": 3792694,
+      "sha256": "d422ecabb597fbae01c74b32164ac9312229edf94fbab78f18598a787cc73402"
+    },
+    {
+      "path": "depth-8000-pair-0-vram-die-2.csv.gz",
+      "bytes": 3607283,
+      "sha256": "cd6cfd65d8ffdc67cb30e2127faf1250ac85c613c3c4d0fb9af3bf10b8d3563b"
+    },
+    {
+      "path": "depth-8000-pair-0-vram-die-3.csv.gz",
+      "bytes": 3595701,
+      "sha256": "915ea0787e3326851ff94ceeaae8cebc8355340c1829ec2594c8eadab1428273"
+    },
+    {
+      "path": "depth-8000-pair-0-vram-die-4.csv.gz",
+      "bytes": 3930321,
+      "sha256": "25b3b0b3684ea3598e93bee07909063087b1368cc4ad6570d8ac85a757fd71ae"
+    },
+    {
+      "path": "depth-8000-pair-0-vram-die-5.csv.gz",
+      "bytes": 3808841,
+      "sha256": "d0da0a93f9fff58137eb96affbf1d7229e484367792a4ca90df7ad0901bd5814"
+    },
+    {
+      "path": "depth-8000-pair-0-vram-host.csv.gz",
+      "bytes": 3588,
+      "sha256": "6facbe7dde128df5bf0d225da4f391ce808f90c856937e6e480e97dd6279bfb5"
+    },
+    {
+      "path": "depth-8000-pair-1-host-die-0.csv.gz",
+      "bytes": 3599067,
+      "sha256": "9662144ba2eb794a501eaf7a0185eb2f0bb9e898c86f7d2860b4ba7158e4fe4a"
+    },
+    {
+      "path": "depth-8000-pair-1-host-die-1.csv.gz",
+      "bytes": 3791270,
+      "sha256": "963f0e91e2ec61d61c596c36fdd086851de1655fec1419c10b19665634544164"
+    },
+    {
+      "path": "depth-8000-pair-1-host-die-2.csv.gz",
+      "bytes": 3603204,
+      "sha256": "e0bea178aa3bc334a3fb52a1f673f39ea53ce2b6974343341d8b5766e0818a0e"
+    },
+    {
+      "path": "depth-8000-pair-1-host-die-3.csv.gz",
+      "bytes": 3601366,
+      "sha256": "e5a623d8810dac8481ce4fd051ce316c0b317e83158611c07ae57485696e7f58"
+    },
+    {
+      "path": "depth-8000-pair-1-host-die-4.csv.gz",
+      "bytes": 3879999,
+      "sha256": "6ebdf0e18f71ef7bbb455ea569063dbf9c9941b6e6f56a7538bfc4527b154ba7"
+    },
+    {
+      "path": "depth-8000-pair-1-host-die-5.csv.gz",
+      "bytes": 3795815,
+      "sha256": "2dae8c1d2fb9c1d2881720eaa5e2c3cb5bff40265ac4bc3a719185bff919301a"
+    },
+    {
+      "path": "depth-8000-pair-1-host-host.csv.gz",
+      "bytes": 3627,
+      "sha256": "919763027a0f5ffd7bb9830f012c736bf438a28becbefdb1c723d418c07415cb"
+    },
+    {
+      "path": "depth-8000-pair-1-vram-die-0.csv.gz",
+      "bytes": 3615055,
+      "sha256": "bf811e1ccb5aecbe101003fcaf1cdfda7d3ec81c2a54fbc341937739210634b1"
+    },
+    {
+      "path": "depth-8000-pair-1-vram-die-1.csv.gz",
+      "bytes": 3792154,
+      "sha256": "d20f08eb0f25d88d323495493f32e3d40b766bfe796496a3102771003e774a17"
+    },
+    {
+      "path": "depth-8000-pair-1-vram-die-2.csv.gz",
+      "bytes": 3608181,
+      "sha256": "ee99743ea7d8a9f398e4cb0c6f8c2f83fa6cc4729ddb82a6e0c3764ed45c044c"
+    },
+    {
+      "path": "depth-8000-pair-1-vram-die-3.csv.gz",
+      "bytes": 3596787,
+      "sha256": "ef5c9de3bfdc037adc0cc1fa251ffb803df786d189f4b3a09c3421689b34cd41"
+    },
+    {
+      "path": "depth-8000-pair-1-vram-die-4.csv.gz",
+      "bytes": 3902410,
+      "sha256": "888c5d57241591369be7ea9d964cd3b2d1718b9477490529a7bf642066735bac"
+    },
+    {
+      "path": "depth-8000-pair-1-vram-die-5.csv.gz",
+      "bytes": 3808554,
+      "sha256": "6209b4f2cb78b6c4cd4c6e03b33de8ec9ccc38c0e3ecef39f37392c8e71d3d67"
+    },
+    {
+      "path": "depth-8000-pair-1-vram-host.csv.gz",
+      "bytes": 3590,
+      "sha256": "86bcfddcd420c1e3107eedd899bea87029f979ebbeeff9f09dfe793d3bb736df"
+    },
+    {
+      "path": "depth-8000-pair-2-host-die-0.csv.gz",
+      "bytes": 3599231,
+      "sha256": "23cb53c419557e3e0131b7ca9a8ec09ee99045438bc8811855e4cb314e0fbc2c"
+    },
+    {
+      "path": "depth-8000-pair-2-host-die-1.csv.gz",
+      "bytes": 3789950,
+      "sha256": "b72025e41ed919610558ac5f05808935c58d8ffbad7107e4977afcb03011bf54"
+    },
+    {
+      "path": "depth-8000-pair-2-host-die-2.csv.gz",
+      "bytes": 3601430,
+      "sha256": "3b2eb1324c8e437a2e83deeedb6f264f52c15c2e735ccc3ce7303811e82238f0"
+    },
+    {
+      "path": "depth-8000-pair-2-host-die-3.csv.gz",
+      "bytes": 3600608,
+      "sha256": "c1139cb29f23b17587b332cbaf14f4fd093a21b60fe4f2ffbffcc9e60d76ebe5"
+    },
+    {
+      "path": "depth-8000-pair-2-host-die-4.csv.gz",
+      "bytes": 3864225,
+      "sha256": "6393420c0b1da0cc9fa68790d835acc203e953e0b9181247d85f66b61e3679fd"
+    },
+    {
+      "path": "depth-8000-pair-2-host-die-5.csv.gz",
+      "bytes": 3795094,
+      "sha256": "7c918d7d1abcbf87679475223c5a7fb0a127bd1a54983e9eff0258000d57dbc3"
+    },
+    {
+      "path": "depth-8000-pair-2-host-host.csv.gz",
+      "bytes": 3657,
+      "sha256": "1ea630caa382259f187c4067a700765a8a845e234cc6e0cc54ad5187ce71e8d8"
+    },
+    {
+      "path": "depth-8000-pair-2-vram-die-0.csv.gz",
+      "bytes": 3613885,
+      "sha256": "b5dad33e94c938b029e0c08bb0523d63db4dd1a4fdf8af04a5af48d057a07006"
+    },
+    {
+      "path": "depth-8000-pair-2-vram-die-1.csv.gz",
+      "bytes": 3790929,
+      "sha256": "f501231f2007055777c4c322a4b75849ae6d95eda93a17c6ea2cfa64b15039e0"
+    },
+    {
+      "path": "depth-8000-pair-2-vram-die-2.csv.gz",
+      "bytes": 3609051,
+      "sha256": "ea1397c2875e675758050927f4d7ac3366549ec10f3d600ede10c051729d565a"
+    },
+    {
+      "path": "depth-8000-pair-2-vram-die-3.csv.gz",
+      "bytes": 3596813,
+      "sha256": "1d155d298aa56da6c6dd9752748b23a80544400eecb0ea8e0cc8ae831afed749"
+    },
+    {
+      "path": "depth-8000-pair-2-vram-die-4.csv.gz",
+      "bytes": 3871192,
+      "sha256": "1f6ec5cdc737dd6050f7a1acf8d3169f7bed273a1691c85187df68484ebd359d"
+    },
+    {
+      "path": "depth-8000-pair-2-vram-die-5.csv.gz",
+      "bytes": 3807583,
+      "sha256": "b73bf7a45da1d8702d1020afe66bb2412529c53fad9b846243493bc23ada0d55"
+    },
+    {
+      "path": "depth-8000-pair-2-vram-host.csv.gz",
+      "bytes": 3616,
+      "sha256": "7bdc66380fe1c96494f2f86a2896b79946174c32dbf868a70a2f202c93123cc2"
+    },
+    {
+      "path": "depth-8000-pair-3-host-die-0.csv.gz",
+      "bytes": 3599570,
+      "sha256": "20af37ab4d17ad13eb714e2357aa7a2d3199b0b9c1af246c221314dc569ec5d6"
+    },
+    {
+      "path": "depth-8000-pair-3-host-die-1.csv.gz",
+      "bytes": 3789163,
+      "sha256": "2792ba325bc811c2f8b726f4fdc501d4fa5f1500b4e97681af3952a9b043f2ca"
+    },
+    {
+      "path": "depth-8000-pair-3-host-die-2.csv.gz",
+      "bytes": 3600671,
+      "sha256": "2cc80983aa1fd0881cc4ae8a5fc269b16305703b5c7612adf711f9db022e401a"
+    },
+    {
+      "path": "depth-8000-pair-3-host-die-3.csv.gz",
+      "bytes": 3600646,
+      "sha256": "a8e5b76af4c7ea20d3cdfb7592b53d94ee1c6b47b263e9fcd2eb3b52653c061d"
+    },
+    {
+      "path": "depth-8000-pair-3-host-die-4.csv.gz",
+      "bytes": 3840503,
+      "sha256": "ebe37732640c77eb7d2648ad3e19b7f979646496f9e995ead58905d927859cee"
+    },
+    {
+      "path": "depth-8000-pair-3-host-die-5.csv.gz",
+      "bytes": 3793874,
+      "sha256": "5a9280b1b75909b314acb83b994eeea7c1ee4a711bad5eefca96f1a2307d6af2"
+    },
+    {
+      "path": "depth-8000-pair-3-host-host.csv.gz",
+      "bytes": 3595,
+      "sha256": "98dfdfde859c58068a6f020f6f6c744ed5cc106b5125bf2bf5242c8f3b49285f"
+    },
+    {
+      "path": "depth-8000-pair-3-vram-die-0.csv.gz",
+      "bytes": 3614268,
+      "sha256": "70a8c6561d978907b2049e64b4d05df00d1aa68dcce920c6c48fd6c783cef191"
+    },
+    {
+      "path": "depth-8000-pair-3-vram-die-1.csv.gz",
+      "bytes": 3790349,
+      "sha256": "a1282d8d7dfa8e3a10cacb172d405803595bd46b0b4020adf94e7af0ece890f7"
+    },
+    {
+      "path": "depth-8000-pair-3-vram-die-2.csv.gz",
+      "bytes": 3608931,
+      "sha256": "d7678403746a35839a0810662e66d2b0fe1505963d671d03b0580d6fd6335871"
+    },
+    {
+      "path": "depth-8000-pair-3-vram-die-3.csv.gz",
+      "bytes": 3597345,
+      "sha256": "f63863f807fe288c595480a9b79d680b576608b68b5a7d49034a9985a14f273c"
+    },
+    {
+      "path": "depth-8000-pair-3-vram-die-4.csv.gz",
+      "bytes": 3853558,
+      "sha256": "e1bdb240c82a12a31705b5473012a7a69600d96265690d8b8568f0aeba4023ae"
+    },
+    {
+      "path": "depth-8000-pair-3-vram-die-5.csv.gz",
+      "bytes": 3806910,
+      "sha256": "de404b133d4f51741d660d6c24944682d616bde8664f8124ab0ee9002ac2e6ce"
+    },
+    {
+      "path": "depth-8000-pair-3-vram-host.csv.gz",
+      "bytes": 3595,
+      "sha256": "4825e420877e7b35a738e10badb771ec3a37077f8d515dc09c585fdf95857f5b"
+    },
+    {
+      "path": "depth-8000-pair-4-host-die-0.csv.gz",
+      "bytes": 3598921,
+      "sha256": "bc415ad3970b811d246960eb63924c99062cd6333ef6a344883ad830831b785d"
+    },
+    {
+      "path": "depth-8000-pair-4-host-die-1.csv.gz",
+      "bytes": 3790674,
+      "sha256": "3163022387bf74054c03f81c2a6219b0f8da79dddcbad79b7c0abc4635af98c6"
+    },
+    {
+      "path": "depth-8000-pair-4-host-die-2.csv.gz",
+      "bytes": 3601680,
+      "sha256": "85cfa1096384de95a5851f2f663190a13519c7695529e253e7272d80457dcb6e"
+    },
+    {
+      "path": "depth-8000-pair-4-host-die-3.csv.gz",
+      "bytes": 3599767,
+      "sha256": "3e34388f9b610d988b3a2a965ea29e889d95a93e6ce9edd1588d4e59fd051c50"
+    },
+    {
+      "path": "depth-8000-pair-4-host-die-4.csv.gz",
+      "bytes": 3819272,
+      "sha256": "d021a4be2fdb48bcda24e61345835df7472c1a51599d6f62cff34f5558323f82"
+    },
+    {
+      "path": "depth-8000-pair-4-host-die-5.csv.gz",
+      "bytes": 3794674,
+      "sha256": "9e54b8cf0af197b419fa544ef780ad94a3d6b2096b0d9534a15ad8a0aa0947ba"
+    },
+    {
+      "path": "depth-8000-pair-4-host-host.csv.gz",
+      "bytes": 3614,
+      "sha256": "7d65584e1498620a2251055e5d2c8c10e856167e2330a6e58cea0db17a5108ca"
+    },
+    {
+      "path": "depth-8000-pair-4-vram-die-0.csv.gz",
+      "bytes": 3613501,
+      "sha256": "4ce1a5dc2efd41abc512b74056790000c1b2f2e00d6d91da4122af2add46f9d0"
+    },
+    {
+      "path": "depth-8000-pair-4-vram-die-1.csv.gz",
+      "bytes": 3790424,
+      "sha256": "d12b7261c025488fe92e41d04c7d84024c8ce96b9a4e8658ef08fa545f07b23e"
+    },
+    {
+      "path": "depth-8000-pair-4-vram-die-2.csv.gz",
+      "bytes": 3608637,
+      "sha256": "02f319b2cf06b633cdf7ec2405278b8b5db7b707953b758ed2c36f7cc3afe605"
+    },
+    {
+      "path": "depth-8000-pair-4-vram-die-3.csv.gz",
+      "bytes": 3596815,
+      "sha256": "64b3662b1d4d0ac1ceb9e6eaac8464b24cfa95a3ee5992da463e43625f6bb84b"
+    },
+    {
+      "path": "depth-8000-pair-4-vram-die-4.csv.gz",
+      "bytes": 3819110,
+      "sha256": "c8beee6d5170dfaf9bc16f9816030edb42920a56db3cf33c0204bca651165a30"
+    },
+    {
+      "path": "depth-8000-pair-4-vram-die-5.csv.gz",
+      "bytes": 3807095,
+      "sha256": "ce30f8a874f61426c6901a9b3970b079c169156199611527ff1c034804cb2288"
+    },
+    {
+      "path": "depth-8000-pair-4-vram-host.csv.gz",
+      "bytes": 3594,
+      "sha256": "f620edf8d550dfa14d7096fde66f7ba8e99dbca6771499a1400fb1725f9b9c2c"
+    }
+  ],
+  "total_bytes": 1334029281,
+  "note": "All original per-phase and host CSV gzip streams; these hashes identify the full collection retained on archy."
+}

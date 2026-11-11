@@ -1,0 +1,2084 @@
+{
+   "analyzer_identities" : [
+      {
+         "bytes" : 11267,
+         "path" : "/home/nate/codex/flash-issue10-resume-aqTBbOhE/tree/kern/decode_counter_matrix.pl",
+         "sha256" : "59b2297ef5bb6141bf18c77d8febc0ac73c83a485cae917bead4d61e8fab9bcf"
+      },
+      {
+         "bytes" : 20440,
+         "path" : "/home/nate/codex/flash-issue10-resume-aqTBbOhE/tree/kern/decode_counter_capture.pl",
+         "sha256" : "480225f3bdfb3f1e7e6096147dbe804f153f76df3d5f07343257975dab132347"
+      }
+   ],
+   "cases" : [
+      {
+         "case" : "nv775-clustered",
+         "collector_sha256" : "480225f3bdfb3f1e7e6096147dbe804f153f76df3d5f07343257975dab132347",
+         "finished_utc" : "2026-10-18T06:11:17Z",
+         "gpu_uuid" : "GPU-431371bd-b482-96b2-4b70-04f83c6d075b",
+         "input_identities" : {
+            "/home/nate/claude/pr38-profiler/usr/local/cuda-11.4/bin/nvprof" : {
+               "bytes" : 5664800,
+               "sha256" : "c3e58ebca670c1511c55e1d1420f8fea67d25fba93a4e0d178bc562473ae819d"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/die.cubin" : {
+               "bytes" : 444968,
+               "sha256" : "0fa2a17fa41c07aac507f9bc218a777601719a8e2b6eb8b40ec93867d4768027"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench" : {
+               "bytes" : 104720,
+               "sha256" : "126ba2ed56f7623a0ee1eeb5f658d719e057ef3c3f54eb1d5d2746f8776523b8"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench.c" : {
+               "bytes" : 10255,
+               "sha256" : "65f389ca8181a72998127e4124d1214afe9dce5871f79e81f26cb1d580a7c377"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_test.c" : {
+               "bytes" : 29972,
+               "sha256" : "744d418869983c77f4e822b500e09852f60fbf21f9eda756656def53ac463091"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/attn.c" : {
+               "bytes" : 5010,
+               "sha256" : "b2827140a4be2cc38280876b5f505db764ad15b6791144143bb26c309f3c42ef"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/fmath.c" : {
+               "bytes" : 1641,
+               "sha256" : "69bbf4dbb4201dd24056f29183d289910ac7067722c3214a79b3de3ffdf8f462"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/qsa.c" : {
+               "bytes" : 5032,
+               "sha256" : "68a83b9abe0855af32485414af825baa99deba72c7b9746c618125f5b68f3f78"
+            }
+         },
+         "manifest_sha256" : "684c4dccd93562450ee100577e664a228b9b6dcea89f5161155cc9a68c558246",
+         "metric_rows" : 26,
+         "nv" : 775,
+         "pattern" : "clustered",
+         "profiled_commands" : 8,
+         "rows" : [
+            {
+               "host" : {
+                  "avg" : 2359296,
+                  "max" : 2359296,
+                  "min" : 2359296
+               },
+               "metric" : "sysmem_read_bytes",
+               "pattern" : "clustered",
+               "unit" : "bytes",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0,
+                  "max" : 0,
+                  "min" : 0
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 672,
+                  "max" : 672,
+                  "min" : 672
+               },
+               "metric" : "sysmem_write_bytes",
+               "pattern" : "clustered",
+               "unit" : "bytes",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 672,
+                  "max" : 672,
+                  "min" : 672
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 4638650,
+                  "max" : 4718208,
+                  "min" : 4557248
+               },
+               "metric" : "dram_read_bytes",
+               "pattern" : "clustered",
+               "unit" : "bytes",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 7149920,
+                  "max" : 7272416,
+                  "min" : 6985536
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 14895372,
+                  "max" : 15508896,
+                  "min" : 14762272
+               },
+               "metric" : "dram_write_bytes",
+               "pattern" : "clustered",
+               "unit" : "bytes",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 12323208,
+                  "max" : 12983104,
+                  "min" : 12116672
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 73728,
+                  "max" : 73728,
+                  "min" : 73728
+               },
+               "metric" : "sysmem_read_transactions",
+               "pattern" : "clustered",
+               "unit" : "transactions",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0,
+                  "max" : 0,
+                  "min" : 0
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 21,
+                  "max" : 21,
+                  "min" : 21
+               },
+               "metric" : "sysmem_write_transactions",
+               "pattern" : "clustered",
+               "unit" : "transactions",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 21,
+                  "max" : 21,
+                  "min" : 21
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 148057,
+                  "max" : 152072,
+                  "min" : 145320
+               },
+               "metric" : "dram_read_transactions",
+               "pattern" : "clustered",
+               "unit" : "transactions",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 223435,
+                  "max" : 226584,
+                  "min" : 217565
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 468800,
+                  "max" : 483217,
+                  "min" : 464625
+               },
+               "metric" : "dram_write_transactions",
+               "pattern" : "clustered",
+               "unit" : "transactions",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 385008,
+                  "max" : 399989,
+                  "min" : 381027
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 0.124999,
+                  "max" : 0.124999,
+                  "min" : 0.124999
+               },
+               "metric" : "achieved_occupancy",
+               "pattern" : "clustered",
+               "unit" : "ratio",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0.12498,
+                  "max" : 0.124981,
+                  "min" : 0.124978
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 0.007644,
+                  "max" : 0.007811,
+                  "min" : 0.007479
+               },
+               "metric" : "eligible_warps_per_cycle",
+               "pattern" : "clustered",
+               "unit" : "warps_per_cycle",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0.143923,
+                  "max" : 0.152882,
+                  "min" : 0.138979
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 97.260955,
+                  "max" : 97.448602,
+                  "min" : 96.979583
+               },
+               "metric" : "stall_memory_dependency",
+               "pattern" : "clustered",
+               "unit" : "percent",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 83.831791,
+                  "max" : 84.84141,
+                  "min" : 82.593322
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 3.4e-05,
+                  "max" : 3.4e-05,
+                  "min" : 3.3e-05
+               },
+               "metric" : "stall_memory_throttle",
+               "pattern" : "clustered",
+               "unit" : "percent",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0.000701,
+                  "max" : 0.000729,
+                  "min" : 0.000674
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 2.413896,
+                  "max" : 2.695299,
+                  "min" : 2.216987
+               },
+               "metric" : "stall_sync",
+               "pattern" : "clustered",
+               "unit" : "percent",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 3.654515,
+                  "max" : 4.30844,
+                  "min" : 3.117095
+               }
+            }
+         ],
+         "source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+         "started_utc" : "2026-10-18T06:10:59Z"
+      },
+      {
+         "case" : "nv775-even",
+         "collector_sha256" : "480225f3bdfb3f1e7e6096147dbe804f153f76df3d5f07343257975dab132347",
+         "finished_utc" : "2026-10-18T06:11:34Z",
+         "gpu_uuid" : "GPU-431371bd-b482-96b2-4b70-04f83c6d075b",
+         "input_identities" : {
+            "/home/nate/claude/pr38-profiler/usr/local/cuda-11.4/bin/nvprof" : {
+               "bytes" : 5664800,
+               "sha256" : "c3e58ebca670c1511c55e1d1420f8fea67d25fba93a4e0d178bc562473ae819d"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/die.cubin" : {
+               "bytes" : 444968,
+               "sha256" : "0fa2a17fa41c07aac507f9bc218a777601719a8e2b6eb8b40ec93867d4768027"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench" : {
+               "bytes" : 104720,
+               "sha256" : "126ba2ed56f7623a0ee1eeb5f658d719e057ef3c3f54eb1d5d2746f8776523b8"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench.c" : {
+               "bytes" : 10255,
+               "sha256" : "65f389ca8181a72998127e4124d1214afe9dce5871f79e81f26cb1d580a7c377"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_test.c" : {
+               "bytes" : 29972,
+               "sha256" : "744d418869983c77f4e822b500e09852f60fbf21f9eda756656def53ac463091"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/attn.c" : {
+               "bytes" : 5010,
+               "sha256" : "b2827140a4be2cc38280876b5f505db764ad15b6791144143bb26c309f3c42ef"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/fmath.c" : {
+               "bytes" : 1641,
+               "sha256" : "69bbf4dbb4201dd24056f29183d289910ac7067722c3214a79b3de3ffdf8f462"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/qsa.c" : {
+               "bytes" : 5032,
+               "sha256" : "68a83b9abe0855af32485414af825baa99deba72c7b9746c618125f5b68f3f78"
+            }
+         },
+         "manifest_sha256" : "e1d8673bf9761a8e22f661b5f4a300e1f591b9e0c88cf2daee567d799fa29ef7",
+         "metric_rows" : 26,
+         "nv" : 775,
+         "pattern" : "even",
+         "profiled_commands" : 8,
+         "rows" : [
+            {
+               "host" : {
+                  "avg" : 2359296,
+                  "max" : 2359296,
+                  "min" : 2359296
+               },
+               "metric" : "sysmem_read_bytes",
+               "pattern" : "even",
+               "unit" : "bytes",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0,
+                  "max" : 0,
+                  "min" : 0
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 672,
+                  "max" : 672,
+                  "min" : 672
+               },
+               "metric" : "sysmem_write_bytes",
+               "pattern" : "even",
+               "unit" : "bytes",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 672,
+                  "max" : 672,
+                  "min" : 672
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 4753358,
+                  "max" : 4847808,
+                  "min" : 4619584
+               },
+               "metric" : "dram_read_bytes",
+               "pattern" : "even",
+               "unit" : "bytes",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 7197758,
+                  "max" : 7391712,
+                  "min" : 7028160
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 15029335,
+                  "max" : 15635168,
+                  "min" : 14842368
+               },
+               "metric" : "dram_write_bytes",
+               "pattern" : "even",
+               "unit" : "bytes",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 12336080,
+                  "max" : 12872992,
+                  "min" : 12151104
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 73728,
+                  "max" : 73728,
+                  "min" : 73728
+               },
+               "metric" : "sysmem_read_transactions",
+               "pattern" : "even",
+               "unit" : "transactions",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0,
+                  "max" : 0,
+                  "min" : 0
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 21,
+                  "max" : 21,
+                  "min" : 21
+               },
+               "metric" : "sysmem_write_transactions",
+               "pattern" : "even",
+               "unit" : "transactions",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 21,
+                  "max" : 21,
+                  "min" : 21
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 146524,
+                  "max" : 149606,
+                  "min" : 143640
+               },
+               "metric" : "dram_read_transactions",
+               "pattern" : "even",
+               "unit" : "transactions",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 224034,
+                  "max" : 231176,
+                  "min" : 219646
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 466991,
+                  "max" : 486139,
+                  "min" : 462766
+               },
+               "metric" : "dram_write_transactions",
+               "pattern" : "even",
+               "unit" : "transactions",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 385704,
+                  "max" : 401834,
+                  "min" : 379419
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 0.124999,
+                  "max" : 0.124999,
+                  "min" : 0.124999
+               },
+               "metric" : "achieved_occupancy",
+               "pattern" : "even",
+               "unit" : "ratio",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0.12498,
+                  "max" : 0.124981,
+                  "min" : 0.124979
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 0.007657,
+                  "max" : 0.007853,
+                  "min" : 0.007552
+               },
+               "metric" : "eligible_warps_per_cycle",
+               "pattern" : "even",
+               "unit" : "warps_per_cycle",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0.142686,
+                  "max" : 0.15219,
+                  "min" : 0.136806
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 97.051308,
+                  "max" : 97.432012,
+                  "min" : 96.550866
+               },
+               "metric" : "stall_memory_dependency",
+               "pattern" : "even",
+               "unit" : "percent",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 83.76682,
+                  "max" : 85.404042,
+                  "min" : 82.398432
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 3.4e-05,
+                  "max" : 3.5e-05,
+                  "min" : 3.3e-05
+               },
+               "metric" : "stall_memory_throttle",
+               "pattern" : "even",
+               "unit" : "percent",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0.000703,
+                  "max" : 0.000736,
+                  "min" : 0.00065
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 2.591564,
+                  "max" : 3.101062,
+                  "min" : 2.229949
+               },
+               "metric" : "stall_sync",
+               "pattern" : "even",
+               "unit" : "percent",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 3.718722,
+                  "max" : 4.657198,
+                  "min" : 3.052694
+               }
+            }
+         ],
+         "source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+         "started_utc" : "2026-10-18T06:11:17Z"
+      },
+      {
+         "case" : "nv775-random",
+         "collector_sha256" : "480225f3bdfb3f1e7e6096147dbe804f153f76df3d5f07343257975dab132347",
+         "finished_utc" : "2026-10-18T06:11:53Z",
+         "gpu_uuid" : "GPU-431371bd-b482-96b2-4b70-04f83c6d075b",
+         "input_identities" : {
+            "/home/nate/claude/pr38-profiler/usr/local/cuda-11.4/bin/nvprof" : {
+               "bytes" : 5664800,
+               "sha256" : "c3e58ebca670c1511c55e1d1420f8fea67d25fba93a4e0d178bc562473ae819d"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/die.cubin" : {
+               "bytes" : 444968,
+               "sha256" : "0fa2a17fa41c07aac507f9bc218a777601719a8e2b6eb8b40ec93867d4768027"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench" : {
+               "bytes" : 104720,
+               "sha256" : "126ba2ed56f7623a0ee1eeb5f658d719e057ef3c3f54eb1d5d2746f8776523b8"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench.c" : {
+               "bytes" : 10255,
+               "sha256" : "65f389ca8181a72998127e4124d1214afe9dce5871f79e81f26cb1d580a7c377"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_test.c" : {
+               "bytes" : 29972,
+               "sha256" : "744d418869983c77f4e822b500e09852f60fbf21f9eda756656def53ac463091"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/attn.c" : {
+               "bytes" : 5010,
+               "sha256" : "b2827140a4be2cc38280876b5f505db764ad15b6791144143bb26c309f3c42ef"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/fmath.c" : {
+               "bytes" : 1641,
+               "sha256" : "69bbf4dbb4201dd24056f29183d289910ac7067722c3214a79b3de3ffdf8f462"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/qsa.c" : {
+               "bytes" : 5032,
+               "sha256" : "68a83b9abe0855af32485414af825baa99deba72c7b9746c618125f5b68f3f78"
+            }
+         },
+         "manifest_sha256" : "824ac9ba6940ed59d678716408561df2c5e115b311f55a2d7ff2bbec0356e7e7",
+         "metric_rows" : 26,
+         "nv" : 775,
+         "pattern" : "random",
+         "profiled_commands" : 8,
+         "rows" : [
+            {
+               "host" : {
+                  "avg" : 2359296,
+                  "max" : 2359296,
+                  "min" : 2359296
+               },
+               "metric" : "sysmem_read_bytes",
+               "pattern" : "random",
+               "unit" : "bytes",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0,
+                  "max" : 0,
+                  "min" : 0
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 672,
+                  "max" : 672,
+                  "min" : 672
+               },
+               "metric" : "sysmem_write_bytes",
+               "pattern" : "random",
+               "unit" : "bytes",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 672,
+                  "max" : 672,
+                  "min" : 672
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 4685635,
+                  "max" : 4815712,
+                  "min" : 4567360
+               },
+               "metric" : "dram_read_bytes",
+               "pattern" : "random",
+               "unit" : "bytes",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 7130720,
+                  "max" : 7275040,
+                  "min" : 6905312
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 14939043,
+                  "max" : 15323616,
+                  "min" : 14801888
+               },
+               "metric" : "dram_write_bytes",
+               "pattern" : "random",
+               "unit" : "bytes",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 12246423,
+                  "max" : 12881888,
+                  "min" : 12031840
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 73728,
+                  "max" : 73728,
+                  "min" : 73728
+               },
+               "metric" : "sysmem_read_transactions",
+               "pattern" : "random",
+               "unit" : "transactions",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0,
+                  "max" : 0,
+                  "min" : 0
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 21,
+                  "max" : 21,
+                  "min" : 21
+               },
+               "metric" : "sysmem_write_transactions",
+               "pattern" : "random",
+               "unit" : "transactions",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 21,
+                  "max" : 21,
+                  "min" : 21
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 145449,
+                  "max" : 148809,
+                  "min" : 141997
+               },
+               "metric" : "dram_read_transactions",
+               "pattern" : "random",
+               "unit" : "transactions",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 225075,
+                  "max" : 227908,
+                  "min" : 222165
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 465979,
+                  "max" : 478087,
+                  "min" : 462752
+               },
+               "metric" : "dram_write_transactions",
+               "pattern" : "random",
+               "unit" : "transactions",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 385503,
+                  "max" : 401893,
+                  "min" : 379886
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 0.124999,
+                  "max" : 0.124999,
+                  "min" : 0.124999
+               },
+               "metric" : "achieved_occupancy",
+               "pattern" : "random",
+               "unit" : "ratio",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0.12498,
+                  "max" : 0.124982,
+                  "min" : 0.124978
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 0.007802,
+                  "max" : 0.008004,
+                  "min" : 0.00763
+               },
+               "metric" : "eligible_warps_per_cycle",
+               "pattern" : "random",
+               "unit" : "warps_per_cycle",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0.143789,
+                  "max" : 0.154245,
+                  "min" : 0.138022
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 97.186273,
+                  "max" : 97.439383,
+                  "min" : 96.960026
+               },
+               "metric" : "stall_memory_dependency",
+               "pattern" : "random",
+               "unit" : "percent",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 84.697708,
+                  "max" : 85.490404,
+                  "min" : 83.434237
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 3.4e-05,
+                  "max" : 3.5e-05,
+                  "min" : 3.3e-05
+               },
+               "metric" : "stall_memory_throttle",
+               "pattern" : "random",
+               "unit" : "percent",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0.000685,
+                  "max" : 0.000719,
+                  "min" : 0.000654
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 2.470223,
+                  "max" : 2.719155,
+                  "min" : 2.251257
+               },
+               "metric" : "stall_sync",
+               "pattern" : "random",
+               "unit" : "percent",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 3.503633,
+                  "max" : 3.886986,
+                  "min" : 3.052517
+               }
+            }
+         ],
+         "source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+         "started_utc" : "2026-10-18T06:11:34Z"
+      },
+      {
+         "case" : "nv775-changing",
+         "collector_sha256" : "480225f3bdfb3f1e7e6096147dbe804f153f76df3d5f07343257975dab132347",
+         "finished_utc" : "2026-10-18T06:12:10Z",
+         "gpu_uuid" : "GPU-431371bd-b482-96b2-4b70-04f83c6d075b",
+         "input_identities" : {
+            "/home/nate/claude/pr38-profiler/usr/local/cuda-11.4/bin/nvprof" : {
+               "bytes" : 5664800,
+               "sha256" : "c3e58ebca670c1511c55e1d1420f8fea67d25fba93a4e0d178bc562473ae819d"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/die.cubin" : {
+               "bytes" : 444968,
+               "sha256" : "0fa2a17fa41c07aac507f9bc218a777601719a8e2b6eb8b40ec93867d4768027"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench" : {
+               "bytes" : 104720,
+               "sha256" : "126ba2ed56f7623a0ee1eeb5f658d719e057ef3c3f54eb1d5d2746f8776523b8"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench.c" : {
+               "bytes" : 10255,
+               "sha256" : "65f389ca8181a72998127e4124d1214afe9dce5871f79e81f26cb1d580a7c377"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_test.c" : {
+               "bytes" : 29972,
+               "sha256" : "744d418869983c77f4e822b500e09852f60fbf21f9eda756656def53ac463091"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/attn.c" : {
+               "bytes" : 5010,
+               "sha256" : "b2827140a4be2cc38280876b5f505db764ad15b6791144143bb26c309f3c42ef"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/fmath.c" : {
+               "bytes" : 1641,
+               "sha256" : "69bbf4dbb4201dd24056f29183d289910ac7067722c3214a79b3de3ffdf8f462"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/qsa.c" : {
+               "bytes" : 5032,
+               "sha256" : "68a83b9abe0855af32485414af825baa99deba72c7b9746c618125f5b68f3f78"
+            }
+         },
+         "manifest_sha256" : "1499866a47856bc332aa37e6d7475c6b021aaaf4d2d05a54e97d3a68f2e2bef2",
+         "metric_rows" : 26,
+         "nv" : 775,
+         "pattern" : "changing",
+         "profiled_commands" : 8,
+         "rows" : [
+            {
+               "host" : {
+                  "avg" : 2359296,
+                  "max" : 2359296,
+                  "min" : 2359296
+               },
+               "metric" : "sysmem_read_bytes",
+               "pattern" : "changing",
+               "unit" : "bytes",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0,
+                  "max" : 0,
+                  "min" : 0
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 672,
+                  "max" : 672,
+                  "min" : 672
+               },
+               "metric" : "sysmem_write_bytes",
+               "pattern" : "changing",
+               "unit" : "bytes",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 672,
+                  "max" : 672,
+                  "min" : 672
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 4746631,
+                  "max" : 4850560,
+                  "min" : 4651200
+               },
+               "metric" : "dram_read_bytes",
+               "pattern" : "changing",
+               "unit" : "bytes",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 7206433,
+                  "max" : 7488640,
+                  "min" : 7026400
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 15274129,
+                  "max" : 15752288,
+                  "min" : 14917056
+               },
+               "metric" : "dram_write_bytes",
+               "pattern" : "changing",
+               "unit" : "bytes",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 12609475,
+                  "max" : 13192512,
+                  "min" : 12161216
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 73728,
+                  "max" : 73728,
+                  "min" : 73728
+               },
+               "metric" : "sysmem_read_transactions",
+               "pattern" : "changing",
+               "unit" : "transactions",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0,
+                  "max" : 0,
+                  "min" : 0
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 21,
+                  "max" : 21,
+                  "min" : 21
+               },
+               "metric" : "sysmem_write_transactions",
+               "pattern" : "changing",
+               "unit" : "transactions",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 21,
+                  "max" : 21,
+                  "min" : 21
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 145163,
+                  "max" : 148512,
+                  "min" : 142023
+               },
+               "metric" : "dram_read_transactions",
+               "pattern" : "changing",
+               "unit" : "transactions",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 224542,
+                  "max" : 230504,
+                  "min" : 220995
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 473191,
+                  "max" : 486665,
+                  "min" : 460629
+               },
+               "metric" : "dram_write_transactions",
+               "pattern" : "changing",
+               "unit" : "transactions",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 393404,
+                  "max" : 413094,
+                  "min" : 378461
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 0.124999,
+                  "max" : 0.124999,
+                  "min" : 0.124999
+               },
+               "metric" : "achieved_occupancy",
+               "pattern" : "changing",
+               "unit" : "ratio",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0.12498,
+                  "max" : 0.124982,
+                  "min" : 0.124978
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 0.007658,
+                  "max" : 0.007825,
+                  "min" : 0.007454
+               },
+               "metric" : "eligible_warps_per_cycle",
+               "pattern" : "changing",
+               "unit" : "warps_per_cycle",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0.144177,
+                  "max" : 0.153134,
+                  "min" : 0.137611
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 97.214605,
+                  "max" : 97.515963,
+                  "min" : 96.52277
+               },
+               "metric" : "stall_memory_dependency",
+               "pattern" : "changing",
+               "unit" : "percent",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 83.804328,
+                  "max" : 84.731842,
+                  "min" : 82.091929
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 3.4e-05,
+                  "max" : 3.5e-05,
+                  "min" : 3.3e-05
+               },
+               "metric" : "stall_memory_throttle",
+               "pattern" : "changing",
+               "unit" : "percent",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 0.000694,
+                  "max" : 0.000742,
+                  "min" : 0.000654
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 2.444667,
+                  "max" : 3.122557,
+                  "min" : 2.115595
+               },
+               "metric" : "stall_sync",
+               "pattern" : "changing",
+               "unit" : "percent",
+               "visible_positions" : 3100,
+               "vram" : {
+                  "avg" : 3.612318,
+                  "max" : 4.249309,
+                  "min" : 3.208637
+               }
+            }
+         ],
+         "source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+         "started_utc" : "2026-10-18T06:11:53Z"
+      },
+      {
+         "case" : "nv2000-clustered",
+         "collector_sha256" : "480225f3bdfb3f1e7e6096147dbe804f153f76df3d5f07343257975dab132347",
+         "finished_utc" : "2026-10-18T06:12:30Z",
+         "gpu_uuid" : "GPU-431371bd-b482-96b2-4b70-04f83c6d075b",
+         "input_identities" : {
+            "/home/nate/claude/pr38-profiler/usr/local/cuda-11.4/bin/nvprof" : {
+               "bytes" : 5664800,
+               "sha256" : "c3e58ebca670c1511c55e1d1420f8fea67d25fba93a4e0d178bc562473ae819d"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/die.cubin" : {
+               "bytes" : 444968,
+               "sha256" : "0fa2a17fa41c07aac507f9bc218a777601719a8e2b6eb8b40ec93867d4768027"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench" : {
+               "bytes" : 104720,
+               "sha256" : "126ba2ed56f7623a0ee1eeb5f658d719e057ef3c3f54eb1d5d2746f8776523b8"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench.c" : {
+               "bytes" : 10255,
+               "sha256" : "65f389ca8181a72998127e4124d1214afe9dce5871f79e81f26cb1d580a7c377"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_test.c" : {
+               "bytes" : 29972,
+               "sha256" : "744d418869983c77f4e822b500e09852f60fbf21f9eda756656def53ac463091"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/attn.c" : {
+               "bytes" : 5010,
+               "sha256" : "b2827140a4be2cc38280876b5f505db764ad15b6791144143bb26c309f3c42ef"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/fmath.c" : {
+               "bytes" : 1641,
+               "sha256" : "69bbf4dbb4201dd24056f29183d289910ac7067722c3214a79b3de3ffdf8f462"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/qsa.c" : {
+               "bytes" : 5032,
+               "sha256" : "68a83b9abe0855af32485414af825baa99deba72c7b9746c618125f5b68f3f78"
+            }
+         },
+         "manifest_sha256" : "dd6eef9e905bdeaab57aef59fcfc2720fd27abfdcd98b9c2fd78cac14dad2ff3",
+         "metric_rows" : 26,
+         "nv" : 2000,
+         "pattern" : "clustered",
+         "profiled_commands" : 8,
+         "rows" : [
+            {
+               "host" : {
+                  "avg" : 2359296,
+                  "max" : 2359296,
+                  "min" : 2359296
+               },
+               "metric" : "sysmem_read_bytes",
+               "pattern" : "clustered",
+               "unit" : "bytes",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0,
+                  "max" : 0,
+                  "min" : 0
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 672,
+                  "max" : 672,
+                  "min" : 672
+               },
+               "metric" : "sysmem_write_bytes",
+               "pattern" : "clustered",
+               "unit" : "bytes",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 672,
+                  "max" : 672,
+                  "min" : 672
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 4470248,
+                  "max" : 4597696,
+                  "min" : 4380480
+               },
+               "metric" : "dram_read_bytes",
+               "pattern" : "clustered",
+               "unit" : "bytes",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 7130330,
+                  "max" : 7274112,
+                  "min" : 6991232
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 14698730,
+                  "max" : 15177120,
+                  "min" : 14555776
+               },
+               "metric" : "dram_write_bytes",
+               "pattern" : "clustered",
+               "unit" : "bytes",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 12299987,
+                  "max" : 12711936,
+                  "min" : 12037184
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 73728,
+                  "max" : 73728,
+                  "min" : 73728
+               },
+               "metric" : "sysmem_read_transactions",
+               "pattern" : "clustered",
+               "unit" : "transactions",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0,
+                  "max" : 0,
+                  "min" : 0
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 21,
+                  "max" : 21,
+                  "min" : 21
+               },
+               "metric" : "sysmem_write_transactions",
+               "pattern" : "clustered",
+               "unit" : "transactions",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 21,
+                  "max" : 21,
+                  "min" : 21
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 140085,
+                  "max" : 143323,
+                  "min" : 134885
+               },
+               "metric" : "dram_read_transactions",
+               "pattern" : "clustered",
+               "unit" : "transactions",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 223355,
+                  "max" : 230743,
+                  "min" : 216146
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 459786,
+                  "max" : 473220,
+                  "min" : 453708
+               },
+               "metric" : "dram_write_transactions",
+               "pattern" : "clustered",
+               "unit" : "transactions",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 384213,
+                  "max" : 398582,
+                  "min" : 379542
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 0.124999,
+                  "max" : 0.124999,
+                  "min" : 0.124999
+               },
+               "metric" : "achieved_occupancy",
+               "pattern" : "clustered",
+               "unit" : "ratio",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0.12498,
+                  "max" : 0.124981,
+                  "min" : 0.124978
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 0.007646,
+                  "max" : 0.007853,
+                  "min" : 0.007509
+               },
+               "metric" : "eligible_warps_per_cycle",
+               "pattern" : "clustered",
+               "unit" : "warps_per_cycle",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0.144492,
+                  "max" : 0.152745,
+                  "min" : 0.140023
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 97.131079,
+                  "max" : 97.524036,
+                  "min" : 96.602177
+               },
+               "metric" : "stall_memory_dependency",
+               "pattern" : "clustered",
+               "unit" : "percent",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 84.793383,
+                  "max" : 85.629097,
+                  "min" : 82.935342
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 3.4e-05,
+                  "max" : 3.5e-05,
+                  "min" : 3.3e-05
+               },
+               "metric" : "stall_memory_throttle",
+               "pattern" : "clustered",
+               "unit" : "percent",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0.000688,
+                  "max" : 0.000726,
+                  "min" : 0.000656
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 2.534227,
+                  "max" : 3.058314,
+                  "min" : 2.125972
+               },
+               "metric" : "stall_sync",
+               "pattern" : "clustered",
+               "unit" : "percent",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 3.611058,
+                  "max" : 4.219957,
+                  "min" : 2.932426
+               }
+            }
+         ],
+         "source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+         "started_utc" : "2026-10-18T06:12:10Z"
+      },
+      {
+         "case" : "nv2000-even",
+         "collector_sha256" : "480225f3bdfb3f1e7e6096147dbe804f153f76df3d5f07343257975dab132347",
+         "finished_utc" : "2026-10-18T06:12:49Z",
+         "gpu_uuid" : "GPU-431371bd-b482-96b2-4b70-04f83c6d075b",
+         "input_identities" : {
+            "/home/nate/claude/pr38-profiler/usr/local/cuda-11.4/bin/nvprof" : {
+               "bytes" : 5664800,
+               "sha256" : "c3e58ebca670c1511c55e1d1420f8fea67d25fba93a4e0d178bc562473ae819d"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/die.cubin" : {
+               "bytes" : 444968,
+               "sha256" : "0fa2a17fa41c07aac507f9bc218a777601719a8e2b6eb8b40ec93867d4768027"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench" : {
+               "bytes" : 104720,
+               "sha256" : "126ba2ed56f7623a0ee1eeb5f658d719e057ef3c3f54eb1d5d2746f8776523b8"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench.c" : {
+               "bytes" : 10255,
+               "sha256" : "65f389ca8181a72998127e4124d1214afe9dce5871f79e81f26cb1d580a7c377"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_test.c" : {
+               "bytes" : 29972,
+               "sha256" : "744d418869983c77f4e822b500e09852f60fbf21f9eda756656def53ac463091"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/attn.c" : {
+               "bytes" : 5010,
+               "sha256" : "b2827140a4be2cc38280876b5f505db764ad15b6791144143bb26c309f3c42ef"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/fmath.c" : {
+               "bytes" : 1641,
+               "sha256" : "69bbf4dbb4201dd24056f29183d289910ac7067722c3214a79b3de3ffdf8f462"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/qsa.c" : {
+               "bytes" : 5032,
+               "sha256" : "68a83b9abe0855af32485414af825baa99deba72c7b9746c618125f5b68f3f78"
+            }
+         },
+         "manifest_sha256" : "c6c53b5859f98723a99c9ee91acf5e0a31b6873b2f11c29f608e220912900061",
+         "metric_rows" : 26,
+         "nv" : 2000,
+         "pattern" : "even",
+         "profiled_commands" : 8,
+         "rows" : [
+            {
+               "host" : {
+                  "avg" : 2359296,
+                  "max" : 2359296,
+                  "min" : 2359296
+               },
+               "metric" : "sysmem_read_bytes",
+               "pattern" : "even",
+               "unit" : "bytes",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0,
+                  "max" : 0,
+                  "min" : 0
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 672,
+                  "max" : 672,
+                  "min" : 672
+               },
+               "metric" : "sysmem_write_bytes",
+               "pattern" : "even",
+               "unit" : "bytes",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 672,
+                  "max" : 672,
+                  "min" : 672
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 4750305,
+                  "max" : 4850592,
+                  "min" : 4656064
+               },
+               "metric" : "dram_read_bytes",
+               "pattern" : "even",
+               "unit" : "bytes",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 7200878,
+                  "max" : 7387296,
+                  "min" : 7057920
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 15006800,
+                  "max" : 15401248,
+                  "min" : 14904896
+               },
+               "metric" : "dram_write_bytes",
+               "pattern" : "even",
+               "unit" : "bytes",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 12331936,
+                  "max" : 12941440,
+                  "min" : 12128448
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 73728,
+                  "max" : 73728,
+                  "min" : 73728
+               },
+               "metric" : "sysmem_read_transactions",
+               "pattern" : "even",
+               "unit" : "transactions",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0,
+                  "max" : 0,
+                  "min" : 0
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 21,
+                  "max" : 21,
+                  "min" : 21
+               },
+               "metric" : "sysmem_write_transactions",
+               "pattern" : "even",
+               "unit" : "transactions",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 21,
+                  "max" : 21,
+                  "min" : 21
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 147490,
+                  "max" : 150663,
+                  "min" : 143624
+               },
+               "metric" : "dram_read_transactions",
+               "pattern" : "even",
+               "unit" : "transactions",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 225585,
+                  "max" : 230238,
+                  "min" : 221494
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 467519,
+                  "max" : 484422,
+                  "min" : 462023
+               },
+               "metric" : "dram_write_transactions",
+               "pattern" : "even",
+               "unit" : "transactions",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 385453,
+                  "max" : 402212,
+                  "min" : 380315
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 0.124999,
+                  "max" : 0.124999,
+                  "min" : 0.124999
+               },
+               "metric" : "achieved_occupancy",
+               "pattern" : "even",
+               "unit" : "ratio",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0.12498,
+                  "max" : 0.124981,
+                  "min" : 0.124979
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 0.007672,
+                  "max" : 0.007763,
+                  "min" : 0.007575
+               },
+               "metric" : "eligible_warps_per_cycle",
+               "pattern" : "even",
+               "unit" : "warps_per_cycle",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0.142258,
+                  "max" : 0.151091,
+                  "min" : 0.137723
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 97.227098,
+                  "max" : 97.545199,
+                  "min" : 96.863761
+               },
+               "metric" : "stall_memory_dependency",
+               "pattern" : "even",
+               "unit" : "percent",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 84.480211,
+                  "max" : 85.739884,
+                  "min" : 83.065928
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 3.4e-05,
+                  "max" : 3.5e-05,
+                  "min" : 3.3e-05
+               },
+               "metric" : "stall_memory_throttle",
+               "pattern" : "even",
+               "unit" : "percent",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0.000684,
+                  "max" : 0.000738,
+                  "min" : 0.000657
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 2.436476,
+                  "max" : 2.768619,
+                  "min" : 2.132344
+               },
+               "metric" : "stall_sync",
+               "pattern" : "even",
+               "unit" : "percent",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 3.554834,
+                  "max" : 4.069698,
+                  "min" : 2.837029
+               }
+            }
+         ],
+         "source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+         "started_utc" : "2026-10-18T06:12:30Z"
+      },
+      {
+         "case" : "nv2000-random",
+         "collector_sha256" : "480225f3bdfb3f1e7e6096147dbe804f153f76df3d5f07343257975dab132347",
+         "finished_utc" : "2026-10-18T06:13:08Z",
+         "gpu_uuid" : "GPU-431371bd-b482-96b2-4b70-04f83c6d075b",
+         "input_identities" : {
+            "/home/nate/claude/pr38-profiler/usr/local/cuda-11.4/bin/nvprof" : {
+               "bytes" : 5664800,
+               "sha256" : "c3e58ebca670c1511c55e1d1420f8fea67d25fba93a4e0d178bc562473ae819d"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/die.cubin" : {
+               "bytes" : 444968,
+               "sha256" : "0fa2a17fa41c07aac507f9bc218a777601719a8e2b6eb8b40ec93867d4768027"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench" : {
+               "bytes" : 104720,
+               "sha256" : "126ba2ed56f7623a0ee1eeb5f658d719e057ef3c3f54eb1d5d2746f8776523b8"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench.c" : {
+               "bytes" : 10255,
+               "sha256" : "65f389ca8181a72998127e4124d1214afe9dce5871f79e81f26cb1d580a7c377"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_test.c" : {
+               "bytes" : 29972,
+               "sha256" : "744d418869983c77f4e822b500e09852f60fbf21f9eda756656def53ac463091"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/attn.c" : {
+               "bytes" : 5010,
+               "sha256" : "b2827140a4be2cc38280876b5f505db764ad15b6791144143bb26c309f3c42ef"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/fmath.c" : {
+               "bytes" : 1641,
+               "sha256" : "69bbf4dbb4201dd24056f29183d289910ac7067722c3214a79b3de3ffdf8f462"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/qsa.c" : {
+               "bytes" : 5032,
+               "sha256" : "68a83b9abe0855af32485414af825baa99deba72c7b9746c618125f5b68f3f78"
+            }
+         },
+         "manifest_sha256" : "cd53436145409e9128dbde97fbcc9f810b0cfe47dbc427f32f84bf9f3808e145",
+         "metric_rows" : 26,
+         "nv" : 2000,
+         "pattern" : "random",
+         "profiled_commands" : 8,
+         "rows" : [
+            {
+               "host" : {
+                  "avg" : 2359296,
+                  "max" : 2359296,
+                  "min" : 2359296
+               },
+               "metric" : "sysmem_read_bytes",
+               "pattern" : "random",
+               "unit" : "bytes",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0,
+                  "max" : 0,
+                  "min" : 0
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 672,
+                  "max" : 672,
+                  "min" : 672
+               },
+               "metric" : "sysmem_write_bytes",
+               "pattern" : "random",
+               "unit" : "bytes",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 672,
+                  "max" : 672,
+                  "min" : 672
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 4713971,
+                  "max" : 4810752,
+                  "min" : 4627104
+               },
+               "metric" : "dram_read_bytes",
+               "pattern" : "random",
+               "unit" : "bytes",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 7241256,
+                  "max" : 7381088,
+                  "min" : 7006944
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 14966426,
+                  "max" : 15400736,
+                  "min" : 14830784
+               },
+               "metric" : "dram_write_bytes",
+               "pattern" : "random",
+               "unit" : "bytes",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 12380611,
+                  "max" : 12882464,
+                  "min" : 12130208
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 73728,
+                  "max" : 73728,
+                  "min" : 73728
+               },
+               "metric" : "sysmem_read_transactions",
+               "pattern" : "random",
+               "unit" : "transactions",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0,
+                  "max" : 0,
+                  "min" : 0
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 21,
+                  "max" : 21,
+                  "min" : 21
+               },
+               "metric" : "sysmem_write_transactions",
+               "pattern" : "random",
+               "unit" : "transactions",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 21,
+                  "max" : 21,
+                  "min" : 21
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 145064,
+                  "max" : 148509,
+                  "min" : 139697
+               },
+               "metric" : "dram_read_transactions",
+               "pattern" : "random",
+               "unit" : "transactions",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 225078,
+                  "max" : 230163,
+                  "min" : 221512
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 465192,
+                  "max" : 483191,
+                  "min" : 458338
+               },
+               "metric" : "dram_write_transactions",
+               "pattern" : "random",
+               "unit" : "transactions",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 386335,
+                  "max" : 400853,
+                  "min" : 380457
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 0.124999,
+                  "max" : 0.124999,
+                  "min" : 0.124999
+               },
+               "metric" : "achieved_occupancy",
+               "pattern" : "random",
+               "unit" : "ratio",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0.12498,
+                  "max" : 0.124982,
+                  "min" : 0.124978
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 0.007755,
+                  "max" : 0.007858,
+                  "min" : 0.007567
+               },
+               "metric" : "eligible_warps_per_cycle",
+               "pattern" : "random",
+               "unit" : "warps_per_cycle",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0.142606,
+                  "max" : 0.153415,
+                  "min" : 0.138068
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 97.062519,
+                  "max" : 97.462312,
+                  "min" : 96.508703
+               },
+               "metric" : "stall_memory_dependency",
+               "pattern" : "random",
+               "unit" : "percent",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 84.605548,
+                  "max" : 85.128432,
+                  "min" : 83.443228
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 3.4e-05,
+                  "max" : 3.5e-05,
+                  "min" : 3.3e-05
+               },
+               "metric" : "stall_memory_throttle",
+               "pattern" : "random",
+               "unit" : "percent",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0.000673,
+                  "max" : 0.000709,
+                  "min" : 0.000654
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 2.583404,
+                  "max" : 3.150196,
+                  "min" : 2.19332
+               },
+               "metric" : "stall_sync",
+               "pattern" : "random",
+               "unit" : "percent",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 3.636899,
+                  "max" : 4.234046,
+                  "min" : 3.134812
+               }
+            }
+         ],
+         "source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+         "started_utc" : "2026-10-18T06:12:49Z"
+      },
+      {
+         "case" : "nv2000-changing",
+         "collector_sha256" : "480225f3bdfb3f1e7e6096147dbe804f153f76df3d5f07343257975dab132347",
+         "finished_utc" : "2026-10-18T06:13:27Z",
+         "gpu_uuid" : "GPU-431371bd-b482-96b2-4b70-04f83c6d075b",
+         "input_identities" : {
+            "/home/nate/claude/pr38-profiler/usr/local/cuda-11.4/bin/nvprof" : {
+               "bytes" : 5664800,
+               "sha256" : "c3e58ebca670c1511c55e1d1420f8fea67d25fba93a4e0d178bc562473ae819d"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/die.cubin" : {
+               "bytes" : 444968,
+               "sha256" : "0fa2a17fa41c07aac507f9bc218a777601719a8e2b6eb8b40ec93867d4768027"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench" : {
+               "bytes" : 104720,
+               "sha256" : "126ba2ed56f7623a0ee1eeb5f658d719e057ef3c3f54eb1d5d2746f8776523b8"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_gather_bench.c" : {
+               "bytes" : 10255,
+               "sha256" : "65f389ca8181a72998127e4124d1214afe9dce5871f79e81f26cb1d580a7c377"
+            },
+            "/tmp/flash-resolve-issue16-20261017/kern/qsa_test.c" : {
+               "bytes" : 29972,
+               "sha256" : "744d418869983c77f4e822b500e09852f60fbf21f9eda756656def53ac463091"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/attn.c" : {
+               "bytes" : 5010,
+               "sha256" : "b2827140a4be2cc38280876b5f505db764ad15b6791144143bb26c309f3c42ef"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/fmath.c" : {
+               "bytes" : 1641,
+               "sha256" : "69bbf4dbb4201dd24056f29183d289910ac7067722c3214a79b3de3ffdf8f462"
+            },
+            "/tmp/flash-resolve-issue16-20261017/ref/qsa.c" : {
+               "bytes" : 5032,
+               "sha256" : "68a83b9abe0855af32485414af825baa99deba72c7b9746c618125f5b68f3f78"
+            }
+         },
+         "manifest_sha256" : "86e3a0e5d338520ad60fdf2478b87b98c65fe056de82d6e849ffd38ff5ee0fd5",
+         "metric_rows" : 26,
+         "nv" : 2000,
+         "pattern" : "changing",
+         "profiled_commands" : 8,
+         "rows" : [
+            {
+               "host" : {
+                  "avg" : 2359296,
+                  "max" : 2359296,
+                  "min" : 2359296
+               },
+               "metric" : "sysmem_read_bytes",
+               "pattern" : "changing",
+               "unit" : "bytes",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0,
+                  "max" : 0,
+                  "min" : 0
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 672,
+                  "max" : 672,
+                  "min" : 672
+               },
+               "metric" : "sysmem_write_bytes",
+               "pattern" : "changing",
+               "unit" : "bytes",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 672,
+                  "max" : 672,
+                  "min" : 672
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 4725672,
+                  "max" : 4786144,
+                  "min" : 4553088
+               },
+               "metric" : "dram_read_bytes",
+               "pattern" : "changing",
+               "unit" : "bytes",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 7257832,
+                  "max" : 7413888,
+                  "min" : 7028096
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 15242581,
+                  "max" : 15660608,
+                  "min" : 14764544
+               },
+               "metric" : "dram_write_bytes",
+               "pattern" : "changing",
+               "unit" : "bytes",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 12651448,
+                  "max" : 13186272,
+                  "min" : 12233344
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 73728,
+                  "max" : 73728,
+                  "min" : 73728
+               },
+               "metric" : "sysmem_read_transactions",
+               "pattern" : "changing",
+               "unit" : "transactions",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0,
+                  "max" : 0,
+                  "min" : 0
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 21,
+                  "max" : 21,
+                  "min" : 21
+               },
+               "metric" : "sysmem_write_transactions",
+               "pattern" : "changing",
+               "unit" : "transactions",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 21,
+                  "max" : 21,
+                  "min" : 21
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 146561,
+                  "max" : 151020,
+                  "min" : 143379
+               },
+               "metric" : "dram_read_transactions",
+               "pattern" : "changing",
+               "unit" : "transactions",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 226647,
+                  "max" : 232388,
+                  "min" : 221917
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 474908,
+                  "max" : 491055,
+                  "min" : 462073
+               },
+               "metric" : "dram_write_transactions",
+               "pattern" : "changing",
+               "unit" : "transactions",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 394299,
+                  "max" : 409574,
+                  "min" : 379735
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 0.124999,
+                  "max" : 0.124999,
+                  "min" : 0.124999
+               },
+               "metric" : "achieved_occupancy",
+               "pattern" : "changing",
+               "unit" : "ratio",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0.12498,
+                  "max" : 0.124981,
+                  "min" : 0.124979
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 0.007717,
+                  "max" : 0.007844,
+                  "min" : 0.00762
+               },
+               "metric" : "eligible_warps_per_cycle",
+               "pattern" : "changing",
+               "unit" : "warps_per_cycle",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0.142161,
+                  "max" : 0.147942,
+                  "min" : 0.136577
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 97.312123,
+                  "max" : 97.744055,
+                  "min" : 96.82916
+               },
+               "metric" : "stall_memory_dependency",
+               "pattern" : "changing",
+               "unit" : "percent",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 84.410774,
+                  "max" : 85.616551,
+                  "min" : 83.301214
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 3.4e-05,
+                  "max" : 3.4e-05,
+                  "min" : 3.3e-05
+               },
+               "metric" : "stall_memory_throttle",
+               "pattern" : "changing",
+               "unit" : "percent",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 0.000675,
+                  "max" : 0.000714,
+                  "min" : 0.000647
+               }
+            },
+            {
+               "host" : {
+                  "avg" : 2.357237,
+                  "max" : 2.829797,
+                  "min" : 1.949789
+               },
+               "metric" : "stall_sync",
+               "pattern" : "changing",
+               "unit" : "percent",
+               "visible_positions" : 8000,
+               "vram" : {
+                  "avg" : 3.554965,
+                  "max" : 4.007376,
+                  "min" : 2.9824
+               }
+            }
+         ],
+         "source_revision" : "7c6f34d4372567fd97f1cef9b609d3dc0c81b0d3",
+         "started_utc" : "2026-10-18T06:13:08Z"
+      }
+   ],
+   "full_issue_acceptance" : false,
+   "metric_rows" : 208,
+   "notes" : [
+      "Counters include preflight, repeated-row warmups, and finite die framework.",
+      "Only changing mode changes selected rows each iteration; clustered/even/random modes retain fixed rows.",
+      "No checkpoint-derived layout, full-model throughput, or historical slowdown attribution is claimed.",
+      "This replay checks consistency of supplied records; authenticity is anchored to the reviewed Git commit."
+   ],
+   "profiled_commands" : 64,
+   "schema" : "flash.issue10.counter-matrix-replay.v1",
+   "scope" : "CPU replay of archived component counter matrix; no GPU execution",
+   "status" : "PASS"
+}
