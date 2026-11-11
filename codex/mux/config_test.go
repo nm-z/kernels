@@ -82,7 +82,7 @@ func TestConfigParseAndSetUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, b, jc := c.Services[0], c.Services[1], c.Services[2]
-	if a.Env["N"] != "24" || !a.Up || b.Up || jc.Up || len(a.Efforts) != 5 || b.Kind != KindShim || len(b.Efforts) != 5 {
+	if a.Env["N"] != "24" || !a.Up || b.Up || jc.Up || len(a.Efforts) != 5 || b.Kind != KindShim || len(b.Efforts) != len(shimEfforts) {
 		t.Fatalf("%+v %+v %+v", a, b, jc)
 	}
 	if a.Cwd != filepath.Join(dir, "a") || b.Cwd != filepath.Join(dir, "b", "sub") {

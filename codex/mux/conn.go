@@ -64,6 +64,11 @@ type msg struct {
 	// shim
 	Trying            []string        `json:"trying"`
 	Failed            []string        `json:"failed"`
+	Why               []string        `json:"why"`     // one reason a failed route, in order
+	Model             string          `json:"model"`   // the model answering this run, as its provider names it
+	Options           string          `json:"options"` // the options that model answers with (its reasoning level, its mode)
+	Of                int             `json:"of"`      // route: the most attempts the shim makes for one request
+	Models            []string        `json:"models"`  // every model the shim's provider offers this account
 	MS                *float64        `json:"ms"`
 	Channel           string          `json:"channel"`
 	Text              string          `json:"text"`
@@ -244,7 +249,7 @@ func (c *svcConn) readLoop(br *bufio.Reader) error {
 
 func (c *svcConn) dispatch(m *msg) {
 	switch m.Op {
-	case "prefill", "tokens", "stats", "done", "error", "route", "ttft", "delta", "tool_call", "vectors":
+	case "prefill", "tokens", "stats", "done", "error", "route", "model", "ttft", "delta", "tool_call", "vectors":
 		c.mu.Lock()
 		r := c.runs[m.ID]
 		c.mu.Unlock()
@@ -268,6 +273,10 @@ func (c *svcConn) dispatch(m *msg) {
 	case "finished":
 		if c.kind == KindJob {
 			c.svc.jobFinished(c, m)
+		}
+	case "models":
+		if c.kind == KindShim {
+			c.svc.reportModels(m.Models)
 		}
 	case "capacity":
 		if c.kind == KindShim {

@@ -66,6 +66,7 @@ type prepared struct {
 	model    string
 	stream   bool
 	effort   string
+	want     string    // a shim run: the model of the provider the request asked for (SERVICE/MODEL)
 	messages []chatMsg // system first (all system and developer text folded into it)
 	tools    []any
 	toolInfo map[string]*toolInfo

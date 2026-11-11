@@ -53,6 +53,10 @@ type Config struct {
 
 var defaultEfforts = []string{"none", "low", "medium", "high", "xhigh"}
 
+// shimEfforts are the efforts a shim takes when its file names none: every effort a client sends
+// (Codex sends minimal and max). A shim runs its provider's strongest options whatever the effort.
+var shimEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
 // hostFile is mux.yaml as written.
 type hostFile struct {
 	Listen      string    `yaml:"listen"`
@@ -228,8 +232,11 @@ func ParseService(name, dir string, b []byte) (*ServiceConfig, error) {
 	if (s.Kind == KindEngine || s.Kind == KindShim) && s.Ctx < 1 {
 		return nil, fmt.Errorf("ctx: required for an engine or shim (the context window broadcast to clients)")
 	}
-	if (s.Kind == KindEngine || s.Kind == KindShim) && len(s.Efforts) == 0 {
+	if s.Kind == KindEngine && len(s.Efforts) == 0 {
 		s.Efforts = append([]string(nil), defaultEfforts...)
+	}
+	if s.Kind == KindShim && len(s.Efforts) == 0 {
+		s.Efforts = append([]string(nil), shimEfforts...)
 	}
 	switch s.Restart {
 	case "":

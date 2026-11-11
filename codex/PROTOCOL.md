@@ -42,7 +42,7 @@ kind: engine                       # engine | shim | embed | job
 display: Qwen3.8-27B               # optional: the name web chat shows (see the llama.cpp face)
 gguf: /data/models/qwen3.8-27b-q5/Qwen3.8-27B.Q5_K_M.gguf   # engine: tokenizer + chat template
 ctx: 262144                        # engine, shim: context window broadcast to clients
-efforts: [none, low, medium, high, xhigh]
+efforts: [none, low, medium, high, xhigh]   # engine default; a shim takes every effort a client sends
 vision: false
 device: sentry 4x Radeon Pro V340 (gfx900)
 command: [/usr/bin/julia, -t, "24", qwen3.8-27b.jl, --model, /data/models/qwen3.8-27b-q5/Qwen3.8-27B.Q5_K_M.gguf]
@@ -101,11 +101,13 @@ Refused: unknown service, wrong peer, `positions < ctx`.
 | shim → mux | fields | when |
 |---|---|---|
 | `register` | `slots`, `vision`, `auto` (true for a route that picks among providers), optional provider `remaining`, `reset_time`, `tokens_served_today` | first |
-| `route` | `id`, `trying` (the route(s) being attempted now, e.g. `["vertex/gemini-3-pro"]`), `failed` (ones given up on) | an auto shim: every time its choice changes |
+| `route` | `id`, `trying` (the route(s) being attempted now, e.g. `["vertex/gemini-3-pro"]`), `failed` (ones given up on), optional `why` (one short reason a failed route, in order), optional `of` (the most attempts the shim makes for one request) | an auto shim: every time its choice changes |
+| `model` | `id`, `model` (the model answering this run as its provider names it; an auto shim sends `ROUTE/MODEL`), optional `options` (what that model answers with: its reasoning level, its mode) | when the shim knows it, and again if it changes |
 | `ttft` | `id`, `ms` | when the first token of output arrives |
 | `delta` | `id`, `channel` (`reasoning` or `content`), `text` | as it streams |
 | `tool_call` | `id`, `call_id`, `name`, `arguments` (JSON text) | each call |
 | `capacity` | `remaining`, `reset_time`, `tokens_served_today` (provider-reported; each unavailable value is an empty string) | after registration and whenever provider facts change |
+| `models` | `models` (every model the provider offers this account, as the provider names each; read from the provider, never written by hand) | after registration and whenever the list read changes |
 | `done` | `id`, `input_tokens`, `output_tokens`, `total_tokens` (integer counts when reported by the provider) | last |
 | `error` | `id`, `message` | |
 
@@ -114,7 +116,9 @@ empty string when a provider does not expose one. Mux preserves these values wit
 aggregating them. It clears a shim's cached capacity when that shim disconnects or stops. A shim
 sends no periodic keep-alive for capacity.
 
-mux → shim: `run` with `id`, `messages` (chat form, system first), `tools`, `effort`, `images`.
+mux → shim: `run` with `id`, `messages` (chat form, system first), `tools`, `effort`, `images`, `model`
+(the one of the shim's `models` a request for `SERVICE/MODEL` named; null when the request named
+the service alone).
 
 ### embed: an embedding server
 
@@ -141,8 +145,8 @@ mux → embed: `run` with `id`, `texts`.
 | `POST /v1/responses` | the OpenAI Responses API, streamed (SSE); engine and shim services |
 | `POST /v1/chat/completions`, `GET /props` | the llama.cpp-compatible face for web chat, below |
 | `POST /v1/embeddings` | the OpenAI embeddings API; embed services |
-| `GET /v1/models` | `{"data":[{"id","kind","ctx","efforts","vision","state"}]}` |
-| `GET /v1/services` | every service: `name, kind, state, device, pid, ctx, slots, since, last, progress, log, reason` |
+| `GET /v1/models` | `{"data":[{"id","kind","ctx","efforts","models","vision","state"}]}` |
+| `GET /v1/services` | every service: `name, kind, state, device, pid, ctx, slots, since, last, progress, log, reason, models` |
 | `GET /v1/capacity` | each shim's `source, state, remaining, reset_time, tokens_served_today`; absent provider facts are empty strings |
 | `POST /v1/services/NAME/up`, `.../down` | change the desired state (rewrites mux.yaml) |
 | `GET /v1/events?since=TS` | SSE: the recorded events since `TS`, then live ones (state changes, runs, stats, routes, job progress) |
@@ -164,7 +168,7 @@ data: {"type":"response.ai_mux.stats","phase":"prefill"|"decode","prefill":{"don
 ```
 
 for engines, at least every 500 ms while running (live values, idle % of the run so far) and once with the final measured values; for
-shims, `{"type":"response.ai_mux.stats","phase":"route"|"output","route":{"trying":[…],"failed":[…]},"ttft_ms":N,"ctx":N}`
+shims, `{"type":"response.ai_mux.stats","phase":"route"|"output","route":{"trying":[…],"failed":[…],"of":N},"ttft_ms":N,"ctx":N}`
 on every route change and once at the first token.
 
 `response.ai_mux.stats` is the one wire name that keeps its old spelling (`ai_mux`), for client compatibility (Codex reads it); mux's

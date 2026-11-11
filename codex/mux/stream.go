@@ -63,14 +63,15 @@ const (
 // respBuilder turns the engine's token ids into a Responses API stream: it detokenizes, splits the
 // reasoning from the answer, holds tool-call XML back from the text and parses it into calls.
 type respBuilder struct {
-	id      string
-	served  string // the model named to the client by servedBy
-	model   string
-	created int64
-	m       Model
-	tools   map[string]*toolInfo
-	sink    sink
-	seq     int
+	id            string
+	served        string // the model named to the client by servedBy
+	servedOptions string // the options named with it
+	model         string
+	created       int64
+	m             Model
+	tools         map[string]*toolInfo
+	sink          sink
+	seq           int
 
 	thinkEnd, thinkStart int
 
@@ -179,13 +180,26 @@ func (b *respBuilder) responseObj(status string, extra map[string]any) map[strin
 // servedBy tells the client which model answers when it is not the one it asked for (an auto
 // shim's route): an in-progress event whose response carries the name as the `openai-model`
 // header, the place a Responses client reads the serving model from. Once a name.
-func (b *respBuilder) servedBy(model string) {
-	if model == "" || model == b.served {
+func (b *respBuilder) servedBy(model, options string) {
+	if model == "" || (model == b.served && options == b.servedOptions) {
 		return
 	}
 	b.served = model
+	b.servedOptions = options
+	headers := map[string]any{"openai-model": model}
+	if options != "" {
+		headers["x-mux-options"] = options
+	}
 	b.emit("response.in_progress", map[string]any{"response": b.responseObj("in_progress",
-		map[string]any{"headers": map[string]any{"openai-model": model}})})
+		map[string]any{"headers": headers})})
+}
+
+// answeredBy is the model named as serving, or the one asked for when none was named.
+func (b *respBuilder) answeredBy() string {
+	if b.served != "" {
+		return b.served
+	}
+	return b.model
 }
 
 func (b *respBuilder) start() {

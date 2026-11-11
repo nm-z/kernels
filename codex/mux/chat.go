@@ -62,7 +62,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, badRequest("invalid_json", "", "the body is not a JSON object"))
 		return
 	}
-	svc := s.resolveModel(probe.Model)
+	svc, want := s.resolveRoute(probe.Model)
 	if svc == nil && probe.Model == "" {
 		writeAPIError(w, badRequest("missing_model", "model", "model is required (this host has no compat_service to default to)"))
 		return
@@ -80,7 +80,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, aerr)
 		return
 	}
+	pr.want = want
 	s.dispatch(w, r, svc, pr)
+}
+
+// resolveRoute finds the service a request names and, for SERVICE/MODEL, the model of that
+// service's provider the run is to be answered with.
+func (s *Server) resolveRoute(name string) (*Service, string) {
+	if svc := s.resolveModel(name); svc != nil {
+		return svc, ""
+	}
+	if cut := strings.IndexByte(name, '/'); cut > 0 {
+		if svc := s.svcs[name[:cut]]; svc != nil && svc.kind == KindShim {
+			return svc, name[cut+1:]
+		}
+	}
+	return nil, ""
 }
 
 // compatService is the service /props and /v1/models describe: the compat service, else the first
@@ -355,6 +370,7 @@ type chatChunk struct {
 	Object  string        `json:"object"`
 	Created int64         `json:"created"`
 	Model   string        `json:"model"`
+	Options string        `json:"options,omitempty"` // the options the serving model answers with (not an OpenAI field)
 	Choices []chatChoice  `json:"choices"`
 	Usage   *chatUsageOut `json:"usage,omitempty"`
 	Timings *chatTimings  `json:"timings,omitempty"`
@@ -428,6 +444,7 @@ func (e *engineStatsEv) live() *chatTimings {
 type chatSink struct {
 	*sseSink
 	id, model string
+	options   string // the options the serving model answers with, when its shim named them
 	created   int64
 	calls     int            // tool calls sent so far
 	stats     *engineStatsEv // the latest engine stats event: the last one before the end has the final numbers
@@ -439,7 +456,7 @@ func newChatSink(w http.ResponseWriter, model string) *chatSink {
 }
 
 func (c *chatSink) chunk(delta map[string]any, finish *string, usage *chatUsageOut, timings *chatTimings) {
-	b, err := json.Marshal(chatChunk{ID: c.id, Object: "chat.completion.chunk", Created: c.created, Model: c.model,
+	b, err := json.Marshal(chatChunk{ID: c.id, Object: "chat.completion.chunk", Created: c.created, Model: c.model, Options: c.options,
 		Choices: []chatChoice{{Index: 0, Delta: delta, FinishReason: finish}}, Usage: usage, Timings: timings})
 	if err == nil {
 		c.put("data: %s\n\n", b)
@@ -473,7 +490,8 @@ func (c *chatSink) write(typ string, data []byte) {
 			Arguments string `json:"arguments"`
 		} `json:"item"`
 		Response struct {
-			Usage             responsesUsage `json:"usage"`
+			Headers           map[string]string `json:"headers"`
+			Usage             responsesUsage    `json:"usage"`
 			IncompleteDetails *struct {
 				Reason string `json:"reason"`
 			} `json:"incomplete_details"`
@@ -486,6 +504,15 @@ func (c *chatSink) write(typ string, data []byte) {
 	switch typ {
 	case "response.created":
 		c.chunk(map[string]any{"role": "assistant", "content": ""}, nil, nil, nil)
+	case "response.in_progress":
+		// the model named as serving (an auto shim's route, a shim's own model) is the chunks' model from here on
+		json.Unmarshal(data, &ev)
+		if m := ev.Response.Headers["openai-model"]; m != "" {
+			c.model = m
+		}
+		if o := ev.Response.Headers["x-mux-options"]; o != "" {
+			c.options = o
+		}
 	case "response.reasoning_text.delta":
 		json.Unmarshal(data, &ev)
 		c.chunk(map[string]any{"reasoning_content": ev.Delta}, nil, nil, nil)
@@ -577,7 +604,7 @@ func chatCompletionObj(rb *respBuilder, usage map[string]any, incomplete bool) m
 	b, _ := json.Marshal(usage)
 	json.Unmarshal(b, &u)
 	obj := map[string]any{
-		"id": newID("chatcmpl-"), "object": "chat.completion", "created": rb.created, "model": rb.model,
+		"id": newID("chatcmpl-"), "object": "chat.completion", "created": rb.created, "model": rb.answeredBy(),
 		"choices": []any{map[string]any{"index": 0, "message": msg, "finish_reason": chatFinish(len(calls) > 0, incomplete)}},
 		"usage":   u.chat(),
 	}
