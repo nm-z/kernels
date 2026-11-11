@@ -1,0 +1,9 @@
+kind: shim
+display: ChatGPT
+ctx: 128000
+efforts: [low, medium, high]
+vision: false
+command: [/home/nate/work/deploy-aimux-owned/target/release/llm-mux-chatgpt]
+env:
+  KWIN_MCP_BIN: /home/nate/.local/bin/kwin-mcp
+restart: on-failure
