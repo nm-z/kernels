@@ -1,0 +1,62 @@
+name: Push tests
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Host checks and queued GPU smoke test
+    # Register this runner on engi with dsh access to benji and the `archy` SSH alias.
+    runs-on: [self-hosted, linux, x64, engi, gpuq]
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run CPU tests and build the GPU smoke test on benji
+        shell: bash
+        run: |
+          set -euo pipefail
+          dsh build --host benji -- bash -eu -o pipefail -c '
+            make -C ref test-q2-guard test-attn-contract
+            make -C kern test-quant-range
+            cc -std=c11 -O2 -Wall -Wextra \
+              -I/opt/cuda/include \
+              -o kern/gpuq_smoke_test tools/gpuq/gpu_smoke.c -lcuda
+          ' --artifact kern/gpuq_smoke_test
+
+      - name: Stage and submit the GPU smoke test
+        env:
+          GPUQ_STAGE: /tmp/flash-sass-gpuq-smoke-${{ github.sha }}
+          GPUQ_LABEL: flash-sass-push-${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scp kern/gpuq_smoke_test "archy:${GPUQ_STAGE}"
+          ssh archy chmod 700 "${GPUQ_STAGE}"
+          ssh archy gpuq run --name "${GPUQ_LABEL}" --timeout 30 -- "${GPUQ_STAGE}"
+
+      - name: Show GPUQ output on failure
+        if: failure()
+        continue-on-error: true
+        env:
+          GPUQ_LABEL: flash-sass-push-${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          job_id=$(ssh archy "gpuq query 'SELECT id FROM jobs WHERE label=\"${GPUQ_LABEL}\" ORDER BY submitted_ns DESC LIMIT 1'" | jq -r '.[0].id // empty')
+          if [[ -n "${job_id}" ]]; then
+            ssh archy gpuq logs "${job_id}"
+          else
+            echo "No GPUQ job was found for ${GPUQ_LABEL}"
+          fi
+
+      - name: Remove staged GPU smoke test
+        if: always()
+        env:
+          GPUQ_STAGE: /tmp/flash-sass-gpuq-smoke-${{ github.sha }}
+        shell: bash
+        run: ssh archy rm -f -- "${GPUQ_STAGE}"
