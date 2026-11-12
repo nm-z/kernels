@@ -20,6 +20,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/services/", s.handleServiceAction)
 	mux.HandleFunc("/v1/capacity", s.handleCapacity)
 	mux.HandleFunc("/v1/events", s.handleEvents)
+	// llama.cpp's health probe: clients written against llama-server (jev's backfill) wait for it before they send
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok"}`))
+	})
 	return mux
 }
 

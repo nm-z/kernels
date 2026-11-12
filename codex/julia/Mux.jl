@@ -104,6 +104,19 @@ send(c::Conn, line) = lock(c.lk) do
     write(c.io, line, '\n'); flush(c.io)
 end
 send(r::Run, line) = send(r.conn, line)
+const CONN = Ref{Any}(nothing)                             # this process's connection, once registered
+
+"""
+    emit(event, data::Pair...)
+
+Publish a change observers should see (mux streams it as `service.event` on /v1/events and `mux events`): e.g.
+`Mux.emit("govern", :die => 2, :temp => 79.5, :paused => true)`. Before the service registers it is dropped.
+"""
+function emit(event::AbstractString, data::Pair...)
+    c = CONN[]; c === nothing && return
+    try send(c, "{\"op\":\"event\",\"event\":" * jstr(event) * ",\"data\":" * jobj(data...) * "}") catch end
+    nothing
+end
 
 "Prompt positions run so far (`done` of the run's `length(r.ids)`)."
 function prefill!(r::Run, done::Integer)
@@ -155,7 +168,7 @@ each run (at most `slots` at once). `encode(img, bytes) -> positions` handles im
 """
 function serve(f; positions::Integer, max_new::Integer, slots::Integer = 1, vision::Bool = false, encode = nothing)
     sock = ENV["MUX_SOCK"]; ep = ENV["MUX_SERVICE"]
-    c = Conn(connect(sock), ReentrantLock())
+    c = Conn(connect(sock), ReentrantLock()); CONN[] = c
     send(c, jobj(:op => "register", :service => ep, :kind => "engine", :positions => positions, :max_new => max_new, :slots => slots, :vision => vision))
     ctx = 0; runs = Dict{String,Run}(); free = Base.Semaphore(slots)
     while !eof(c.io)
@@ -186,6 +199,41 @@ function serve(f; positions::Integer, max_new::Integer, slots::Integer = 1, visi
         end
     end
     ctx
+end
+"""
+    serve_embed(f; dims, max_batch, device, slots = 1)
+
+An embed service's side: register, then answer each run's `texts` with `f(texts)`, one vector of `dims`
+numbers a text, in order. Up to `slots` runs go at once, each in its own task (so `f` must be safe to call
+from several at once; a service with slots > 1 orders the work itself).
+"""
+function serve_embed(f; dims::Integer, max_batch::Integer, device::AbstractString, slots::Integer = 1)
+    c = Conn(connect(ENV["MUX_SOCK"]), ReentrantLock()); ep = ENV["MUX_SERVICE"]; CONN[] = c
+    send(c, jobj(:op => "register", :service => ep, :kind => "embed", :dims => dims, :max_batch => max_batch, :device => device, :slots => slots))
+    while !eof(c.io)
+        m = jparse(readline(c.io)); op = m["op"]
+        if op == "registered"
+            @info "mux: registered as $ep, $dims numbers a vector, $slots runs at once"
+        elseif op == "error"
+            error("mux refused $ep: ", get(m, "message", ""))
+        elseif op == "run"
+            id = m["id"]; texts = String.(m["texts"])
+            Threads.@spawn try
+                vs = f(texts); io = IOBuffer()
+                print(io, "{\"op\":\"vectors\",\"id\":", jstr(id), ",\"vectors\":[")
+                for (i, v) in enumerate(vs)
+                    i > 1 && print(io, ','); print(io, '[')
+                    for (j, x) in enumerate(v)
+                        j > 1 && print(io, ','); print(io, isfinite(x) ? x : 0.0f0)
+                    end
+                    print(io, ']')
+                end
+                print(io, "]}"); send(c, String(take!(io)))
+            catch e
+                send(c, jobj(:op => "error", :id => id, :message => sprint(showerror, e)))
+            end
+        end
+    end
 end
 function base64decode_(s)
     v(c) = c in 'A':'Z' ? c - 'A' : c in 'a':'z' ? c - 'a' + 26 : c in '0':'9' ? c - '0' + 52 : c in "+-" ? 62 : 63

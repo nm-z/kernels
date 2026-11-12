@@ -38,13 +38,17 @@ type msg struct {
 	Kind      string `json:"kind"`
 	Positions int    `json:"positions"` // engine
 	MaxNew    int    `json:"max_new"`   // engine
-	Slots     int    `json:"slots"`     // engine, shim
+	Slots     int    `json:"slots"`     // engine, shim, embed
 	Vision    bool   `json:"vision"`    // engine, shim
 	Auto      bool   `json:"auto"`      // shim
 	Dims      int    `json:"dims"`      // embed
 	MaxBatch  int    `json:"max_batch"` // embed
 	Device    string `json:"device"`    // embed
 	Title     string `json:"title"`     // job
+
+	// event (any service)
+	Event string          `json:"event"`
+	Data  json.RawMessage `json:"data"`
 
 	// run lines
 	ID         runID    `json:"id"`
@@ -129,7 +133,7 @@ type svcConn struct {
 
 	positions int // engine
 	maxNew    int // engine
-	slots     int // engine, shim; embed 1
+	slots     int // engine, shim, embed (embed default 1)
 	vision    bool
 	auto      bool   // shim
 	dims      int    // embed
@@ -159,7 +163,9 @@ func newSvcConn(svc *Service, nc net.Conn, reg *msg) *svcConn {
 	}
 	switch c.kind {
 	case KindEmbed:
-		c.slots = 1 // the protocol has no slots for an embed service: one batch at a time
+		if c.slots < 1 {
+			c.slots = 1 // a service that registers no slots gets one batch at a time
+		}
 		if c.maxBatch < 1 {
 			c.maxBatch = 64
 		}
@@ -281,6 +287,10 @@ func (c *svcConn) dispatch(m *msg) {
 	case "capacity":
 		if c.kind == KindShim {
 			c.svc.reportCapacity(c, m)
+		}
+	case "event": // any service: something it wants observers to see (recorded and streamed as service.event)
+		if m.Event != "" {
+			c.svc.s.hub.Publish("service.event", map[string]any{"service": c.svc.name, "event": m.Event, "data": m.Data})
 		}
 	}
 	// other ops (a second register, anything newer) are ignored
