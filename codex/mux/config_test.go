@@ -119,6 +119,42 @@ func TestConfigParseAndSetUp(t *testing.T) {
 	}
 }
 
+func TestReadFleet(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "mux.yaml")
+	os.WriteFile(p, []byte("listen: 127.0.0.1:18100\nservices_dir: s\nfleet: [engi, archy, archy, sentry]\nservices: {}\n"), 0o644)
+	f, err := ReadFleet(p)
+	if err != nil || strings.Join(f, ",") != "engi,archy,sentry" {
+		t.Fatalf("fleet %v, %v: want engi,archy,sentry (duplicates once)", f, err)
+	}
+	if _, err := ParseHost([]byte("services_dir: s\nfleet: [engi]\nservices: {}\n"), dir); err != nil {
+		t.Fatalf("a host file with fleet: still parses for the daemon: %v", err)
+	}
+	os.WriteFile(p, []byte("services_dir: s\nservices: {}\n"), 0o644)
+	if f, err := ReadFleet(p); err != nil || len(f) != 0 {
+		t.Fatalf("no fleet: %v, %v: want none", f, err)
+	}
+	os.WriteFile(p, []byte("fleet: [\"-oProxyCommand=x\"]\n"), 0o644)
+	if _, err := ReadFleet(p); err == nil {
+		t.Fatal("a fleet entry ssh would read as an option must be refused")
+	}
+	for _, h := range []string{"sentry", "archy"} {
+		f, err := ReadFleet("../hosts/" + h + ".yaml")
+		if err == nil && !(len(f) > 0 && contains(f, h)) {
+			t.Errorf("hosts/%s.yaml: fleet %v should name every mux machine, %s among them", h, f, h)
+		}
+	}
+}
+
+func contains(xs []string, x string) bool {
+	for _, y := range xs {
+		if y == x {
+			return true
+		}
+	}
+	return false
+}
+
 func TestConfigRejects(t *testing.T) {
 	dir := t.TempDir()
 	host := "socket: /x\nservices_dir: " + dir + "\nservices: {s: {up: true}}\n"

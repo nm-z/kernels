@@ -1,23 +1,28 @@
 // mux serves AI on one host: it starts and stops every service and serves the Responses API.
 //
 //	mux serve [-f mux.yaml]      the daemon
-//	mux ps | up NAME | down NAME | events [-since TS] [-f mux.yaml]
+//	mux ps [-local] [-json] | up NAME | down NAME | events [-since TS] [-f mux.yaml]
 //
-// The CLI finds the daemon through MUX_URL, else the `listen` of the compose file.
+// The CLI finds the daemon through MUX_URL, else the `listen` of the compose file. `mux ps` lists the services of
+// every machine the host file's `fleet:` names (this one through its daemon, the others through ssh), one table
+// with a HOST column; -local lists this machine's alone.
 package main
 
 import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -27,11 +32,12 @@ import (
 
 func usage() {
 	fmt.Fprint(os.Stderr, `usage: mux serve [-f FILE]
-       mux ps [-f FILE]
+       mux ps [-local] [-json] [-f FILE]
        mux events [-since TS] [-f FILE]
        mux up NAME | down NAME [-f FILE]
 
 FILE defaults to ~/.config/mux/mux.yaml; the CLI uses MUX_URL (http://host:port) when set.
+ps lists every machine in FILE's fleet: (ssh names), HOST first; -local lists this machine alone.
 `)
 	os.Exit(2)
 }
@@ -39,6 +45,7 @@ FILE defaults to ~/.config/mux/mux.yaml; the CLI uses MUX_URL (http://host:port)
 func main() {
 	args := os.Args[1:]
 	file, since := "", ""
+	local, asJSON := false, false
 	var rest []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -59,6 +66,10 @@ func main() {
 			i++
 		case strings.HasPrefix(a, "-since=") || strings.HasPrefix(a, "--since="):
 			since = a[strings.Index(a, "=")+1:]
+		case a == "-local" || a == "--local":
+			local = true
+		case a == "-json" || a == "--json":
+			asJSON = true
 		case a == "-h" || a == "--help" || a == "help":
 			usage()
 		default:
@@ -76,7 +87,7 @@ func main() {
 	case "serve":
 		serve(file)
 	case "ps":
-		ps(baseURL(file))
+		ps(file, local, asJSON)
 	case "up", "down":
 		if len(rest) != 2 {
 			usage()
@@ -150,31 +161,199 @@ func call(method, url string) []byte {
 	return b
 }
 
-func ps(base string) {
-	var out struct {
-		Data []mux.ServiceInfo `json:"data"`
+// hostServices is one machine's answer to ps: its services, or why there are none.
+type hostServices struct {
+	Host  string            `json:"host"`
+	Data  []mux.ServiceInfo `json:"data"`
+	Error string            `json:"error,omitempty"` // "unreachable: …", "no mux: …"
+}
+
+// ps lists the services of every machine in the fleet (or this one alone with -local), asked at once.
+func ps(file string, local, asJSON bool) {
+	self := shortHost()
+	if local {
+		h := localServices(file, self)
+		if asJSON {
+			b, _ := json.Marshal(h)
+			fmt.Println(string(b))
+			return
+		}
+		if h.Error != "" {
+			fmt.Fprintln(os.Stderr, "mux:", h.Error)
+			os.Exit(1)
+		}
+		printServices([]hostServices{h})
+		return
 	}
-	if err := json.Unmarshal(call("GET", base+"/v1/services"), &out); err != nil {
+	fleet, err := mux.ReadFleet(file)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "mux:", err)
 		os.Exit(1)
 	}
+	if !contains(fleet, self) {
+		fleet = append([]string{self}, fleet...)
+	}
+	all := make([]hostServices, len(fleet))
+	var wg sync.WaitGroup
+	for i, h := range fleet {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if h == self {
+				all[i] = localServices(file, self)
+			} else {
+				all[i] = remoteServices(h)
+			}
+		}()
+	}
+	wg.Wait()
+	if asJSON {
+		b, _ := json.Marshal(all)
+		fmt.Println(string(b))
+		return
+	}
+	printServices(all)
+}
+
+func shortHost() string {
+	h, err := os.Hostname()
+	if err != nil || h == "" {
+		return "localhost"
+	}
+	return strings.SplitN(h, ".", 2)[0]
+}
+
+func contains(xs []string, x string) bool {
+	for _, y := range xs {
+		if y == x {
+			return true
+		}
+	}
+	return false
+}
+
+// localServices asks this machine's daemon (MUX_URL, else the host file's listen).
+func localServices(file, self string) hostServices {
+	out := hostServices{Host: self}
+	base := os.Getenv("MUX_URL")
+	if base == "" {
+		listen, err := mux.ReadListen(file)
+		if err != nil {
+			out.Error = "no mux: " + err.Error()
+			return out
+		}
+		host, port, err := net.SplitHostPort(listen)
+		if err != nil {
+			out.Error = "no mux: listen: " + err.Error()
+			return out
+		}
+		if host == "" || host == "0.0.0.0" || host == "::" {
+			host = "127.0.0.1"
+		}
+		base = "http://" + net.JoinHostPort(host, port)
+	}
+	cl := &http.Client{Timeout: 10 * time.Second}
+	resp, err := cl.Get(strings.TrimRight(base, "/") + "/v1/services")
+	if err != nil {
+		out.Error = "no mux: " + err.Error()
+		return out
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode/100 != 2 {
+		out.Error = fmt.Sprintf("no mux: GET /v1/services: %s", strings.TrimSpace(string(b)))
+		return out
+	}
+	var v struct {
+		Data []mux.ServiceInfo `json:"data"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		out.Error = "no mux: " + err.Error()
+		return out
+	}
+	out.Data = v.Data
+	return out
+}
+
+// remoteCommand runs that machine's mux for its own services (its ~/.local/bin/mux, else the one on its PATH).
+const remoteCommand = `m="$HOME/.local/bin/mux"; [ -x "$m" ] || m=mux; exec "$m" ps -local -json`
+
+// remoteServices asks another machine over ssh; ssh's own failure (exit 255) is "unreachable".
+func remoteServices(host string) hostServices {
+	out := hostServices{Host: host}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", host, remoteCommand)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	b, err := cmd.Output()
+	reason := lastLine(stderr.String())
+	if err != nil {
+		var ee *exec.ExitError
+		switch {
+		case ctx.Err() != nil:
+			out.Error = "unreachable: no answer in 15 s"
+		case errors.As(err, &ee) && ee.ExitCode() == 255:
+			out.Error = "unreachable: " + reason
+		case errors.As(err, &ee) && ee.ExitCode() == 127:
+			out.Error = "no mux: not installed"
+		default:
+			out.Error = "no mux: " + firstNonEmpty(reason, err.Error())
+		}
+		return out
+	}
+	var v hostServices
+	if err := json.Unmarshal(b, &v); err != nil {
+		out.Error = "no mux: its mux predates fleet ps (update it): " + firstNonEmpty(lastLine(string(b)), err.Error())
+		return out
+	}
+	out.Data, out.Error = v.Data, v.Error
+	return out
+}
+
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+// printServices is the table, HOST first; a machine without services is a row saying why, its reason below.
+func printServices(all []hostServices) {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tKIND\tSTATE\tPID\tCTX\tSLOTS\tFOR\tLAST RUN / PROGRESS\tDEVICE")
-	for _, e := range out.Data {
-		since := "-"
-		if t, err := time.Parse(time.RFC3339, e.Since); err == nil {
-			since = age(time.Since(t))
+	fmt.Fprintln(tw, "HOST\tNAME\tKIND\tSTATE\tPID\tCTX\tSLOTS\tFOR\tLAST RUN / PROGRESS\tDEVICE")
+	for _, h := range all {
+		if h.Error != "" {
+			state, _, _ := strings.Cut(h.Error, ":")
+			fmt.Fprintf(tw, "%s\t-\t-\t%s\t-\t-\t-\t-\t-\t-\n", h.Host, state)
+			continue
 		}
-		ctx := "-"
-		if e.Ctx > 0 {
-			ctx = fmt.Sprint(e.Ctx)
+		for _, e := range h.Data {
+			since := "-"
+			if t, err := time.Parse(time.RFC3339, e.Since); err == nil {
+				since = age(time.Since(t))
+			}
+			ctx := "-"
+			if e.Ctx > 0 {
+				ctx = fmt.Sprint(e.Ctx)
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\t%d\t%s\t%s\t%s\n", h.Host, e.Name, e.Kind, e.State, e.PID, ctx, e.Slots, since, lastRun(e), e.Device)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%d\t%s\t%s\t%s\n", e.Name, e.Kind, e.State, e.PID, ctx, e.Slots, since, lastRun(e), e.Device)
 	}
 	tw.Flush()
-	for _, e := range out.Data {
-		if e.Reason != "" {
-			fmt.Printf("%s: %s: %s\n", e.Name, e.State, e.Reason)
+	for _, h := range all {
+		if h.Error != "" {
+			fmt.Printf("%s: %s\n", h.Host, h.Error)
+		}
+		for _, e := range h.Data {
+			if e.Reason != "" {
+				fmt.Printf("%s/%s: %s: %s\n", h.Host, e.Name, e.State, e.Reason)
+			}
 		}
 	}
 }
