@@ -278,9 +278,44 @@ func localServices(file, self string) hostServices {
 // remoteCommand runs that machine's mux for its own services (its ~/.local/bin/mux, else the one on its PATH).
 const remoteCommand = `m="$HOME/.local/bin/mux"; [ -x "$m" ] || m=mux; exec "$m" ps -local -json`
 
-// remoteServices asks another machine over ssh; ssh's own failure (exit 255) is "unreachable".
+// probeTimeout bounds the first look at a machine: a LAN answers in under a millisecond, while a machine that is
+// off answers "no route to host" only when the kernel's ARP gives up, about 3 s later.
+const probeTimeout = 250 * time.Millisecond
+
+// sshTarget is where ssh would connect for an ssh name (its config's hostname and port, from `ssh -G`).
+func sshTarget(host string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	b, err := exec.CommandContext(ctx, "ssh", "-G", host).Output()
+	if err != nil {
+		return "", err
+	}
+	name, port := host, "22"
+	for _, l := range strings.Split(string(b), "\n") {
+		if k, v, ok := strings.Cut(l, " "); ok {
+			switch k {
+			case "hostname":
+				name = v
+			case "port":
+				port = v
+			}
+		}
+	}
+	return net.JoinHostPort(name, port), nil
+}
+
+// remoteServices asks another machine over ssh, once its ssh port answers within probeTimeout; ssh's own failure
+// (exit 255) is "unreachable" too.
 func remoteServices(host string) hostServices {
 	out := hostServices{Host: host}
+	if addr, err := sshTarget(host); err == nil {
+		c, err := net.DialTimeout("tcp", addr, probeTimeout)
+		if err != nil {
+			out.Error = "unreachable: " + err.Error()
+			return out
+		}
+		c.Close()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", host, remoteCommand)
