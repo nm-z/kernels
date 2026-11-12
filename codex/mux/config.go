@@ -345,6 +345,33 @@ func ReadListen(path string) (string, error) {
 	return raw.Listen, nil
 }
 
+// ReadFleet reads only `fleet:` of a host file: the ssh names of every machine running a mux (this one among them),
+// which `mux ps` lists together. None means this machine alone.
+func ReadFleet(path string) ([]string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var raw struct {
+		Fleet []string `yaml:"fleet"`
+	}
+	if err := yaml.Unmarshal(b, &raw); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, h := range raw.Fleet {
+		if h = strings.TrimSpace(h); h == "" || strings.HasPrefix(h, "-") || strings.ContainsAny(h, " \t\n") {
+			return nil, fmt.Errorf("%s: fleet: %q is not a host name", path, h)
+		}
+		if !seen[h] {
+			seen[h] = true
+			out = append(out, h)
+		}
+	}
+	return out, nil
+}
+
 // Label is the name web chat shows for the service: display, else the service name.
 func (c *ServiceConfig) Label() string {
 	if c.Display != "" {
