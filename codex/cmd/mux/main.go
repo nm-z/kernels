@@ -30,21 +30,29 @@ import (
 	"github.com/nm-z/kernels/codex/mux"
 )
 
+// file is the host file this run uses: -f, else ~/.config/mux/mux.yaml.
+var file = func() string {
+	home, _ := os.UserHomeDir()
+	return home + "/.config/mux/mux.yaml"
+}()
+
 func usage() {
 	fmt.Fprint(os.Stderr, `usage: mux serve [-f FILE]
        mux ps [-local] [-json] [-f FILE]
        mux events [-since TS] [-f FILE]
        mux up NAME | down NAME [-f FILE]
 
-FILE defaults to ~/.config/mux/mux.yaml; the CLI uses MUX_URL (http://host:port) when set.
-ps lists every machine in FILE's fleet: (ssh names), HOST first; -local lists this machine alone.
 `)
+	fmt.Fprintln(os.Stderr, "file:", file)
+	if u := os.Getenv("MUX_URL"); u != "" {
+		fmt.Fprintln(os.Stderr, "MUX_URL:", u)
+	}
 	os.Exit(2)
 }
 
 func main() {
 	args := os.Args[1:]
-	file, since := "", ""
+	since := ""
 	local, asJSON := false, false
 	var rest []string
 	for i := 0; i < len(args); i++ {
@@ -78,10 +86,6 @@ func main() {
 	}
 	if len(rest) == 0 {
 		usage()
-	}
-	if file == "" {
-		home, _ := os.UserHomeDir()
-		file = home + "/.config/mux/mux.yaml"
 	}
 	switch rest[0] {
 	case "serve":
@@ -358,72 +362,59 @@ func firstNonEmpty(a, b string) string {
 	return b
 }
 
-// printServices is the table, HOST first; a machine without services is a row saying why, its reason below.
+// printServices is the table of every service, HOST first. A machine that answered with no services (unreachable,
+// no mux) has no row: the table lists AI services only.
 func printServices(all []hostServices) {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "HOST\tNAME\tKIND\tSTATE\tPID\tCTX\tSLOTS\tFOR\tLAST RUN / PROGRESS\tDEVICE")
+	fmt.Fprintln(tw, "HOST\tNAME\tKIND\tSTATE\tPID\tCTX\tSLOTS\tFOR\tDEVICE")
 	for _, h := range all {
-		if h.Error != "" {
-			state, _, _ := strings.Cut(h.Error, ":")
-			fmt.Fprintf(tw, "%s\t-\t-\t%s\t-\t-\t-\t-\t-\t-\n", h.Host, state)
-			continue
-		}
 		for _, e := range h.Data {
 			since := "-"
 			if t, err := time.Parse(time.RFC3339, e.Since); err == nil {
 				since = age(time.Since(t))
 			}
-			ctx := "-"
-			if e.Ctx > 0 {
-				ctx = fmt.Sprint(e.Ctx)
-			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\t%d\t%s\t%s\t%s\n", h.Host, e.Name, e.Kind, e.State, e.PID, ctx, e.Slots, since, lastRun(e), e.Device)
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\t%d\t%s\t%s\n", h.Host, e.Name, e.Kind, shownState(e.State), e.PID,
+				humanCtx(e.Ctx), e.Slots, since, deviceOn(h.Host, e.Device))
 		}
 	}
 	tw.Flush()
 	for _, h := range all {
-		if h.Error != "" {
-			fmt.Printf("%s: %s\n", h.Host, h.Error)
-		}
 		for _, e := range h.Data {
 			if e.Reason != "" {
-				fmt.Printf("%s/%s: %s: %s\n", h.Host, e.Name, e.State, e.Reason)
+				fmt.Printf("%s/%s: %s\n", h.Host, e.Name, e.Reason)
 			}
 		}
 	}
 }
 
-// lastRun is the one-cell summary of what a service last did, by kind.
-func lastRun(e mux.ServiceInfo) string {
-	if p := e.Progress; p != nil && e.Kind == mux.KindJob {
-		s := fmt.Sprintf("%.0f%%", p.Pct)
-		if p.Title != "" {
-			s += " " + p.Title
-		}
-		if p.Detail != "" {
-			s += " (" + p.Detail + ")"
-		}
+// shownState is up, busy or down: a service that is starting, failed or done serves nothing, so it is down.
+func shownState(s string) string {
+	switch s {
+	case mux.StateUp, mux.StateBusy:
 		return s
 	}
-	l := e.Last
-	if l == nil {
+	return mux.StateDown
+}
+
+// humanCtx is a context length with its trailing zeros as k: 131072 and 128000 are 128k, 4096 is 4k.
+func humanCtx(n int) string {
+	switch {
+	case n <= 0:
 		return "-"
+	case n%1000 == 0: // (before 1024: 128000 is also 125 times 1024)
+		return fmt.Sprintf("%dk", n/1000)
+	case n%1024 == 0:
+		return fmt.Sprintf("%dk", n/1024)
 	}
-	f := func(label string, v *float64) string {
-		if v == nil {
-			return ""
-		}
-		return fmt.Sprintf("%s %.1f ", label, *v)
+	return fmt.Sprint(n)
+}
+
+// deviceOn is the device without its machine's name (HOST shows it): "archy 2x Tesla M60" on archy is "2x Tesla M60".
+func deviceOn(host, device string) string {
+	if d, ok := strings.CutPrefix(device, host+" "); ok {
+		return d
 	}
-	switch e.Kind {
-	case mux.KindEngine:
-		return strings.TrimSpace(f("prefill", l.PrefillTPS) + "tok/s " + f("decode", l.DecodeTPS) + "tok/s " + f("idle", l.IdlePct) + "%")
-	case mux.KindShim:
-		return strings.TrimSpace(f("ttft", l.TTFTMS) + "ms " + strings.Join(l.Route, ","))
-	case mux.KindEmbed:
-		return fmt.Sprintf("%d texts", l.Texts)
-	}
-	return "-"
+	return device
 }
 
 func age(d time.Duration) string {
