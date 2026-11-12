@@ -118,7 +118,9 @@ sends no periodic keep-alive for capacity.
 
 mux → shim: `run` with `id`, `messages` (chat form, system first), `tools`, `effort`, `images`, `model`
 (the one of the shim's `models` a request for `SERVICE/MODEL` named; null when the request named
-the service alone).
+the service alone), `metadata` (the string entries of the request's `client_metadata`, `{}` when it
+has none; Codex's `/reroute` sends the request again with `mux_reroute`, the `PROVIDER/MODEL` route
+the user moved it off, which an auto shim reports to its router as a failed attempt).
 
 ### embed: an embedding server
 

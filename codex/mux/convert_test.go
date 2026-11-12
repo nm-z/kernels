@@ -156,6 +156,12 @@ func TestConvertRefusals(t *testing.T) {
 	if _, err := prepare([]byte(`{"model":"m","input":"hi","tool_choice":"auto","parallel_tool_calls":true,"store":false,"include":["reasoning.encrypted_content"],"prompt_cache_key":"k","text":{"verbosity":"low"},"client_metadata":{"a":"b"},"service_tier":"priority","stream_options":{"include_obfuscation":false}}`), testEndpoint()); err != nil {
 		t.Errorf("transport fields refused: %v", err)
 	}
+	// client_metadata's string entries become a shim run's metadata
+	if pr, err := prepare([]byte(`{"model":"m","input":"hi","client_metadata":{"mux_reroute":"grok/fast","n":1}}`), testEndpoint()); err != nil {
+		t.Errorf("client_metadata refused: %v", err)
+	} else if len(pr.metadata) != 1 || pr.metadata["mux_reroute"] != "grok/fast" {
+		t.Errorf("metadata: %v", pr.metadata)
+	}
 	_, err := prepare([]byte(`{"model":"m","input":"hi","reasoning":{"effort":"max"}}`), testEndpoint())
 	if err == nil || err.Status != 400 || err.Code != "unsupported_reasoning_effort" || !strings.Contains(err.Message, "none, low, medium, high, xhigh") {
 		t.Errorf("effort: %+v", err)

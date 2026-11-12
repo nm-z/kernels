@@ -161,7 +161,11 @@ func (s *Server) executeShim(ctx context.Context, svc *Service, conn *svcConn, q
 	if q.pr.want != "" {
 		want = q.pr.want
 	}
-	if err := conn.send(map[string]any{"op": "run", "id": id, "messages": q.msgs, "tools": tools, "effort": effort, "model": want, "images": images}); err != nil {
+	metadata := q.pr.metadata
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
+	if err := conn.send(map[string]any{"op": "run", "id": id, "messages": q.msgs, "tools": tools, "effort": effort, "model": want, "images": images, "metadata": metadata}); err != nil {
 		res.err = &apiError{Status: http.StatusServiceUnavailable, Type: "server_error", Code: "service_unavailable", Message: fmt.Sprintf("model %s: cannot reach the shim: %v", svc.name, err)}
 		return res
 	}
