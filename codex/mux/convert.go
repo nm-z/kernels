@@ -66,8 +66,9 @@ type prepared struct {
 	model    string
 	stream   bool
 	effort   string
-	want     string    // a shim run: the model of the provider the request asked for (SERVICE/MODEL)
-	messages []chatMsg // system first (all system and developer text folded into it)
+	want     string            // a shim run: the model of the provider the request asked for (SERVICE/MODEL)
+	metadata map[string]string // the request's client_metadata (its string entries): a shim run's metadata
+	messages []chatMsg         // system first (all system and developer text folded into it)
 	tools    []any
 	toolInfo map[string]*toolInfo
 	images   []imageData
@@ -147,6 +148,23 @@ func prepare(body []byte, sc *ServiceConfig) (*prepared, *apiError) {
 			p.effort = *r.Effort
 			if aerr := checkEffort(sc, p.effort, "reasoning.effort"); aerr != nil {
 				return nil, aerr
+			}
+		}
+	}
+
+	// client_metadata goes to a shim as the run's metadata, e.g. the route a request sent again
+	// was moved off (Codex /reroute: mux_reroute). Entries that are not strings are not passed.
+	if v, ok := top["client_metadata"]; ok && !isNull(v) {
+		var entries map[string]json.RawMessage
+		if json.Unmarshal(v, &entries) == nil {
+			for key, raw := range entries {
+				var s string
+				if json.Unmarshal(raw, &s) == nil {
+					if p.metadata == nil {
+						p.metadata = map[string]string{}
+					}
+					p.metadata[key] = s
+				}
 			}
 		}
 	}
